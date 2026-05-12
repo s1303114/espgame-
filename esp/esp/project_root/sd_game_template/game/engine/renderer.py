@@ -132,6 +132,7 @@ def _draw_floor_layer(camera_x):
     row_mask = bytearray(row_mask_bytes)
     run_buf = bytearray(row_px * 2)
     floor_src_x = int(camera_x * float(getattr(config, "FLOOR_SCROLL_FACTOR", 1.0)))
+    floor_src_x += int(getattr(config, "FLOOR_SCROLL_X_OFFSET", 0))
     floor_row_mask_bytes = (fw + 7) // 8
 
     y = draw_y0

@@ -110,6 +110,11 @@ FLOOR_LAYER_W = 960
 FLOOR_LAYER_H = 240
 FLOOR_SCROLL_FACTOR = 1.0
 FLOOR_LAYER_SCREEN_Y = SCREEN_H - FLOOR_LAYER_H
+# Horizontal start offset for floor source sampling.
+# Positive value shifts initial view rightward (useful when key landmarks are mid-map).
+FLOOR_SCROLL_X_OFFSET = 0
+# Enable C masked compose path (rollback to previous verified scrolling behavior).
+FLOOR_USE_C_COMPOSE = True
 
 # Phase 5 acceptance mode:
 # - "TEST": deterministic scripted validation

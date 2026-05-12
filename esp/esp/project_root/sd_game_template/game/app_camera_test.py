@@ -186,13 +186,16 @@ def _compose_floor_layer_rows(
     floor_h,
     floor_screen_y,
     floor_scroll_factor,
+    floor_scroll_x_offset,
+    floor_runs_by_row,
+    floor_rgb_data,
 ):
-    if floor_rgb_fp is None or floor_mask_fp is None:
+    if floor_runs_by_row is None:
         return
-    floor_src_x = int(camera_x * float(floor_scroll_factor))
-    floor_row_mask_bytes = (floor_w + 7) // 8
+    if floor_rgb_data is None and floor_rgb_fp is None:
+        return
+    floor_src_x = int(camera_x * float(floor_scroll_factor)) + int(floor_scroll_x_offset)
     row_rgb = bytearray(scene_w * 2)
-    row_mask = bytearray(((scene_w + 7) // 8) + 2)
     row = 0
     while row < scene_h:
         screen_y = band_top + row
@@ -211,32 +214,194 @@ def _compose_floor_layer_rows(
         visible_w = read_x1 - read_x0
         dst_x0 = read_x0 - src_x0
         rgb_off = ((src_y * floor_w) + read_x0) * 2
-        mask_off = (src_y * floor_row_mask_bytes) + (read_x0 // 8)
-        bit_start = read_x0 & 7
-        need_mask_bytes = (bit_start + visible_w + 7) // 8
+        if floor_rgb_data is not None:
+            rgb_b0 = rgb_off
+            rgb_b1 = rgb_b0 + (visible_w * 2)
+            row_rgb[: visible_w * 2] = floor_rgb_data[rgb_b0:rgb_b1]
+        else:
+            floor_rgb_fp.seek(rgb_off)
+            n1 = floor_rgb_fp.readinto(memoryview(row_rgb)[: visible_w * 2])
+            if n1 != (visible_w * 2):
+                row += 1
+                continue
 
-        floor_rgb_fp.seek(rgb_off)
-        n1 = floor_rgb_fp.readinto(memoryview(row_rgb)[: visible_w * 2])
-        if n1 != (visible_w * 2):
-            row += 1
-            continue
-        floor_mask_fp.seek(mask_off)
-        n2 = floor_mask_fp.readinto(memoryview(row_mask)[:need_mask_bytes])
-        if n2 != need_mask_bytes:
+        runs = floor_runs_by_row[src_y]
+        if not runs:
             row += 1
             continue
 
         i = 0
-        while i < visible_w:
-            mi = (bit_start + i) >> 3
-            mb = 7 - ((bit_start + i) & 7)
-            if ((row_mask[mi] >> mb) & 1) != 0:
-                src_off = i * 2
-                dst_off = ((row * scene_w) + (dst_x0 + i)) * 2
-                scene_buf[dst_off] = row_rgb[src_off]
-                scene_buf[dst_off + 1] = row_rgb[src_off + 1]
+        while i < len(runs):
+            run = runs[i]
+            rx0 = run[0]
+            rx1 = run[1]
+            if rx1 <= read_x0:
+                i += 1
+                continue
+            if rx0 >= read_x1:
+                break
+            ix0 = read_x0 if rx0 < read_x0 else rx0
+            ix1 = read_x1 if rx1 > read_x1 else rx1
+            if ix1 > ix0:
+                src_b0 = (ix0 - read_x0) * 2
+                src_b1 = (ix1 - read_x0) * 2
+                dst_b0 = ((row * scene_w) + (dst_x0 + (ix0 - read_x0))) * 2
+                scene_buf[dst_b0 : dst_b0 + (src_b1 - src_b0)] = row_rgb[src_b0:src_b1]
             i += 1
         row += 1
+
+
+def _compose_floor_layer_strip_rows(
+    scene_buf,
+    scene_w,
+    scene_h,
+    band_top,
+    strip_x,
+    strip_w,
+    camera_x,
+    floor_rgb_fp,
+    floor_w,
+    floor_h,
+    floor_screen_y,
+    floor_scroll_factor,
+    floor_scroll_x_offset,
+    floor_runs_by_row,
+    far_bg_buf,
+    floor_rgb_data,
+):
+    if strip_w <= 0:
+        return
+    floor_src_x = int(camera_x * float(floor_scroll_factor)) + int(floor_scroll_x_offset)
+    row_rgb = bytearray(strip_w * 2)
+    row = 0
+    row_bytes = scene_w * 2
+    strip_bytes = strip_w * 2
+    while row < scene_h:
+        # Restore far background for this strip first.
+        dst_b0 = row * row_bytes + (strip_x * 2)
+        dst_b1 = dst_b0 + strip_bytes
+        scene_buf[dst_b0:dst_b1] = far_bg_buf[dst_b0:dst_b1]
+
+        screen_y = band_top + row
+        src_y = screen_y - floor_screen_y
+        if src_y < 0 or src_y >= floor_h:
+            row += 1
+            continue
+        runs = floor_runs_by_row[src_y]
+        if not runs:
+            row += 1
+            continue
+
+        src_x0 = strip_x + floor_src_x
+        src_x1 = src_x0 + strip_w
+        read_x0 = src_x0 if src_x0 > 0 else 0
+        read_x1 = src_x1 if src_x1 < floor_w else floor_w
+        if read_x1 <= read_x0:
+            row += 1
+            continue
+
+        visible_w = read_x1 - read_x0
+        rgb_off = ((src_y * floor_w) + read_x0) * 2
+        if floor_rgb_data is not None:
+            rgb_b0 = rgb_off
+            rgb_b1 = rgb_b0 + (visible_w * 2)
+            row_rgb[: visible_w * 2] = floor_rgb_data[rgb_b0:rgb_b1]
+        else:
+            floor_rgb_fp.seek(rgb_off)
+            n1 = floor_rgb_fp.readinto(memoryview(row_rgb)[: visible_w * 2])
+            if n1 != (visible_w * 2):
+                row += 1
+                continue
+
+        i = 0
+        while i < len(runs):
+            rx0 = runs[i][0]
+            rx1 = runs[i][1]
+            if rx1 <= read_x0:
+                i += 1
+                continue
+            if rx0 >= read_x1:
+                break
+            ix0 = read_x0 if rx0 < read_x0 else rx0
+            ix1 = read_x1 if rx1 > read_x1 else rx1
+            if ix1 > ix0:
+                src_b0 = (ix0 - read_x0) * 2
+                src_b1 = (ix1 - read_x0) * 2
+                # Convert floor source x back to screen strip x.
+                sx0 = strip_x + (ix0 - src_x0)
+                dst_b0 = ((row * scene_w) + sx0) * 2
+                scene_buf[dst_b0 : dst_b0 + (src_b1 - src_b0)] = row_rgb[src_b0:src_b1]
+            i += 1
+        row += 1
+
+
+def _build_floor_runs_by_row(mask_fp, floor_w, floor_h):
+    row_bytes = (floor_w + 7) // 8
+    row_mask = bytearray(row_bytes)
+    out = []
+    y = 0
+    while y < floor_h:
+        mask_fp.seek(y * row_bytes)
+        n = mask_fp.readinto(row_mask)
+        if n != row_bytes:
+            out.append(())
+            y += 1
+            continue
+        runs = []
+        x = 0
+        while x < floor_w:
+            bi = x >> 3
+            bb = 7 - (x & 7)
+            if ((row_mask[bi] >> bb) & 1) == 0:
+                x += 1
+                continue
+            x0 = x
+            x += 1
+            while x < floor_w:
+                bi = x >> 3
+                bb = 7 - (x & 7)
+                if ((row_mask[bi] >> bb) & 1) == 0:
+                    break
+                x += 1
+            runs.append((x0, x))
+        out.append(tuple(runs))
+        y += 1
+    return tuple(out)
+
+
+def _blit_scene_rect565_rows(scene_buf, scene_w, scene_h, band_top, rx, ry, rw, rh, tmp_buf):
+    if rw <= 0 or rh <= 0:
+        return tmp_buf, 0
+    if rx < 0:
+        rw += rx
+        rx = 0
+    if ry < 0:
+        rh += ry
+        ry = 0
+    if rx + rw > scene_w:
+        rw = scene_w - rx
+    if ry + rh > scene_h:
+        rh = scene_h - ry
+    if rw <= 0 or rh <= 0:
+        return tmp_buf, 0
+
+    need = rw * rh * 2
+    if tmp_buf is None or len(tmp_buf) < need:
+        tmp_buf = bytearray(need)
+
+    row_bytes = scene_w * 2
+    copy_row_bytes = rw * 2
+    dst_off = 0
+    r = 0
+    while r < rh:
+        src_b0 = ((ry + r) * row_bytes) + (rx * 2)
+        src_b1 = src_b0 + copy_row_bytes
+        tmp_buf[dst_off : dst_off + copy_row_bytes] = scene_buf[src_b0:src_b1]
+        dst_off += copy_row_bytes
+        r += 1
+
+    _lgfx.blit_rect565_rows(rx, band_top + ry, rw, rh, memoryview(tmp_buf)[:need])
+    return tmp_buf, 1
 
 
 def _blend_sprite32_mask1_into_scene(
@@ -2053,21 +2218,119 @@ def run(max_frames=None):
             floor_layer_enabled = bool(getattr(config, "FLOOR_LAYER_ENABLED", False))
             floor_rgb_fp = None
             floor_mask_fp = None
+            floor_rgb_data = None
+            floor_mask_data = None
             floor_w = int(getattr(config, "FLOOR_LAYER_W", 0))
             floor_h = int(getattr(config, "FLOOR_LAYER_H", 0))
             floor_screen_y = int(getattr(config, "FLOOR_LAYER_SCREEN_Y", sh - floor_h))
             floor_scroll_factor = float(getattr(config, "FLOOR_SCROLL_FACTOR", 1.0))
+            floor_scroll_x_offset = int(getattr(config, "FLOOR_SCROLL_X_OFFSET", 0))
+            floor_runs_by_row = None
+            floor_use_c_compose = False
             if floor_layer_enabled and floor_w > 0 and floor_h > 0:
                 try:
                     floor_rgb_path = _resolve_asset_path(getattr(config, "FLOOR_LAYER_RGB565_PATH", ""))
                     floor_mask_path = _resolve_asset_path(getattr(config, "FLOOR_LAYER_MASK_PATH", ""))
                     floor_rgb_fp = open(floor_rgb_path, "rb")
                     floor_mask_fp = open(floor_mask_path, "rb")
+                    floor_runs_by_row = _build_floor_runs_by_row(floor_mask_fp, floor_w, floor_h)
+                    try:
+                        floor_mask_fp.seek(0)
+                        floor_mask_data = floor_mask_fp.read()
+                    except Exception:
+                        floor_mask_data = None
+                    # Try RAM-caching floor RGB to avoid per-frame file seek/read when camera scrolls.
+                    try:
+                        if gc is not None:
+                            gc.collect()
+                        floor_rgb_data = floor_rgb_fp.read()
+                        if floor_rgb_data is None or len(floor_rgb_data) != (floor_w * floor_h * 2):
+                            floor_rgb_data = None
+                            print("FLOOR_LAYER_RGB_CACHE_SKIP")
+                        else:
+                            print("FLOOR_LAYER_RGB_CACHE_READY")
+                            try:
+                                floor_rgb_fp.close()
+                            except Exception:
+                                pass
+                            floor_rgb_fp = None
+                    except Exception:
+                        floor_rgb_data = None
+                        print("FLOOR_LAYER_RGB_CACHE_FAIL")
+                    if (
+                        floor_rgb_data is not None
+                        and floor_mask_data is not None
+                        and bool(getattr(config, "FLOOR_USE_C_COMPOSE", False))
+                        and hasattr(_lgfx, "compose_masked_rgb565")
+                    ):
+                        floor_use_c_compose = True
+                        print("FLOOR_LAYER_COMPOSE_C_READY")
                     print("FLOOR_LAYER_READY")
                 except Exception:
                     floor_rgb_fp = None
                     floor_mask_fp = None
+                    floor_rgb_data = None
+                    floor_mask_data = None
+                    floor_runs_by_row = None
+                    floor_use_c_compose = False
                     print("FLOOR_LAYER_DISABLED_OPEN_FAIL")
+            if floor_runs_by_row is not None and (floor_rgb_data is not None or floor_rgb_fp is not None):
+                # Ensure the full map layer is visible (not only lower compose band).
+                band_top = 0
+                far_band_h = sh - band_top
+                scene_h = sh - band_top
+                if gc is not None:
+                    gc.collect()
+                try:
+                    scene_buf = bytearray(sw * scene_h * 2)
+                except Exception:
+                    print("FLOOR_LAYER_FULL_SCENE_ALLOC_FAIL")
+                    raise RuntimeError("FLOOR_LAYER_FULL_SCENE_ALLOC_FAIL")
+                # Prefer RAM-cached far band to avoid per-frame file streaming.
+                try:
+                    far_band_buf = bytearray(sw * far_band_h * 2)
+                    with open(far_raw, "rb") as far_bg:
+                        row = 0
+                        while row < far_band_h:
+                            src_off = ((band_top + row) * sw) * 2
+                            far_bg.seek(src_off)
+                            row_off = row * sw * 2
+                            row_view = memoryview(far_band_buf)[row_off : row_off + (sw * 2)]
+                            n = far_bg.readinto(row_view)
+                            if n != (sw * 2):
+                                print("CAMERA_TEST_STEP=%d_FAIL_READ" % step_tag)
+                                raise RuntimeError("CAMERA_TEST_STEP%d_FAIL_READ" % step_tag)
+                            row += 1
+                    far_len = len(far_band_buf)
+                    if far_runtime_file is not None:
+                        try:
+                            far_runtime_file.close()
+                        except Exception:
+                            pass
+                        far_runtime_file = None
+                except Exception:
+                    # Fallback to runtime streaming only when allocation truly fails.
+                    far_band_buf = None
+                    far_len = 0
+                    if use_sprite_player:
+                        if far_runtime_file is not None:
+                            try:
+                                far_runtime_file.close()
+                            except Exception:
+                                pass
+                        far_runtime_file = open(far_raw, "rb")
+            floor_bg_cache = None
+            floor_bg_cached_camera_x = -2147483648
+            floor_bg_cache_ready = False
+            partial_submit_tmp = None
+            if floor_use_c_compose:
+                floor_bg_cache = None
+            elif floor_runs_by_row is not None and (floor_rgb_fp is not None or floor_rgb_data is not None):
+                try:
+                    floor_bg_cache = bytearray(sw * scene_h * 2)
+                except Exception:
+                    floor_bg_cache = None
+            dirty_log_countdown = 0
             if dirty_rect_experiment:
                 print("DIRTY_RECT_EXPERIMENT_ON")
 
@@ -2124,39 +2387,176 @@ def run(max_frames=None):
 
                 # Compose dynamic band: far upper area + camera-phased ground + player.
                 seg_t0 = ticks_us()
-                if use_sprite_player:
-                    row = 0
-                    while row < far_band_h:
-                        src_off = ((band_top + row) * sw) * 2
-                        far_runtime_file.seek(src_off)
-                        dst_off = row * row_bytes
-                        row_view = memoryview(scene_buf)[dst_off : dst_off + row_bytes]
-                        n = far_runtime_file.readinto(row_view)
-                        if n != row_bytes:
-                            print("CAMERA_TEST_STEP=%d_FAIL_READ" % step_tag)
-                            raise RuntimeError("CAMERA_TEST_STEP%d_FAIL_READ" % step_tag)
-                        row += 1
+                camera_dx = camera_x - floor_bg_cached_camera_x
+                camera_move_strip = None
+                if floor_use_c_compose:
+                    if far_band_buf is not None:
+                        scene_buf[:far_len] = far_band_buf
+                    else:
+                        row = 0
+                        while row < far_band_h:
+                            src_off = ((band_top + row) * sw) * 2
+                            far_runtime_file.seek(src_off)
+                            dst_off = row * row_bytes
+                            row_view = memoryview(scene_buf)[dst_off : dst_off + row_bytes]
+                            n = far_runtime_file.readinto(row_view)
+                            if n != row_bytes:
+                                print("CAMERA_TEST_STEP=%d_FAIL_READ" % step_tag)
+                                raise RuntimeError("CAMERA_TEST_STEP%d_FAIL_READ" % step_tag)
+                            row += 1
+                    floor_src_x = int(camera_x * floor_scroll_factor) + int(floor_scroll_x_offset)
+                    prev_floor_x = floor_bg_cached_camera_x
+                    try:
+                        _lgfx.compose_masked_rgb565(
+                            scene_buf,
+                            sw,
+                            scene_h,
+                            -floor_src_x,
+                            floor_screen_y - band_top,
+                            floor_rgb_data,
+                            floor_mask_data,
+                            floor_w,
+                            floor_h,
+                        )
+                        prev_floor_x = floor_bg_cached_camera_x
+                        floor_bg_cached_camera_x = camera_x
+                    except Exception:
+                        floor_use_c_compose = False
+                        print("FLOOR_LAYER_COMPOSE_C_FAIL")
+                    dx_submit = camera_x - prev_floor_x
+                    if drew_once and dx_submit != 0 and abs(dx_submit) < sw:
+                        strip_w = dx_submit if dx_submit > 0 else -dx_submit
+                        if dx_submit > 0:
+                            camera_move_strip = (sw - strip_w, strip_w, 0, scene_h)
+                        else:
+                            camera_move_strip = (0, strip_w, 0, scene_h)
+                elif floor_bg_cache is not None and floor_bg_cache_ready:
+                    dx = camera_dx
+                    if dx == 0:
+                        scene_buf[:] = floor_bg_cache
+                    elif abs(dx) < sw and far_band_buf is not None:
+                        shift_px = dx if dx > 0 else -dx
+                        shift_bytes = shift_px * 2
+                        row_bytes_local = sw * 2
+                        row_idx = 0
+                        if dx > 0:
+                            while row_idx < scene_h:
+                                b0 = row_idx * row_bytes_local
+                                floor_bg_cache[b0 : b0 + (row_bytes_local - shift_bytes)] = floor_bg_cache[
+                                    b0 + shift_bytes : b0 + row_bytes_local
+                                ]
+                                row_idx += 1
+                            _compose_floor_layer_strip_rows(
+                                floor_bg_cache,
+                                sw,
+                                scene_h,
+                                band_top,
+                                sw - shift_px,
+                                shift_px,
+                                camera_x,
+                                floor_rgb_fp,
+                                floor_w,
+                                floor_h,
+                                floor_screen_y,
+                                floor_scroll_factor,
+                                floor_scroll_x_offset,
+                                floor_runs_by_row,
+                                far_band_buf,
+                                floor_rgb_data,
+                            )
+                            camera_move_strip = (sw - shift_px, shift_px, 0, scene_h)
+                        else:
+                            while row_idx < scene_h:
+                                b0 = row_idx * row_bytes_local
+                                floor_bg_cache[b0 + shift_bytes : b0 + row_bytes_local] = floor_bg_cache[
+                                    b0 : b0 + (row_bytes_local - shift_bytes)
+                                ]
+                                row_idx += 1
+                            _compose_floor_layer_strip_rows(
+                                floor_bg_cache,
+                                sw,
+                                scene_h,
+                                band_top,
+                                0,
+                                shift_px,
+                                camera_x,
+                                floor_rgb_fp,
+                                floor_w,
+                                floor_h,
+                                floor_screen_y,
+                                floor_scroll_factor,
+                                floor_scroll_x_offset,
+                                floor_runs_by_row,
+                                far_band_buf,
+                                floor_rgb_data,
+                            )
+                            camera_move_strip = (0, shift_px, 0, scene_h)
+                        floor_bg_cached_camera_x = camera_x
+                        scene_buf[:] = floor_bg_cache
+                    else:
+                        # Rebuild cache in full when camera changes.
+                        # This is slower in theory than strip-delta, but more stable on MicroPython.
+                        scene_buf[:far_len] = far_band_buf
+                        _compose_floor_layer_rows(
+                            scene_buf,
+                            sw,
+                            scene_h,
+                            band_top,
+                            camera_x,
+                            floor_rgb_fp,
+                            floor_mask_fp,
+                            floor_w,
+                            floor_h,
+                            floor_screen_y,
+                            floor_scroll_factor,
+                            floor_scroll_x_offset,
+                            floor_runs_by_row,
+                            floor_rgb_data,
+                        )
+                        floor_bg_cache[:] = scene_buf
+                        floor_bg_cached_camera_x = camera_x
+                        scene_buf[:] = floor_bg_cache
                 else:
-                    scene_buf[:far_len] = far_band_buf
+                    if far_band_buf is not None:
+                        scene_buf[:far_len] = far_band_buf
+                    else:
+                        row = 0
+                        while row < far_band_h:
+                            src_off = ((band_top + row) * sw) * 2
+                            far_runtime_file.seek(src_off)
+                            dst_off = row * row_bytes
+                            row_view = memoryview(scene_buf)[dst_off : dst_off + row_bytes]
+                            n = far_runtime_file.readinto(row_view)
+                            if n != row_bytes:
+                                print("CAMERA_TEST_STEP=%d_FAIL_READ" % step_tag)
+                                raise RuntimeError("CAMERA_TEST_STEP%d_FAIL_READ" % step_tag)
+                            row += 1
+
+                    if (floor_rgb_data is not None or floor_rgb_fp is not None) and floor_runs_by_row is not None:
+                        _compose_floor_layer_rows(
+                            scene_buf,
+                            sw,
+                            scene_h,
+                            band_top,
+                            camera_x,
+                            floor_rgb_fp,
+                            floor_mask_fp,
+                            floor_w,
+                            floor_h,
+                            floor_screen_y,
+                            floor_scroll_factor,
+                            floor_scroll_x_offset,
+                            floor_runs_by_row,
+                            floor_rgb_data,
+                        )
+                    if floor_bg_cache is not None:
+                        floor_bg_cache[:] = scene_buf
+                        floor_bg_cached_camera_x = camera_x
+                        floor_bg_cache_ready = True
                 prof_bg_us += ticks_diff(ticks_us(), seg_t0)
 
-                if floor_rgb_fp is not None and floor_mask_fp is not None:
-                    _compose_floor_layer_rows(
-                        scene_buf,
-                        sw,
-                        scene_h,
-                        band_top,
-                        camera_x,
-                        floor_rgb_fp,
-                        floor_mask_fp,
-                        floor_w,
-                        floor_h,
-                        floor_screen_y,
-                        floor_scroll_factor,
-                    )
-
                 seg_t0 = ticks_us()
-                if floor_rgb_fp is None or floor_mask_fp is None:
+                if floor_runs_by_row is None or (floor_rgb_fp is None and floor_rgb_data is None):
                     phase_off = camera_x & 31
                     gx = 0
                     gi = 0
@@ -2255,6 +2655,7 @@ def run(max_frames=None):
                     and use_sprite_player
                     and sprite_draw_mode == "COMPOSE"
                     and (camera_static == 1 or not dirty_fallback_on_camera_move)
+                    and drew_once
                 )
 
                 if use_dirty_path:
@@ -2290,17 +2691,63 @@ def run(max_frames=None):
                             prof_submit_us += us
                         bi += 1
                     dirty_us_acc += ticks_diff(ticks_us(), dirty_t0)
-                    print("DIRTY_DRAW_OK")
+                    if dirty_log_countdown <= 0:
+                        print("DIRTY_DRAW_OK")
+                        dirty_log_countdown = 30
+                elif camera_move_strip is not None:
+                    # Camera scrolling still needs full-scene present; submit full rows-safe scene.
+                    submit_t0 = ticks_us()
+                    seg_h = int(getattr(config, "CAMERA_TEST_STRIP_H", 30))
+                    if seg_h < 1:
+                        seg_h = 1
+                    if seg_h > scene_h:
+                        seg_h = scene_h
+                    sy = 0
+                    while sy < scene_h:
+                        h = seg_h
+                        if sy + h > scene_h:
+                            h = scene_h - sy
+                        off = sy * row_bytes
+                        view = memoryview(scene_buf)[off : off + (h * row_bytes)]
+                        _lgfx.blit_rect565_rows(0, band_top + sy, sw, h, view)
+                        sy += h
+                    us = ticks_diff(ticks_us(), submit_t0)
+                    submit_acc += us
+                    prof_submit_us += us
+                    fallback_us_acc += us
+                    dirty_last_rects_count = 2
+                    dirty_last_bands_count = 1
+                    dirty_last_camera_static = 0
+                    if dirty_log_countdown <= 0:
+                        print("DIRTY_SCROLL_FULL_OK")
+                        dirty_log_countdown = 30
                 else:
-                    if dirty_rect_experiment and camera_static == 0:
+                    if dirty_rect_experiment and camera_static == 0 and dirty_log_countdown <= 0:
                         print("DIRTY_FALLBACK_CAMERA_MOVE")
+                        dirty_log_countdown = 30
                     fallback_t0 = ticks_us()
                     submit_t0 = ticks_us()
-                    _lgfx.blit_rect565_rows(0, band_top, sw, scene_h, scene_buf)
+                    # Keep rows-safe segmented submit to avoid diagonal tearing on full-frame updates.
+                    seg_h = int(getattr(config, "CAMERA_TEST_STRIP_H", 30))
+                    if seg_h < 1:
+                        seg_h = 1
+                    if seg_h > scene_h:
+                        seg_h = scene_h
+                    sy = 0
+                    while sy < scene_h:
+                        h = seg_h
+                        if sy + h > scene_h:
+                            h = scene_h - sy
+                        off = sy * row_bytes
+                        view = memoryview(scene_buf)[off : off + (h * row_bytes)]
+                        _lgfx.blit_rect565_rows(0, band_top + sy, sw, h, view)
+                        sy += h
                     us = ticks_diff(ticks_us(), submit_t0)
                     submit_acc += us
                     prof_submit_us += us
                     fallback_us_acc += ticks_diff(ticks_us(), fallback_t0)
+                if dirty_log_countdown > 0:
+                    dirty_log_countdown -= 1
 
                 prev_camera_x = camera_x
                 if use_sprite_player:
