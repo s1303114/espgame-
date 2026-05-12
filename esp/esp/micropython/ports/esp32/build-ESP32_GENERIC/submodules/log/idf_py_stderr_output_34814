@@ -1,0 +1,13 @@
+Command: cmake -G Ninja -DPYTHON_DEPS_CHECKED=1 -DPYTHON=/opt/esp/python_env/idf5.5_py3.12_env/bin/python -DESP_PLATFORM=1 -DMICROPY_BOARD=ESP32_GENERIC -DMICROPY_BOARD_DIR=/workspace/micropython/ports/esp32/boards/ESP32_GENERIC -DUPDATE_SUBMODULES=1 -DCCACHE_ENABLE=1 /workspace/micropython/ports/esp32
+CMake Error at /opt/esp/idf/tools/cmake/build.cmake:629 (message):
+  ERROR: File .component_hash or CHECKSUMS.json for component
+  "espressif/mdns" in the managed components directory does not exist or
+  cannot be parsed.  These files are used by the component manager for
+  component integrity checks.  If they exist in the component source, please
+  ask the component maintainer to remove them.
+
+Call Stack (most recent call first):
+  /opt/esp/idf/tools/cmake/project.cmake:740 (idf_build_process)
+  CMakeLists.txt:68 (project)
+
+

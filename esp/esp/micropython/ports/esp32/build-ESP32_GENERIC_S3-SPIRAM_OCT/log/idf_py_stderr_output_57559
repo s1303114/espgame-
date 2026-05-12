@@ -1,0 +1,4 @@
+Command: cmake -G Ninja -DPYTHON_DEPS_CHECKED=1 -DPYTHON=/opt/esp/python_env/idf5.5_py3.12_env/bin/python -DESP_PLATFORM=1 -DMICROPY_BOARD=ESP32_GENERIC_S3 -DMICROPY_BOARD_DIR=/workspace/esp/esp/micropython/ports/esp32/boards/ESP32_GENERIC_S3 -DUSER_C_MODULES=/workspace/esp/esp/micropython/user_cmodules -DMICROPY_BOARD_VARIANT=SPIRAM_OCT -DCCACHE_ENABLE=1 /workspace/esp/esp/micropython/ports/esp32
+Including User C Module(s) from /workspace/esp/esp/micropython/user_cmodules/micropython.cmake
+Found User C Module(s): usermod_lgfx
+Checking lockfile contents...

@@ -1,0 +1,11 @@
+Command: cmake -G Ninja -DPYTHON_DEPS_CHECKED=1 -DPYTHON=/opt/esp/python_env/idf5.5_py3.12_env/bin/python -DESP_PLATFORM=1 -DMICROPY_BOARD=ESP32_GENERIC -DMICROPY_BOARD_DIR=/workspace/micropython/ports/esp32/boards/ESP32_GENERIC -DUPDATE_SUBMODULES=1 -DCCACHE_ENABLE=1 /workspace/micropython/ports/esp32
+-- IDF_TARGET not set, using default target: esp32
+-- Found Git: /usr/bin/git (found version "2.43.0") 
+-- Minimal build - OFF
+-- ccache will be used for faster recompilation
+-- The C compiler identification is unknown
+-- The CXX compiler identification is unknown
+-- The ASM compiler identification is unknown
+-- Found assembler: xtensa-esp32-elf-gcc
+-- Warning: Did not find file Compiler/-ASM
+-- Configuring incomplete, errors occurred!

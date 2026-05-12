@@ -1,0 +1,13 @@
+buf len mismatch
+buf len mismatch
+invalid dims
+dst buf too small
+sprite buf too small
+mask buf too small
+buf len mismatch
+png file alloc failed
+buf len mismatch
+sprite alloc failed
+png file alloc failed
+raw test alloc failed
+raw test decode alloc failed

@@ -1,0 +1,5 @@
+unknown config param
+invalid handler
+invalid buffer length
+ESPNow.recvinto(): Invalid argument
+ESPNow.recv(): buffer error

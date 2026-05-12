@@ -1,0 +1,122 @@
+Command: ninja flash
+[1/259] Performing build step for 'bootloader'
+[1/1] cd /workspace/esp/esp/micropython/ports/esp32/build-ESP32_GENERIC_S3-SPIRAM_OCT_NOBT/bootloader/esp-idf/esptool_py && /opt/esp/python_env/idf5.5_py3.12_env/bin/python /opt/esp/idf/components/partition_table/check_sizes.py --offset 0x8000 bootloader 0x0 /workspace/esp/esp/micropython/ports/esp32/build-ESP32_GENERIC_S3-SPIRAM_OCT_NOBT/bootloader/bootloader.bin
+Bootloader binary size 0x4b20 bytes. 0x34e0 bytes (41%) free.
+[2/259] No install step for 'bootloader'
+[3/259] Completed 'bootloader'
+[4/259] cd /workspace/esp/esp/micropython/ports/esp32/build-ESP32_GENERIC_S3-SPIRAM_OCT_NOBT/esp-idf/main && /opt/esp/tools/cmake/3.30.2/bin/cmake -E make_directory /workspace/esp/esp/micropython/ports/esp32/build-ESP32_GENERIC_S3-SPIRAM_OCT_NOBT/genhdr && /opt/esp/python_env/idf5.5_py3.12_env/bin/python /workspace/esp/esp/micropython/py/makeversionhdr.py /workspace/esp/esp/micropython/ports/esp32/build-ESP32_GENERIC_S3-SPIRAM_OCT_NOBT/genhdr/mpversion.h
+makeversionhdr.py: Warning: No git repo or tag info available, falling back to mpconfig.h version info.
+[5/256] Generating ../../genhdr/root_pointers.split
+[6/256] Generating ../../genhdr/root_pointers.collected
+Root pointer registrations not updated
+[7/255] Generating ../../genhdr/qstr.split
+[8/255] Generating ../../genhdr/qstrdefs.collected.h
+QSTR not updated
+[9/253] cd /workspace/esp/esp/micropython/ports/esp32/build-ESP32_GENERIC_S3-SPIRAM_OCT_NOBT/esp-idf/main && /opt/esp/python_env/idf5.5_py3.12_env/bin/python /workspace/esp/esp/micropython/tools/makemanifest.py -o /workspace/esp/esp/micropython/ports/esp32/build-ESP32_GENERIC_S3-SPIRAM_OCT_NOBT/frozen_content.c -v BOARD_DIR=/workspace/esp/esp/micropython/ports/esp32/boards/ESP32_GENERIC_S3 -v MPY_DIR=/workspace/esp/esp/micropython -v MPY_LIB_DIR=/workspace/esp/esp/micropython/lib/micropython-lib -v PORT_DIR=/workspace/esp/esp/micropython/ports/esp32 -b /workspace/esp/esp/micropython/ports/esp32/build-ESP32_GENERIC_S3-SPIRAM_OCT_NOBT -f-march=xtensawin --mpy-tool-flags= /workspace/esp/esp/micropython/ports/esp32/boards/manifest.py
+[10/253] Generating ../../genhdr/moduledefs.split
+[11/253] Generating ../../genhdr/compressed.split
+[12/253] Generating ../../genhdr/moduledefs.collected
+Module registrations not updated
+[13/252] Generating ../../genhdr/compressed.collected
+Compressed data not updated
+[14/15] cd /workspace/esp/esp/micropython/ports/esp32/build-ESP32_GENERIC_S3-SPIRAM_OCT_NOBT/esp-idf/esptool_py && /opt/esp/python_env/idf5.5_py3.12_env/bin/python /opt/esp/idf/components/partition_table/check_sizes.py --offset 0x8000 partition --type app /workspace/esp/esp/micropython/ports/esp32/build-ESP32_GENERIC_S3-SPIRAM_OCT_NOBT/partition_table/partition-table.bin /workspace/esp/esp/micropython/ports/esp32/build-ESP32_GENERIC_S3-SPIRAM_OCT_NOBT/micropython.bin
+micropython.bin binary size 0x189b80 bytes. Smallest app partition is 0x1f0000 bytes. 0x66480 bytes (21%) free.
+[14/15] cd /opt/esp/idf/components/esptool_py && /opt/esp/tools/cmake/3.30.2/bin/cmake -D IDF_PATH=/opt/esp/idf -D "SERIAL_TOOL=/opt/esp/python_env/idf5.5_py3.12_env/bin/python;;/opt/esp/idf/components/esptool_py/esptool/esptool.py;--chip;esp32s3" -D "SERIAL_TOOL_ARGS=--before=default_reset;--after=hard_reset;write_flash;@flash_args" -D WORKING_DIRECTORY=/workspace/esp/esp/micropython/ports/esp32/build-ESP32_GENERIC_S3-SPIRAM_OCT_NOBT -P /opt/esp/idf/components/esptool_py/run_serial_tool.cmake
+esptool.py --chip esp32s3 -p /dev/ttyACM0 -b 460800 --before=default_reset --after=hard_reset write_flash --flash_mode dio --flash_freq 80m --flash_size 4MB 0x0 bootloader/bootloader.bin 0x10000 micropython.bin 0x8000 partition_table/partition-table.bin
+esptool.py v4.10.dev2
+Serial port /dev/ttyACM0
+Connecting....
+Chip is ESP32-S3 (QFN56) (revision v0.2)
+Features: WiFi, BLE, Embedded PSRAM 8MB (AP_3v3)
+Crystal is 40MHz
+MAC: 98:88:e0:13:73:9c
+Uploading stub...
+Running stub...
+Stub running...
+Changing baud rate to 460800
+Changed.
+Configuring flash size...
+Flash will be erased from 0x00000000 to 0x00004fff...
+Flash will be erased from 0x00010000 to 0x00199fff...
+Flash will be erased from 0x00008000 to 0x00008fff...
+SHA digest in image updated
+Compressed 19232 bytes to 12491...
+Writing at 0x00000000... (100 %)
+Wrote 19232 bytes (12491 compressed) at 0x00000000 in 0.6 seconds (effective 278.3 kbit/s)...
+Hash of data verified.
+Compressed 1612672 bytes to 1070893...
+Writing at 0x00010000... (1 %)
+Writing at 0x00019288... (3 %)
+Writing at 0x0002634d... (4 %)
+Writing at 0x0003178c... (6 %)
+Writing at 0x00038572... (7 %)
+Writing at 0x0003e70e... (9 %)
+Writing at 0x00046bfd... (10 %)
+Writing at 0x00051311... (12 %)
+Writing at 0x000590a9... (13 %)
+Writing at 0x00061236... (15 %)
+Writing at 0x000688f4... (16 %)
+Writing at 0x0006e130... (18 %)
+Writing at 0x00073502... (19 %)
+Writing at 0x00078915... (21 %)
+Writing at 0x0007db87... (22 %)
+Writing at 0x00083241... (24 %)
+Writing at 0x0008877f... (25 %)
+Writing at 0x0008d9d5... (27 %)
+Writing at 0x00092f14... (28 %)
+Writing at 0x00098100... (30 %)
+Writing at 0x0009d1db... (31 %)
+Writing at 0x000a1f80... (33 %)
+Writing at 0x000a71b3... (34 %)
+Writing at 0x000ac31b... (36 %)
+Writing at 0x000b220b... (37 %)
+Writing at 0x000b7d32... (39 %)
+Writing at 0x000bd02f... (40 %)
+Writing at 0x000c2103... (42 %)
+Writing at 0x000c72d4... (43 %)
+Writing at 0x000ccd5f... (45 %)
+Writing at 0x000d28aa... (46 %)
+Writing at 0x000d7c2b... (48 %)
+Writing at 0x000de5d9... (50 %)
+Writing at 0x000e4910... (51 %)
+Writing at 0x000ea395... (53 %)
+Writing at 0x000efcdd... (54 %)
+Writing at 0x000f572a... (56 %)
+Writing at 0x000fb4ec... (57 %)
+Writing at 0x001012ff... (59 %)
+Writing at 0x00106bf3... (60 %)
+Writing at 0x0010bc34... (62 %)
+Writing at 0x001112b1... (63 %)
+Writing at 0x001167a1... (65 %)
+Writing at 0x0011bc92... (66 %)
+Writing at 0x00121528... (68 %)
+Writing at 0x00126734... (69 %)
+Writing at 0x0012b803... (71 %)
+Writing at 0x00130dda... (72 %)
+Writing at 0x00136521... (74 %)
+Writing at 0x0013ba7a... (75 %)
+Writing at 0x0014118f... (77 %)
+Writing at 0x00146c95... (78 %)
+Writing at 0x0014cbe6... (80 %)
+Writing at 0x00151bc9... (81 %)
+Writing at 0x00156d35... (83 %)
+Writing at 0x0015c2d0... (84 %)
+Writing at 0x00161d71... (86 %)
+Writing at 0x0016799e... (87 %)
+Writing at 0x0016da8c... (89 %)
+Writing at 0x00173ac9... (90 %)
+Writing at 0x00178aa0... (92 %)
+Writing at 0x0017e68b... (93 %)
+Writing at 0x001856c1... (95 %)
+Writing at 0x0018b299... (96 %)
+Writing at 0x0019120a... (98 %)
+Writing at 0x0019741e... (100 %)
+Wrote 1612672 bytes (1070893 compressed) at 0x00010000 in 24.3 seconds (effective 530.3 kbit/s)...
+Hash of data verified.
+Compressed 3072 bytes to 105...
+Writing at 0x00008000... (100 %)
+Wrote 3072 bytes (105 compressed) at 0x00008000 in 0.1 seconds (effective 324.9 kbit/s)...
+Hash of data verified.
+
+Leaving...
+Hard resetting via RTS pin...

@@ -1,0 +1,11 @@
+{
+  "highest_stage": "stage01",
+  "player": {
+    "hp": 5,
+    "x": 32,
+    "y": 208
+  },
+  "settings": {
+    "debug": true
+  }
+}

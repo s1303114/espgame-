@@ -1,0 +1,7 @@
+# Explicitly disable Bluetooth/NimBLE for the NoBT variant.
+# This reduces build scope and qstr preprocessing load.
+# CONFIG_BT_ENABLED is not set
+# CONFIG_BT_CONTROLLER_ENABLED is not set
+# CONFIG_BT_NIMBLE_ENABLED is not set
+# CONFIG_BT_BLUEDROID_ENABLED is not set
+# CONFIG_NIMBLE_ENABLED is not set

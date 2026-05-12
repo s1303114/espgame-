@@ -1,0 +1,2 @@
+source /workspace/esp/esp/micropython/ports/esp32/build-ESP32_GENERIC/bootloader/gdbinit/symbols
+source /workspace/esp/esp/micropython/ports/esp32/build-ESP32_GENERIC/bootloader/gdbinit/connect
