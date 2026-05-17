@@ -580,6 +580,8 @@ def _compose_full_grid_320x240(buf):
 
 def _normalize_mode(v):
     m = str(v).upper()
+    if m == "MAP1_FULL_BULK":
+        return _MODE_ROWS_SAFE_PROGRESSIVE
     if m in (
         _MODE_COLOR,
         _MODE_PNG_SINGLE,
@@ -2632,95 +2634,17 @@ def run(max_frames=None):
                     and (camera_static == 1 or not dirty_fallback_on_camera_move)
                     and drew_once
                 )
-
-                if use_dirty_path:
-                    dirty_t0 = ticks_us()
-                    rects = []
-                    if dirty_prev_sprite_x is not None and dirty_prev_sprite_y is not None:
-                        c = _clip_rect_screen_xywh(dirty_prev_sprite_x, dirty_prev_sprite_y, sprite_w, sprite_h, sw, sh)
-                        if c is not None:
-                            rects.append((c[0], c[1], c[2], c[3], "player_old_rect"))
-                    c = _clip_rect_screen_xywh(sprite_x, sprite_y, sprite_w, sprite_h, sw, sh)
-                    if c is not None:
-                        rects.append((c[0], c[1], c[2], c[3], "player_new_rect"))
-                    dirty_last_rects_count = len(rects)
-                    bands = _merge_rects_to_vertical_bands(rects)
-                    dirty_last_bands_count = len(bands)
-                    bi = 0
-                    while bi < len(bands):
-                        by0, by1 = bands[bi]
-                        ry0 = by0 - band_top
-                        ry1 = by1 - band_top
-                        if ry0 < 0:
-                            ry0 = 0
-                        if ry1 > scene_h:
-                            ry1 = scene_h
-                        if ry1 > ry0:
-                            submit_t0 = ticks_us()
-                            off = ry0 * row_bytes
-                            h = ry1 - ry0
-                            view = memoryview(scene_buf)[off : off + (h * row_bytes)]
-                            _lgfx.blit_rect565_rows(0, band_top + ry0, sw, h, view)
-                            us = ticks_diff(ticks_us(), submit_t0)
-                            submit_acc += us
-                            prof_submit_us += us
-                        bi += 1
-                    dirty_us_acc += ticks_diff(ticks_us(), dirty_t0)
-                    if dirty_log_countdown <= 0:
-                        print("DIRTY_DRAW_OK")
-                        dirty_log_countdown = 30
-                elif camera_move_strip is not None:
-                    # Camera scrolling still needs full-scene present; submit full rows-safe scene.
-                    submit_t0 = ticks_us()
-                    seg_h = int(getattr(config, "CAMERA_TEST_STRIP_H", 30))
-                    if seg_h < 1:
-                        seg_h = 1
-                    if seg_h > scene_h:
-                        seg_h = scene_h
-                    sy = 0
-                    while sy < scene_h:
-                        h = seg_h
-                        if sy + h > scene_h:
-                            h = scene_h - sy
-                        off = sy * row_bytes
-                        view = memoryview(scene_buf)[off : off + (h * row_bytes)]
-                        _lgfx.blit_rect565_rows(0, band_top + sy, sw, h, view)
-                        sy += h
-                    us = ticks_diff(ticks_us(), submit_t0)
-                    submit_acc += us
-                    prof_submit_us += us
-                    fallback_us_acc += us
-                    dirty_last_rects_count = 2
-                    dirty_last_bands_count = 1
-                    dirty_last_camera_static = 0
-                    if dirty_log_countdown <= 0:
-                        print("DIRTY_SCROLL_FULL_OK")
-                        dirty_log_countdown = 30
-                else:
-                    if dirty_rect_experiment and camera_static == 0 and dirty_log_countdown <= 0:
-                        print("DIRTY_FALLBACK_CAMERA_MOVE")
-                        dirty_log_countdown = 30
-                    fallback_t0 = ticks_us()
-                    submit_t0 = ticks_us()
-                    # Keep rows-safe segmented submit to avoid diagonal tearing on full-frame updates.
-                    seg_h = int(getattr(config, "CAMERA_TEST_STRIP_H", 30))
-                    if seg_h < 1:
-                        seg_h = 1
-                    if seg_h > scene_h:
-                        seg_h = scene_h
-                    sy = 0
-                    while sy < scene_h:
-                        h = seg_h
-                        if sy + h > scene_h:
-                            h = scene_h - sy
-                        off = sy * row_bytes
-                        view = memoryview(scene_buf)[off : off + (h * row_bytes)]
-                        _lgfx.blit_rect565_rows(0, band_top + sy, sw, h, view)
-                        sy += h
-                    us = ticks_diff(ticks_us(), submit_t0)
-                    submit_acc += us
-                    prof_submit_us += us
-                    fallback_us_acc += ticks_diff(ticks_us(), fallback_t0)
+                submit_t0 = ticks_us()
+                _lgfx.blit_rect565_wait(0, band_top, sw, scene_h, scene_buf)
+                us = ticks_diff(ticks_us(), submit_t0)
+                submit_acc += us
+                prof_submit_us += us
+                dirty_last_rects_count = 2
+                dirty_last_bands_count = 1
+                dirty_last_camera_static = 1 if camera_x == prev_camera_x else 0
+                if dirty_log_countdown <= 0:
+                    print("FULLSCREEN_BULK_SUBMIT_OK")
+                    dirty_log_countdown = 30
                 if dirty_log_countdown > 0:
                     dirty_log_countdown -= 1
 
