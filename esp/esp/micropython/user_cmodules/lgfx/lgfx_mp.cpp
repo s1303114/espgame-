@@ -433,7 +433,6 @@ static mp_obj_t lgfx_blit_rect565_wait_copy(size_t n_args, const mp_obj_t *args)
             memcpy(dma_chunk + ((size_t)r * row_bytes), src + src_index, row_bytes);
             ++r;
         }
-
         lcd.pushImage((int32_t)x, (int32_t)(y + row), (int32_t)w, (int32_t)draw_h, (const uint16_t *)dma_chunk);
         lcd.waitDMA();
         row += draw_h;

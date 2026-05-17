@@ -1477,33 +1477,8 @@ def run(max_frames=None):
         if not hasattr(_lgfx, "blit_rect565_rows"):
             print("SPI_TFT_FAIL_NO_ROWS_API")
             raise RuntimeError("SPI_TFT_FAIL_NO_ROWS_API")
-
-        path = str(getattr(config, "CAMERA_SPI_TEST_PATH", "ROWS_STATIC_GRID")).upper()
-        if path not in (
-            "ROWS_STATIC_GRID",
-            "BULK_WAIT_DIRECT",
-            "CHUNK_WAIT_DIRECT_16",
-            "CHUNK_WAIT_COPY_16",
-            "CHUNK_WAIT_COPY_32",
-            "CHUNK_WAIT_COPY_COMPAT_1",
-            "CHUNK_WAIT_COPY_COMPAT_2",
-            "CHUNK_WAIT_COPY_COMPAT_4",
-            "CHUNK_WAIT_COPY_COMPAT_8",
-            # Backward-compatible aliases:
-            "ROWS",
-            "BULK_WAIT",
-            "CHUNK_WAIT_16",
-            "CHUNK_WAIT_32",
-        ):
-            path = "ROWS_STATIC_GRID"
-        if path == "ROWS":
-            path = "ROWS_STATIC_GRID"
-        elif path == "BULK_WAIT":
-            path = "BULK_WAIT_DIRECT"
-        elif path == "CHUNK_WAIT_16":
-            path = "CHUNK_WAIT_DIRECT_16"
-        elif path == "CHUNK_WAIT_32":
-            path = "CHUNK_WAIT_COPY_32"
+        # Mainline lock: force full-screen bulk path only.
+        path = "BULK_WAIT_DIRECT"
 
         if path in ("BULK_WAIT_DIRECT", "CHUNK_WAIT_DIRECT_16") and not hasattr(_lgfx, "blit_rect565_wait"):
             print("SPI_TFT_FAIL_NO_BULK_WAIT_API")

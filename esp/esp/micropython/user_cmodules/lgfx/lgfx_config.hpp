@@ -14,7 +14,7 @@ public:
             auto cfg = _bus_instance.config();
             cfg.spi_host = SPI2_HOST;
             cfg.spi_mode = 0;
-            cfg.freq_write = 32000000;
+            cfg.freq_write = 40000000;
             cfg.freq_read = 8000000;
             cfg.spi_3wire = false;
             cfg.use_lock = true;
@@ -37,7 +37,7 @@ public:
             cfg.panel_width = 240;
             cfg.panel_height = 320;
             cfg.offset_x = 0;
-            cfg.offset_y = 4;
+            cfg.offset_y = 0;
             cfg.offset_rotation = 0;
             cfg.readable = false;
             cfg.invert = false;
