@@ -1,176 +1,65 @@
-# CAMERA 渲染說明書
+# CAMERA 渲染說明書（目前主線）
 
-## 1. 範圍與目前基線
+## 1. 目前主線
 
-本文件描述目前渲染路徑，對應檔案：
-
-- `sd_game_template/game/app_camera_test.py`
-- `sd_game_template/game/config.py`
-- `micropython/user_cmodules/lgfx/lgfx_mp.cpp`
-- `micropython/user_cmodules/lgfx/lgfx_config.hpp`
-
-`config.py` 目前基線：
+目前主線是：
 
 - `PHASE_ACCEPTANCE_STAGE = "PHASE_CAMERA_TEST"`
-- `CAMERA_TEST_MODE = "map1_full_bulk"`（別名，實際映射到 `ROWS_SAFE_PROGRESSIVE`）
-- `CAMERA_SPI_TEST_PATH = "BULK_WAIT_DIRECT"`
-- `FLOOR_LAYER_ENABLED = True`（啟用 map1）
-- TFT 寫入時脈：`40 MHz`（`cfg.freq_write = 40000000`）
+- `CAMERA_TEST_MODE = "ROWS_SAFE_PROGRESSIVE"`
+- `TILEMAP_ENABLED = True`
+- `FLOOR_LAYER_ENABLED = False`
+- `CAMERA_PLAYER_SPRITE_COMPOSE_IMPL = "C_API"`
+- `CAMERA_FULL_BULK_DOUBLE_BUFFER = True`
 
-## 2. 每幀渲染流程
+提交主線是 **DMA 雙緩衝 full bulk**（可回退）：
 
-STEP4 每幀大致流程：
+- 主線標記：`SUBMIT_MODE=ASYNC_DOUBLE_BUFFER_MAINLINE`
+- 回退標記：`SUBMIT_MODE=SYNC_SINGLE_BUFFER_FALLBACK`
 
-1. 在 RAM 建立/更新 `scene_buf`（RGB565）。
-2. 合成 far/background。
-3. 合成 world floor（map1 + mask）。
-4. 合成 player sprite。
-5. 將 `scene_buf` 提交到 TFT。
+## 2. 每幀流程
 
-主要緩衝：
+1. 讀輸入、更新 `player_x / camera_x`。
+2. 在 RAM `scene_buf` 合成 far 背景。
+3. tilemap 合成：
+   - 優先 `compose_tilemap_rgb565`（C API）
+   - 否則回退 Python tilemap。
+4. 玩家 sprite 合成：`compose_masked_rgb565`（C API）。
+5. 提交到 TFT：
+   - 主線：`blit_rect565_async` + `blit_wait_done`（雙緩衝 ping-pong）
+   - 回退：`blit_rect565_wait`（單緩衝同步）
 
-- `scene_buf`：場景輸出 buffer。
-- `far_band_buf`：far 層快取（可用時）。
-- `floor_rgb_data` / `floor_mask_data`：map1 圖與遮罩。
+## 3. 關鍵 API
 
-## 3. LGFX C 模組 API（提交與合成）
+`micropython/user_cmodules/lgfx/lgfx_mp.cpp`：
 
-在 `lgfx_mp.cpp` 定義：
-
-- `blit_rect565_rows(x, y, w, h, buf)`
-- `blit_rect565_wait(x, y, w, h, buf)`
-- `blit_rect565_wait_copy(...)`
-- `blit_rect565_wait_copy_compat(...)`
 - `compose_masked_rgb565(...)`
+- `compose_tilemap_rgb565(...)`
+- `blit_rect565_wait(...)`
+- `blit_rect565_async(...)`
+- `blit_wait_done()`
 
-用途摘要：
+## 4. 觀測重點
 
-- `blit_rect565_rows`：逐列/分段安全提交。
-- `blit_rect565_wait`：直接提交 + `waitDMA()`。
-- `blit_rect565_wait_copy`：先 copy 後 chunk 提交。
-- `blit_rect565_wait_copy_compat`：相容安全路徑。
-- `compose_masked_rgb565`：C 端遮罩合成（地板/精靈）。
+序列埠輸出重點：
 
-## 4. CAMERA_TEST_MODE 模式總覽
+- `TILEMAP_COMPOSE_IMPL=C_API`
+- `CAMERA_PLAYER_SPRITE_COMPOSE_IMPL=C_API`
+- `SUBMIT_MODE=ASYNC_DOUBLE_BUFFER_MAINLINE`
+- `PROFILE submit_us=...`
+- `PROFILE fps=...`
 
-`_normalize_mode()` 可接受多種模式（`app_camera_test.py`）：
+目前瓶頸通常仍在 `submit_us`（TFT 全幀提交）。
 
-- `COLOR`
-- `PNG_SINGLE`
-- `PNG_FULL`
-- `FAR_ONLY`
-- `SINGLE_IMAGE_STRIP`
-- `SINGLE_IMAGE_DIRECT`
-- `DIRECT_BG_ONLY`
-- `DIRECT_RGB565_BG_ONLY`
-- `ROOT_FAR_RGB565_ONLY`
-- `BOARD_GENERATED_RGB565_TEST`
-- `ROOT_RGB565_TEST_PATTERN`
-- `BOARD_GENERATED_GRID_TEST`
-- `ROOT_RGB565_GRID_PATTERN`
-- `BLIT_SINGLE_BLOCK_TEST`
-- `BLIT_FULL_BUFFER_TEST`
-- `BLIT_ROWS_GRID_TEST`
-- `ROWS_SAFE_PROGRESSIVE`
-- `ROWS_SAFE_NEAR_TILE_TEST`
-- `FULL_BUFFER_TEST`
-- `SPI_TFT_SPEED_TEST`
-- `SPI_TFT_BULK_WAIT_TEST`
-
-別名：
-
-- `MAP1_FULL_BULK` -> `ROWS_SAFE_PROGRESSIVE`
-
-所以 `CAMERA_TEST_MODE = "map1_full_bulk"` 會進入 `ROWS_SAFE_PROGRESSIVE` 邏輯。
-
-## 5. 目前主線：map1 捲動 + 全屏 bulk 提交
-
-目前固定主線行為：
-
-- 邏輯路徑：`ROWS_SAFE_PROGRESSIVE`（相機 + map1 捲動）
-- 提交路徑：STEP4 最終提交固定為
-  - `_lgfx.blit_rect565_wait(0, band_top, sw, scene_h, scene_buf)`
-
-在目前 floor 設定下：
-
-- `FLOOR_LAYER_ENABLED = True`
-- full-scene 分配分支內 `band_top = 0`、`scene_h = sh`
-
-等效提交：
-
-- `x=0, y=0, w=320, h=240`（每幀全屏 bulk）
-
-執行標記：
-
-- `FULLSCREEN_BULK_SUBMIT_OK`
-
-## 6. SPI 測試分支（與 map1 主線不同）
-
-`SPI_TFT_BULK_WAIT_TEST` 會看 `CAMERA_SPI_TEST_PATH`：
-
-- `ROWS_SAFE` -> `blit_rect565_rows(0,0,320,240,buf)`
-- `BULK_WAIT_DIRECT` -> `blit_rect565_wait(0,0,320,240,buf)`
-- `CHUNK_WAIT_DIRECT_16` -> 多次 `blit_rect565_wait(..., h=16)`
-- `CHUNK_WAIT_COPY_16/32` -> `blit_rect565_wait_copy(...)`
-- `CHUNK_WAIT_COPY_COMPAT_{1,2,4,8}` -> compat API
-
-這是傳輸測試分支，不是 map1 主遊戲相機流程。
-
-## 7. map1 合成細節
-
-啟用 floor layer 後：
-
-1. 解析資源路徑：
-   - `FLOOR_LAYER_RGB565_PATH`
-   - `FLOOR_LAYER_MASK_PATH`
-2. 嘗試快取 RGB 到 RAM：成功印 `FLOOR_LAYER_RGB_CACHE_READY`。
-3. 若 `FLOOR_USE_C_COMPOSE=True` 且有 `compose_masked_rgb565`，走 C 合成：
-   - 印 `FLOOR_LAYER_COMPOSE_C_READY`
-4. 每幀來源 X：
-   - `floor_src_x = int(camera_x * FLOOR_SCROLL_FACTOR) + FLOOR_SCROLL_X_OFFSET`
-5. 將 floor 合成到 `scene_buf`。
-
-## 8. Dirty 設定與目前主線關係
-
-設定仍存在：
-
-- `CAMERA_DIRTY_RECT_EXPERIMENT`
-- `CAMERA_DIRTY_FALLBACK_ON_CAMERA_MOVE`
-- `CAMERA_DIRTY_BAND_FULL_WIDTH`
-
-但目前 STEP4 最終提交已強制 full-screen bulk，
-dirty/strip 的最終提交分支不再是主線。
-
-## 9. 觀察效能指標
-
-序列埠可觀察：
-
-- `PROFILE bg_us`
-- `PROFILE sprite_us`
-- `PROFILE submit_us`
-- `PROFILE total_us`
-- `PROFILE fps`
-- `CAMERA_STEP4_PERF frame_ms=... fps=...`
-
-目前 map1 + full-screen bulk 路徑下，`submit_us` 通常是主要瓶頸之一。
-
-## 10. Build / Flash / Deploy
-
-Build：
+## 5. Build / Flash
 
 ```bash
 cd /workspace/esp/esp/micropython/ports/esp32
 source /workspace/esp/esp/esp-idf/export.sh
 make -j6 BOARD=ESP32_GENERIC_S3 BOARD_VARIANT=SPIRAM_OCT_NOBT USER_C_MODULES=/workspace/esp/esp/micropython/user_cmodules
-```
-
-Flash：
-
-```bash
 idf.py -B build-ESP32_GENERIC_S3-SPIRAM_OCT_NOBT -p /dev/ttyACM0 flash
 ```
 
-只部署 Python 檔：
+## 6. 只部署 Python 檔
 
 ```bash
 cd /workspace/esp/esp/project_root
@@ -181,16 +70,38 @@ cd /workspace/esp/esp/project_root
 /tmp/mpvenv/bin/mpremote connect /dev/ttyACM0 reset
 ```
 
-## 11. 板上驗證清單
 
-開機序列埠請確認：
+## 7. Tilemap 細節
 
-- `CAMERA_TEST_MODE=ROWS_SAFE_PROGRESSIVE`（別名 normalize 後）
-- `FLOOR_LAYER_READY`
-- `FULLSCREEN_BULK_SUBMIT_OK`
-- `PROFILE fps=...`
+Tilemap 目前是主線 world 合成來源（取代 map1）：
 
-都出現即代表目前路徑是：
+- 啟用：`TILEMAP_ENABLED = True`
+- map1 關閉：`FLOOR_LAYER_ENABLED = False`
+- tileset 路徑：`TILESET_RGB565_PATH = "game/Tilemap/Tileset.rgb565"`
 
-- map1 捲動邏輯啟用
-- 全屏 bulk 提交啟用
+資料格式：
+
+- 地圖索引：`_TILEMAP_CSV`（在 `app_camera_test.py`）
+- tile 大小：`16x16`
+- index `0`：透明（不畫）
+- index `1..N`：對應 tileset atlas 的 tile
+
+目前合成實作：
+
+1. 啟動時把 `_TILEMAP_CSV` 轉成 `tilemap_idx`（1 byte/index）
+2. 讀入 `Tileset.rgb565`（raw RGB565 atlas）
+3. 若有 C API：`compose_tilemap_rgb565(...)` -> `TILEMAP_COMPOSE_IMPL=C_API`
+4. 若 C API 不可用：回退 Python 路徑 -> `TILEMAP_COMPOSE_IMPL=PYTHON`
+
+C API 參數（主線）：
+
+- `scene_buf, scene_w, scene_h`
+- `camera_x, band_top`
+- `tilemap_idx, map_w, map_h`
+- `tileset_raw, tile_size, tileset_w`
+
+板上驗證標記：
+
+- `TILEMAP_MODE_ON`
+- `TILEMAP_COMPOSE_IMPL=C_API`（主線）
+- 若資源缺失：`TILEMAP_TILESET_LOAD_FAIL`

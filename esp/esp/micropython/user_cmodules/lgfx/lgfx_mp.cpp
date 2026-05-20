@@ -326,6 +326,51 @@ static mp_obj_t lgfx_blit_rect565_wait(size_t n_args, const mp_obj_t *args) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lgfx_blit_rect565_wait_obj, 5, 5, lgfx_blit_rect565_wait);
 
+static bool lgfx_async_inflight = false;
+static bool lgfx_async_prev_swap = false;
+
+static mp_obj_t lgfx_blit_rect565_async(size_t n_args, const mp_obj_t *args) {
+    mp_int_t x = mp_obj_get_int(args[0]);
+    mp_int_t y = mp_obj_get_int(args[1]);
+    mp_int_t w = mp_obj_get_int(args[2]);
+    mp_int_t h = mp_obj_get_int(args[3]);
+
+    if (w <= 0 || h <= 0) {
+        return mp_const_none;
+    }
+    if (lgfx_async_inflight) {
+        mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("async busy"));
+    }
+
+    mp_buffer_info_t bufinfo;
+    mp_get_buffer_raise(args[4], &bufinfo, MP_BUFFER_READ);
+    size_t expected_len = (size_t)w * (size_t)h * 2u;
+    if (bufinfo.len != expected_len) {
+        mp_raise_ValueError(MP_ERROR_TEXT("buf len mismatch"));
+    }
+
+    const uint16_t *pixels = (const uint16_t *)bufinfo.buf;
+    lgfx_async_prev_swap = lcd.getSwapBytes();
+    lcd.startWrite();
+    lcd.setSwapBytes(true);
+    lcd.pushImage((int32_t)x, (int32_t)y, (int32_t)w, (int32_t)h, pixels);
+    lgfx_async_inflight = true;
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lgfx_blit_rect565_async_obj, 5, 5, lgfx_blit_rect565_async);
+
+static mp_obj_t lgfx_blit_wait_done(void) {
+    if (!lgfx_async_inflight) {
+        return mp_const_none;
+    }
+    lcd.waitDMA();
+    lcd.setSwapBytes(lgfx_async_prev_swap);
+    lcd.endWrite();
+    lgfx_async_inflight = false;
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(lgfx_blit_wait_done_obj, lgfx_blit_wait_done);
+
 static mp_obj_t lgfx_blit_rect565_wait_copy(size_t n_args, const mp_obj_t *args) {
     mp_int_t x = mp_obj_get_int(args[0]);
     mp_int_t y = mp_obj_get_int(args[1]);
@@ -617,6 +662,140 @@ static mp_obj_t lgfx_compose_masked_rgb565(size_t n_args, const mp_obj_t *args) 
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lgfx_compose_masked_rgb565_obj, 9, 9, lgfx_compose_masked_rgb565);
 
+
+static mp_obj_t lgfx_compose_tilemap_rgb565(size_t n_args, const mp_obj_t *args) {
+    if (n_args != 11) {
+        mp_raise_ValueError(MP_ERROR_TEXT("need 11 args"));
+    }
+
+    mp_buffer_info_t dst_bufinfo;
+    mp_buffer_info_t tilemap_bufinfo;
+    mp_buffer_info_t tileset_bufinfo;
+    mp_get_buffer_raise(args[0], &dst_bufinfo, MP_BUFFER_RW);
+    mp_int_t dst_w = mp_obj_get_int(args[1]);
+    mp_int_t dst_h = mp_obj_get_int(args[2]);
+    mp_int_t camera_x = mp_obj_get_int(args[3]);
+    mp_int_t band_top = mp_obj_get_int(args[4]);
+    mp_get_buffer_raise(args[5], &tilemap_bufinfo, MP_BUFFER_READ);
+    mp_int_t map_w = mp_obj_get_int(args[6]);
+    mp_int_t map_h = mp_obj_get_int(args[7]);
+    mp_get_buffer_raise(args[8], &tileset_bufinfo, MP_BUFFER_READ);
+    mp_int_t tile_size = mp_obj_get_int(args[9]);
+    mp_int_t tileset_w = mp_obj_get_int(args[10]);
+
+    if (dst_w <= 0 || dst_h <= 0 || map_w <= 0 || map_h <= 0 || tile_size <= 0 || tileset_w <= 0) {
+        mp_raise_ValueError(MP_ERROR_TEXT("invalid dims"));
+    }
+    if ((tileset_w % tile_size) != 0) {
+        mp_raise_ValueError(MP_ERROR_TEXT("tileset_w mismatch"));
+    }
+    if ((tileset_bufinfo.len & 1u) != 0u) {
+        mp_raise_ValueError(MP_ERROR_TEXT("tileset len must be rgb565"));
+    }
+
+    size_t dst_need = (size_t)dst_w * (size_t)dst_h * 2u;
+    if (dst_bufinfo.len < dst_need) {
+        mp_raise_ValueError(MP_ERROR_TEXT("dst buf too small"));
+    }
+    size_t map_need = (size_t)map_w * (size_t)map_h;
+    if (tilemap_bufinfo.len < map_need) {
+        mp_raise_ValueError(MP_ERROR_TEXT("tilemap buf too small"));
+    }
+
+    size_t tile_bytes = (size_t)tile_size * (size_t)tile_size * 2u;
+    if (tile_bytes == 0 || tileset_bufinfo.len < tile_bytes) {
+        mp_raise_ValueError(MP_ERROR_TEXT("tileset buf too small"));
+    }
+    size_t tile_count = tileset_bufinfo.len / tile_bytes;
+    size_t tileset_cols = (size_t)tileset_w / (size_t)tile_size;
+    if (tileset_cols == 0) {
+        mp_raise_ValueError(MP_ERROR_TEXT("tileset cols invalid"));
+    }
+
+    uint8_t *dst = (uint8_t *)dst_bufinfo.buf;
+    const uint8_t *tilemap = (const uint8_t *)tilemap_bufinfo.buf;
+    const uint8_t *tileset = (const uint8_t *)tileset_bufinfo.buf;
+
+    mp_int_t start_col = camera_x / tile_size;
+    mp_int_t end_col = (camera_x + dst_w - 1) / tile_size;
+    mp_int_t start_row = band_top / tile_size;
+    mp_int_t end_row = (band_top + dst_h - 1) / tile_size;
+
+    if (start_col < 0) {
+        start_col = 0;
+    }
+    if (start_row < 0) {
+        start_row = 0;
+    }
+    if (end_col >= map_w) {
+        end_col = map_w - 1;
+    }
+    if (end_row >= map_h) {
+        end_row = map_h - 1;
+    }
+    if (end_col < start_col || end_row < start_row) {
+        return mp_const_none;
+    }
+
+    for (mp_int_t r = start_row; r <= end_row; ++r) {
+        const uint8_t *map_row = tilemap + ((size_t)r * (size_t)map_w);
+        for (mp_int_t c = start_col; c <= end_col; ++c) {
+            uint8_t tid = map_row[c];
+            if (tid == 0u) {
+                continue;
+            }
+            size_t tile_idx = (size_t)tid - 1u;
+            if (tile_idx >= tile_count) {
+                continue;
+            }
+
+            mp_int_t dx = (c * tile_size) - camera_x;
+            mp_int_t dy = (r * tile_size) - band_top;
+            mp_int_t src_x0 = 0;
+            mp_int_t src_y0 = 0;
+            mp_int_t vis_w = tile_size;
+            mp_int_t vis_h = tile_size;
+
+            if (dx < 0) {
+                src_x0 = -dx;
+                vis_w -= src_x0;
+                dx = 0;
+            }
+            if (dy < 0) {
+                src_y0 = -dy;
+                vis_h -= src_y0;
+                dy = 0;
+            }
+            if (dx + vis_w > dst_w) {
+                vis_w = dst_w - dx;
+            }
+            if (dy + vis_h > dst_h) {
+                vis_h = dst_h - dy;
+            }
+            if (vis_w <= 0 || vis_h <= 0) {
+                continue;
+            }
+
+            size_t atlas_col = tile_idx % tileset_cols;
+            size_t atlas_row = tile_idx / tileset_cols;
+            size_t tile_px_x = atlas_col * (size_t)tile_size;
+            size_t tile_px_y = atlas_row * (size_t)tile_size;
+            size_t src_row_base = ((tile_px_y + (size_t)src_y0) * (size_t)tileset_w + tile_px_x + (size_t)src_x0) * 2u;
+            size_t src_stride = (size_t)tileset_w * 2u;
+            size_t copy_bytes = (size_t)vis_w * 2u;
+
+            for (mp_int_t y = 0; y < vis_h; ++y) {
+                size_t src_off = src_row_base + ((size_t)y * src_stride);
+                size_t dst_off = (((size_t)(dy + y) * (size_t)dst_w) + (size_t)dx) * 2u;
+                memcpy(dst + dst_off, tileset + src_off, copy_bytes);
+            }
+        }
+    }
+
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lgfx_compose_tilemap_rgb565_obj, 11, 11, lgfx_compose_tilemap_rgb565);
+
 static mp_obj_t lgfx_png_rect565(size_t n_args, const mp_obj_t *args) {
     const char *path = mp_obj_str_get_str(args[0]);
     mp_int_t sx = mp_obj_get_int(args[1]);
@@ -806,9 +985,12 @@ static const mp_rom_map_elem_t lgfx_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_blit_rect565), MP_ROM_PTR(&lgfx_blit_rect565_obj) },
     { MP_ROM_QSTR(MP_QSTR_blit_rect565_rows), MP_ROM_PTR(&lgfx_blit_rect565_rows_obj) },
     { MP_ROM_QSTR(MP_QSTR_blit_rect565_wait), MP_ROM_PTR(&lgfx_blit_rect565_wait_obj) },
+    { MP_ROM_QSTR(MP_QSTR_blit_rect565_async), MP_ROM_PTR(&lgfx_blit_rect565_async_obj) },
+    { MP_ROM_QSTR(MP_QSTR_blit_wait_done), MP_ROM_PTR(&lgfx_blit_wait_done_obj) },
     { MP_ROM_QSTR(MP_QSTR_blit_rect565_wait_copy), MP_ROM_PTR(&lgfx_blit_rect565_wait_copy_obj) },
     { MP_ROM_QSTR(MP_QSTR_blit_rect565_wait_copy_compat), MP_ROM_PTR(&lgfx_blit_rect565_wait_copy_compat_obj) },
     { MP_ROM_QSTR(MP_QSTR_compose_masked_rgb565), MP_ROM_PTR(&lgfx_compose_masked_rgb565_obj) },
+    { MP_ROM_QSTR(MP_QSTR_compose_tilemap_rgb565), MP_ROM_PTR(&lgfx_compose_tilemap_rgb565_obj) },
     { MP_ROM_QSTR(MP_QSTR_png_rect565), MP_ROM_PTR(&lgfx_png_rect565_obj) },
     { MP_ROM_QSTR(MP_QSTR_png_over_rect565), MP_ROM_PTR(&lgfx_png_over_rect565_obj) },
     { MP_ROM_QSTR(MP_QSTR_png_rect_raw_test), MP_ROM_PTR(&lgfx_png_rect_raw_test_obj) },
@@ -841,9 +1023,12 @@ static const mp_rom_map_elem_t lgfx_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_blit_rect565), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_blit_rect565_rows), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_blit_rect565_wait), MP_ROM_INT(0) },
+    { MP_ROM_QSTR(MP_QSTR_blit_rect565_async), MP_ROM_INT(0) },
+    { MP_ROM_QSTR(MP_QSTR_blit_wait_done), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_blit_rect565_wait_copy), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_blit_rect565_wait_copy_compat), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_compose_masked_rgb565), MP_ROM_INT(0) },
+    { MP_ROM_QSTR(MP_QSTR_compose_tilemap_rgb565), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_png_rect565), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_png_over_rect565), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_png_rect_raw_test), MP_ROM_INT(0) },

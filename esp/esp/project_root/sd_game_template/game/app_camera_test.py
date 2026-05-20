@@ -578,6 +578,141 @@ def _compose_full_grid_320x240(buf):
     _compose_grid_chunk565(buf, 320, 240, 0, 240)
 
 
+_TILEMAP_CSV = """0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,6,4,0,0,0,0,0,0,0,0,0,0
+0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,6,1,1,1,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,4,0,0,0,0,0,0,0,0,0,6,1,4,0,0,0,0,0,0,0,0,0,0,0,9,3,3,3,5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+2,2,2,2,2,2,2,2,2,2,2,2,2,3,3,5,0,0,0,0,0,0,0,0,0,7,2,8,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+2,2,2,2,2,2,2,2,2,2,2,3,5,0,0,0,0,0,0,0,0,0,0,0,0,9,3,5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+3,3,3,3,3,3,3,3,3,3,5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1
+"""
+
+def _parse_tilemap_csv(csv_text):
+    rows = []
+    for ln in csv_text.strip().splitlines():
+        line = ln.strip()
+        if not line:
+            continue
+        rows.append([int(x.strip()) for x in line.split(',') if x.strip() != ''])
+    return rows
+
+def _flatten_tilemap_rows(tile_rows):
+    if not tile_rows:
+        return None, 0, 0
+    map_h = len(tile_rows)
+    map_w = len(tile_rows[0]) if map_h > 0 else 0
+    if map_w <= 0:
+        return None, 0, 0
+    out = bytearray(map_w * map_h)
+    i = 0
+    r = 0
+    while r < map_h:
+        row = tile_rows[r]
+        c = 0
+        while c < map_w:
+            v = row[c]
+            if v < 0:
+                v = 0
+            if v > 255:
+                v = 255
+            out[i] = v
+            i += 1
+            c += 1
+        r += 1
+    return out, map_w, map_h
+
+def _load_tileset_raw_rgb565(path, atlas_w=64, atlas_h=64):
+    try:
+        with open(path, 'rb') as fp:
+            data = fp.read()
+    except Exception:
+        return None
+    exp = atlas_w * atlas_h * 2
+    if data is None or len(data) != exp:
+        return None
+    return data
+
+def _load_tileset_rgb565(path, tile_size=16, atlas_w=64, atlas_h=64):
+    try:
+        with open(path, 'rb') as fp:
+            data = fp.read()
+    except Exception:
+        return None
+    exp = atlas_w * atlas_h * 2
+    if data is None or len(data) != exp:
+        return None
+    cols = atlas_w // tile_size
+    rows = atlas_h // tile_size
+    tiles = [None]
+    for tr in range(rows):
+        for tc in range(cols):
+            buf = bytearray(tile_size * tile_size * 2)
+            di = 0
+            for y in range(tile_size):
+                sy = tr * tile_size + y
+                so = ((sy * atlas_w) + (tc * tile_size)) * 2
+                e = so + (tile_size * 2)
+                seg = data[so:e]
+                buf[di:di + (tile_size * 2)] = seg
+                di += tile_size * 2
+            tiles.append(bytes(buf))
+    return tiles
+
+def _blit_tile_to_scene(scene_buf, scene_w, scene_h, dx, dy, tile_buf, tile_size=16):
+    if tile_buf is None:
+        return
+    sx0 = 0 if dx >= 0 else -dx
+    sy0 = 0 if dy >= 0 else -dy
+    sx1 = tile_size if (dx + tile_size) <= scene_w else (scene_w - dx)
+    sy1 = tile_size if (dy + tile_size) <= scene_h else (scene_h - dy)
+    if sx1 <= sx0 or sy1 <= sy0:
+        return
+    copy_w = sx1 - sx0
+    for y in range(sy0, sy1):
+        src_off = ((y * tile_size) + sx0) * 2
+        dst_y = dy + y
+        dst_x = dx + sx0
+        dst_off = ((dst_y * scene_w) + dst_x) * 2
+        scene_buf[dst_off:dst_off + (copy_w * 2)] = tile_buf[src_off:src_off + (copy_w * 2)]
+
+def _compose_tilemap_scene(scene_buf, scene_w, scene_h, camera_x, band_top, tile_rows, tileset, tile_size=16):
+    if not tile_rows or not tileset:
+        return
+    map_h = len(tile_rows)
+    map_w = len(tile_rows[0]) if map_h > 0 else 0
+    if map_w <= 0:
+        return
+    start_col = camera_x // tile_size
+    end_col = (camera_x + scene_w - 1) // tile_size
+    start_row = band_top // tile_size
+    end_row = (band_top + scene_h - 1) // tile_size
+    if start_col < 0:
+        start_col = 0
+    if start_row < 0:
+        start_row = 0
+    if end_col >= map_w:
+        end_col = map_w - 1
+    if end_row >= map_h:
+        end_row = map_h - 1
+    for r in range(start_row, end_row + 1):
+        row = tile_rows[r]
+        for c in range(start_col, end_col + 1):
+            tid = row[c]
+            if tid <= 0 or tid >= len(tileset):
+                continue
+            dx = (c * tile_size) - camera_x
+            dy = (r * tile_size) - band_top
+            _blit_tile_to_scene(scene_buf, scene_w, scene_h, dx, dy, tileset[tid], tile_size)
+
+
 def _normalize_mode(v):
     m = str(v).upper()
     if m == "MAP1_FULL_BULK":
@@ -2043,6 +2178,7 @@ def run(max_frames=None):
 
             ground_h = 16
             ground_y0 = sh - ground_h
+            tilemap_mode_active = bool(getattr(config, "TILEMAP_ENABLED", False))
             sprite_logic_y = player_y
             if use_sprite_player and sprite_draw_mode == "COMPOSE":
                 sprite_logic_y = player_y + draw_off_y
@@ -2051,12 +2187,21 @@ def run(max_frames=None):
                 band_top = 0
             if band_top > ground_y0:
                 band_top = ground_y0
+            # Tilemap scene is sparse (index 0 means transparent), so keep full-screen compose.
+            # A moving lower band would clip all tiles above the player.
+            if tilemap_mode_active:
+                band_top = 0
             # Allocate runtime compose buffer as early as possible to maximize contiguous heap.
             # COMPOSE may need a taller band for full 32x32 sprite; if allocation fails,
             # shrink band from top until allocation succeeds (still COMPOSE path).
             scene_buf = None
+            scene_buf_back = None
             while True:
-                far_band_h = ground_y0 - band_top
+                # In tilemap mode we want far_bg as full backdrop, including bottom 16px.
+                if tilemap_mode_active:
+                    far_band_h = sh - band_top
+                else:
+                    far_band_h = ground_y0 - band_top
                 scene_h = sh - band_top
                 if far_band_h <= 0 or scene_h <= 0:
                     print("CAMERA_TEST_STEP=%d_FAIL_PLAYER_BAND" % step_tag)
@@ -2072,16 +2217,19 @@ def run(max_frames=None):
                     if band_top >= player_y:
                         raise
                     band_top += 2
+            # Optional ping-pong buffer for async full-bulk submit.
+            try:
+                scene_buf_back = bytearray(sw * scene_h * 2)
+            except Exception:
+                scene_buf_back = None
             if use_sprite_player and sprite_draw_mode == "COMPOSE":
                 print("CAMERA_COMPOSE_BAND_TOP=%d" % band_top)
 
             far_band_buf = None
             far_runtime_file = None
-            # STEP=3 keeps far rows cached in RAM.
-            # STEP=4 sprite mode keeps memory lower by streaming far upper-band rows each frame.
-            if use_sprite_player:
-                far_runtime_file = open(far_raw, "rb")
-            else:
+            # Prefer caching far background in RAM once at boot for smoother frame time.
+            # Fallback to per-frame streaming only when allocation/load fails.
+            try:
                 far_band_buf = bytearray(sw * far_band_h * 2)
                 with open(far_raw, "rb") as far_bg:
                     row = 0
@@ -2095,6 +2243,11 @@ def run(max_frames=None):
                             print("CAMERA_TEST_STEP=%d_FAIL_READ" % step_tag)
                             raise RuntimeError("CAMERA_TEST_STEP%d_FAIL_READ" % step_tag)
                         row += 1
+                print("CAMERA_FAR_BG_RAM_CACHE_READY")
+            except Exception:
+                far_band_buf = None
+                far_runtime_file = open(far_raw, "rb")
+                print("CAMERA_FAR_BG_STREAM_FALLBACK")
 
             # Keep memory low in STEP=4 with sprites: build one phase row per frame.
             row_bytes = sw * 2
@@ -2193,6 +2346,33 @@ def run(max_frames=None):
             dirty_last_bands_count = 0
             dirty_last_camera_static = 1
             floor_layer_enabled = bool(getattr(config, "FLOOR_LAYER_ENABLED", False))
+            tilemap_enabled = bool(getattr(config, "TILEMAP_ENABLED", True))
+            tilemap_rows = _parse_tilemap_csv(_TILEMAP_CSV) if tilemap_enabled else None
+            tilemap_idx = None
+            tilemap_w = 0
+            tilemap_h = 0
+            tileset_raw = None
+            tileset_cache = None
+            tile_size = 16
+            tileset_w = 64
+            tilemap_compose_impl = "PYTHON"
+            if tilemap_enabled:
+                tilemap_idx, tilemap_w, tilemap_h = _flatten_tilemap_rows(tilemap_rows)
+                tileset_path = _resolve_asset_path(getattr(config, "TILESET_RGB565_PATH", "game/Tilemap/Tileset.rgb565"))
+                tileset_raw = _load_tileset_raw_rgb565(tileset_path, tileset_w, 64)
+                if (
+                    tileset_raw is not None
+                    and tilemap_idx is not None
+                    and hasattr(_lgfx, "compose_tilemap_rgb565")
+                ):
+                    tilemap_compose_impl = "C_API"
+                else:
+                    tileset_cache = _load_tileset_rgb565(tileset_path, tile_size, tileset_w, 64)
+                    if tileset_cache is None:
+                        print("TILEMAP_TILESET_LOAD_FAIL")
+                floor_layer_enabled = False
+                print("TILEMAP_MODE_ON")
+                print("TILEMAP_COMPOSE_IMPL=%s" % tilemap_compose_impl)
             floor_rgb_fp = None
             floor_mask_fp = None
             floor_rgb_data = None
@@ -2310,6 +2490,25 @@ def run(max_frames=None):
             dirty_log_countdown = 0
             if dirty_rect_experiment:
                 print("DIRTY_RECT_EXPERIMENT_ON")
+
+            submit_async_cfg = bool(getattr(config, "CAMERA_FULL_BULK_DOUBLE_BUFFER", True))
+            has_async_api = hasattr(_lgfx, "blit_rect565_async") and hasattr(_lgfx, "blit_wait_done")
+            submit_async_enabled = (
+                submit_async_cfg
+                and scene_buf_back is not None
+                and has_async_api
+            )
+            submit_async_inflight = False
+            if submit_async_enabled:
+                print("SUBMIT_MODE=ASYNC_DOUBLE_BUFFER_MAINLINE")
+            else:
+                print("SUBMIT_MODE=SYNC_SINGLE_BUFFER_FALLBACK")
+                if submit_async_cfg and scene_buf_back is None:
+                    print("SUBMIT_FALLBACK_REASON=NO_BACK_BUFFER")
+                elif submit_async_cfg and not has_async_api:
+                    print("SUBMIT_FALLBACK_REASON=NO_ASYNC_API")
+                elif not submit_async_cfg:
+                    print("SUBMIT_FALLBACK_REASON=CFG_OFF")
 
             while True:
                 now = ticks_ms()
@@ -2534,21 +2733,41 @@ def run(max_frames=None):
 
                 seg_t0 = ticks_us()
                 if floor_runs_by_row is None or (floor_rgb_fp is None and floor_rgb_data is None):
-                    phase_off = camera_x & 31
-                    gx = 0
-                    gi = 0
-                    while gx < sw:
-                        phase = ((phase_off + gx) // 16) & 1
-                        color = config.COLOR_TILE_SOLID if phase == 0 else 0x31A6
-                        ground_row_buf[gi] = color & 0xFF
-                        ground_row_buf[gi + 1] = (color >> 8) & 0xFF
-                        gi += 2
-                        gx += 1
-                    gy = 0
-                    while gy < ground_h:
-                        off = (far_band_h + gy) * row_bytes
-                        scene_buf[off : off + row_bytes] = ground_row_buf
-                        gy += 1
+                    if tilemap_enabled:
+                        if tilemap_compose_impl == "C_API" and tilemap_idx is not None and tileset_raw is not None:
+                            _lgfx.compose_tilemap_rgb565(
+                                scene_buf,
+                                sw,
+                                scene_h,
+                                camera_x,
+                                band_top,
+                                tilemap_idx,
+                                tilemap_w,
+                                tilemap_h,
+                                tileset_raw,
+                                tile_size,
+                                tileset_w,
+                            )
+                        elif tilemap_rows is not None and tileset_cache is not None:
+                            _compose_tilemap_scene(scene_buf, sw, scene_h, camera_x, band_top, tilemap_rows, tileset_cache, tile_size)
+                        else:
+                            pass
+                    else:
+                        phase_off = camera_x & 31
+                        gx = 0
+                        gi = 0
+                        while gx < sw:
+                            phase = ((phase_off + gx) // 16) & 1
+                            color = config.COLOR_TILE_SOLID if phase == 0 else 0x31A6
+                            ground_row_buf[gi] = color & 0xFF
+                            ground_row_buf[gi + 1] = (color >> 8) & 0xFF
+                            gi += 2
+                            gx += 1
+                        gy = 0
+                        while gy < ground_h:
+                            off = (far_band_h + gy) * row_bytes
+                            scene_buf[off : off + row_bytes] = ground_row_buf
+                            gy += 1
                 prof_world_us += ticks_diff(ticks_us(), seg_t0)
 
                 seg_t0 = ticks_us()
@@ -2635,7 +2854,17 @@ def run(max_frames=None):
                     and drew_once
                 )
                 submit_t0 = ticks_us()
-                _lgfx.blit_rect565_wait(0, band_top, sw, scene_h, scene_buf)
+                if submit_async_enabled:
+                    if submit_async_inflight:
+                        _lgfx.blit_wait_done()
+                    _lgfx.blit_rect565_async(0, band_top, sw, scene_h, scene_buf)
+                    submit_async_inflight = True
+                    # Swap compose/submit buffers for next frame.
+                    tmp_buf = scene_buf
+                    scene_buf = scene_buf_back
+                    scene_buf_back = tmp_buf
+                else:
+                    _lgfx.blit_rect565_wait(0, band_top, sw, scene_h, scene_buf)
                 us = ticks_diff(ticks_us(), submit_t0)
                 submit_acc += us
                 prof_submit_us += us
@@ -2835,6 +3064,11 @@ def run(max_frames=None):
                 if max_frames is not None and frame >= int(max_frames):
                     break
 
+            if submit_async_enabled and submit_async_inflight:
+                try:
+                    _lgfx.blit_wait_done()
+                except Exception:
+                    pass
             if far_runtime_file is not None:
                 try:
                     far_runtime_file.close()
