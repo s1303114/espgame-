@@ -604,6 +604,17 @@ def _parse_tilemap_csv(csv_text):
         rows.append([int(x.strip()) for x in line.split(',') if x.strip() != ''])
     return rows
 
+def _load_tilemap_rows(path):
+    try:
+        with open(path, 'r') as fp:
+            text = fp.read()
+    except Exception:
+        return None
+    try:
+        return _parse_tilemap_csv(text)
+    except Exception:
+        return None
+
 def _flatten_tilemap_rows(tile_rows):
     if not tile_rows:
         return None, 0, 0
@@ -2321,6 +2332,13 @@ def run(max_frames=None):
             profile_every = int(getattr(config, "CAMERA_TEST_STEP4_PROFILE_EVERY", 60))
             if profile_every < 1:
                 profile_every = 60
+            stall_frame_us = int(getattr(config, "CAMERA_STALL_FRAME_US", 65000))
+            if stall_frame_us < 1000:
+                stall_frame_us = 65000
+            stall_log_cooldown = int(getattr(config, "CAMERA_STALL_LOG_COOLDOWN", 15))
+            if stall_log_cooldown < 1:
+                stall_log_cooldown = 15
+            stall_log_countdown = 0
             prof_update_us = 0
             prof_bg_us = 0
             prof_world_us = 0
@@ -2347,19 +2365,26 @@ def run(max_frames=None):
             dirty_last_camera_static = 1
             floor_layer_enabled = bool(getattr(config, "FLOOR_LAYER_ENABLED", False))
             tilemap_enabled = bool(getattr(config, "TILEMAP_ENABLED", True))
-            tilemap_rows = _parse_tilemap_csv(_TILEMAP_CSV) if tilemap_enabled else None
+            tilemap_rows = None
+            if tilemap_enabled:
+                csv_path = _resolve_asset_path(getattr(config, "TILEMAP_CSV_PATH", "game/Tilemap/map1_tilemap.csv"))
+                tilemap_rows = _load_tilemap_rows(csv_path)
+                if tilemap_rows is None:
+                    print("TILEMAP_CSV_LOAD_FAIL")
+                    tilemap_rows = _parse_tilemap_csv(_TILEMAP_CSV)
             tilemap_idx = None
             tilemap_w = 0
             tilemap_h = 0
             tileset_raw = None
             tileset_cache = None
-            tile_size = 16
-            tileset_w = 64
+            tile_size = int(getattr(config, "TILE_SIZE", 16))
+            tileset_w = int(getattr(config, "TILESET_ATLAS_W", 128))
+            tileset_h = int(getattr(config, "TILESET_ATLAS_H", 128))
             tilemap_compose_impl = "PYTHON"
             if tilemap_enabled:
                 tilemap_idx, tilemap_w, tilemap_h = _flatten_tilemap_rows(tilemap_rows)
-                tileset_path = _resolve_asset_path(getattr(config, "TILESET_RGB565_PATH", "game/Tilemap/Tileset.rgb565"))
-                tileset_raw = _load_tileset_raw_rgb565(tileset_path, tileset_w, 64)
+                tileset_path = _resolve_asset_path(getattr(config, "TILESET_RGB565_PATH", "game/Tilemap/tilemap_all.rgb565"))
+                tileset_raw = _load_tileset_raw_rgb565(tileset_path, tileset_w, tileset_h)
                 if (
                     tileset_raw is not None
                     and tilemap_idx is not None
@@ -2367,7 +2392,7 @@ def run(max_frames=None):
                 ):
                     tilemap_compose_impl = "C_API"
                 else:
-                    tileset_cache = _load_tileset_rgb565(tileset_path, tile_size, tileset_w, 64)
+                    tileset_cache = _load_tileset_rgb565(tileset_path, tile_size, tileset_w, tileset_h)
                     if tileset_cache is None:
                         print("TILEMAP_TILESET_LOAD_FAIL")
                 floor_layer_enabled = False
@@ -2747,6 +2772,7 @@ def run(max_frames=None):
                                 tileset_raw,
                                 tile_size,
                                 tileset_w,
+                                0xF81F,
                             )
                         elif tilemap_rows is not None and tileset_cache is not None:
                             _compose_tilemap_scene(scene_buf, sw, scene_h, camera_x, band_top, tilemap_rows, tileset_cache, tile_size)
@@ -2923,7 +2949,26 @@ def run(max_frames=None):
                         _lgfx.blit_rect565_rows(right_x, 0, top_hud_w, top_hud_h, top_hud_buf)
                     prof_hud_us += ticks_diff(ticks_us(), seg_t0)
 
-                prof_total_us += ticks_diff(ticks_us(), frame_start_us)
+                frame_total_us = ticks_diff(ticks_us(), frame_start_us)
+                prof_total_us += frame_total_us
+                if frame_total_us >= stall_frame_us:
+                    if stall_log_countdown <= 0:
+                        print(
+                            "STALL_FRAME total_us=%d submit_us=%d bg_us_acc=%d world_us_acc=%d sprite_us_acc=%d frame=%d camera_x=%d player_x=%d"
+                            % (
+                                frame_total_us,
+                                us,
+                                prof_bg_us,
+                                prof_world_us,
+                                prof_sprite_us,
+                                frame,
+                                camera_x,
+                                player_x,
+                            )
+                        )
+                        stall_log_countdown = stall_log_cooldown
+                if stall_log_countdown > 0:
+                    stall_log_countdown -= 1
 
                 frame += 1
                 if not drew_once:

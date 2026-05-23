@@ -120,7 +120,10 @@ FLOOR_USE_C_COMPOSE = True
 # Tilemap (16x16) settings.
 # app_camera_test.py uses embedded tile index CSV and this tileset atlas.
 TILEMAP_ENABLED = True
-TILESET_RGB565_PATH = "game/Tilemap/Tileset.rgb565"
+TILESET_RGB565_PATH = "game/Tilemap/tilemap_all.rgb565"
+TILEMAP_CSV_PATH = "game/Tilemap/map1_tilemap.csv"
+TILESET_ATLAS_W = 128
+TILESET_ATLAS_H = 128
 
 # Phase 5 acceptance mode:
 # - "TEST": deterministic scripted validation

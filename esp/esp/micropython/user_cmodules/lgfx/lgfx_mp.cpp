@@ -664,8 +664,8 @@ static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lgfx_compose_masked_rgb565_obj, 9, 9,
 
 
 static mp_obj_t lgfx_compose_tilemap_rgb565(size_t n_args, const mp_obj_t *args) {
-    if (n_args != 11) {
-        mp_raise_ValueError(MP_ERROR_TEXT("need 11 args"));
+    if (n_args != 11 && n_args != 12) {
+        mp_raise_ValueError(MP_ERROR_TEXT("need 11 or 12 args"));
     }
 
     mp_buffer_info_t dst_bufinfo;
@@ -682,6 +682,10 @@ static mp_obj_t lgfx_compose_tilemap_rgb565(size_t n_args, const mp_obj_t *args)
     mp_get_buffer_raise(args[8], &tileset_bufinfo, MP_BUFFER_READ);
     mp_int_t tile_size = mp_obj_get_int(args[9]);
     mp_int_t tileset_w = mp_obj_get_int(args[10]);
+    mp_int_t transparent_key = -1;
+    if (n_args == 12) {
+        transparent_key = mp_obj_get_int(args[11]);
+    }
 
     if (dst_w <= 0 || dst_h <= 0 || map_w <= 0 || map_h <= 0 || tile_size <= 0 || tileset_w <= 0) {
         mp_raise_ValueError(MP_ERROR_TEXT("invalid dims"));
@@ -787,14 +791,27 @@ static mp_obj_t lgfx_compose_tilemap_rgb565(size_t n_args, const mp_obj_t *args)
             for (mp_int_t y = 0; y < vis_h; ++y) {
                 size_t src_off = src_row_base + ((size_t)y * src_stride);
                 size_t dst_off = (((size_t)(dy + y) * (size_t)dst_w) + (size_t)dx) * 2u;
-                memcpy(dst + dst_off, tileset + src_off, copy_bytes);
+                if (transparent_key < 0) {
+                    memcpy(dst + dst_off, tileset + src_off, copy_bytes);
+                } else {
+                    const uint8_t *src_row = tileset + src_off;
+                    uint8_t *dst_row = dst + dst_off;
+                    for (mp_int_t x = 0; x < vis_w; ++x) {
+                        size_t b = (size_t)x * 2u;
+                        uint16_t px = (uint16_t)src_row[b] | ((uint16_t)src_row[b + 1] << 8);
+                        if (px != (uint16_t)transparent_key) {
+                            dst_row[b] = src_row[b];
+                            dst_row[b + 1] = src_row[b + 1];
+                        }
+                    }
+                }
             }
         }
     }
 
     return mp_const_none;
 }
-static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lgfx_compose_tilemap_rgb565_obj, 11, 11, lgfx_compose_tilemap_rgb565);
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lgfx_compose_tilemap_rgb565_obj, 11, 12, lgfx_compose_tilemap_rgb565);
 
 static mp_obj_t lgfx_png_rect565(size_t n_args, const mp_obj_t *args) {
     const char *path = mp_obj_str_get_str(args[0]);
