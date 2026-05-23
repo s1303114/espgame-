@@ -640,6 +640,10 @@ def _flatten_tilemap_rows(tile_rows):
         r += 1
     return out, map_w, map_h
 
+def _swap16(v):
+    return ((v & 0xFF) << 8) | ((v >> 8) & 0xFF)
+
+
 def _load_tileset_raw_rgb565(path, atlas_w=64, atlas_h=64):
     try:
         with open(path, 'rb') as fp:
@@ -1822,7 +1826,8 @@ def run(max_frames=None):
             while side in ("left", "right"):
                 i = 0
                 while i < 4:
-                    rgb_path = "/player_walk_%s_%d.rgb565" % (side, i)
+                    sprite_wire_suffix = "_wire" if (bool(getattr(config, "CAMERA_FULL_BULK_WIRE_ORDER", False)) and not bool(getattr(config, "CAMERA_FULL_BULK_WIRE_RUNTIME_SWAP", True))) else ""
+                    rgb_path = "/player_walk_%s_%d%s.rgb565" % (side, i, sprite_wire_suffix)
                     mask_path = "/player_walk_%s_%d.mask1" % (side, i)
                     try:
                         with open(rgb_path, "rb") as rf:
@@ -2289,7 +2294,8 @@ def run(max_frames=None):
                 while side in ("left", "right"):
                     i = 0
                     while i < 4:
-                        rgb_path = "/player_walk_%s_%d.rgb565" % (side, i)
+                        sprite_wire_suffix = "_wire" if (bool(getattr(config, "CAMERA_FULL_BULK_WIRE_ORDER", False)) and not bool(getattr(config, "CAMERA_FULL_BULK_WIRE_RUNTIME_SWAP", True))) else ""
+                        rgb_path = "/player_walk_%s_%d%s.rgb565" % (side, i, sprite_wire_suffix)
                         mask_path = "/player_walk_%s_%d.mask1" % (side, i)
                         try:
                             with open(rgb_path, "rb") as rf:
@@ -2345,6 +2351,9 @@ def run(max_frames=None):
             prof_sprite_us = 0
             prof_hud_us = 0
             prof_submit_us = 0
+            prof_submit_wait_us = 0
+            prof_submit_kick_us = 0
+            prof_submit_swap_us = 0
             prof_total_us = 0
             prof_pace_us = 0
             dirty_rect_experiment = (
@@ -2517,19 +2526,40 @@ def run(max_frames=None):
                 print("DIRTY_RECT_EXPERIMENT_ON")
 
             submit_async_cfg = bool(getattr(config, "CAMERA_FULL_BULK_DOUBLE_BUFFER", True))
+            submit_wire_order_cfg = bool(getattr(config, "CAMERA_FULL_BULK_WIRE_ORDER", False))
+            submit_wire_runtime_swap = bool(getattr(config, "CAMERA_FULL_BULK_WIRE_RUNTIME_SWAP", submit_wire_order_cfg))
             has_async_api = hasattr(_lgfx, "blit_rect565_async") and hasattr(_lgfx, "blit_wait_done")
+            has_wire_api = (
+                hasattr(_lgfx, "blit_rect565_wire_async")
+                and hasattr(_lgfx, "blit_rect565_wire_wait")
+                and hasattr(_lgfx, "blit_wait_done")
+                and (not submit_wire_runtime_swap or hasattr(_lgfx, "rgb565_swap_bytes_inplace"))
+            )
+            submit_wire_order = submit_wire_order_cfg and has_wire_api
+            submit_async_fn = _lgfx.blit_rect565_wire_async if submit_wire_order else _lgfx.blit_rect565_async
+            submit_wait_fn = _lgfx.blit_rect565_wire_wait if submit_wire_order else _lgfx.blit_rect565_wait
             submit_async_enabled = (
                 submit_async_cfg
                 and scene_buf_back is not None
-                and has_async_api
+                and (has_wire_api if submit_wire_order_cfg else has_async_api)
             )
             submit_async_inflight = False
+            submit_inflight_buf = None
+            if submit_wire_order:
+                print("SUBMIT_BYTE_ORDER=WIRE_NOSWAP")
+                print("SUBMIT_WIRE_RUNTIME_SWAP=%d" % (1 if submit_wire_runtime_swap else 0))
+            else:
+                print("SUBMIT_BYTE_ORDER=RGB565_LE_SWAP")
+                if submit_wire_order_cfg and not has_wire_api:
+                    print("SUBMIT_FALLBACK_REASON=NO_WIRE_API")
             if submit_async_enabled:
                 print("SUBMIT_MODE=ASYNC_DOUBLE_BUFFER_MAINLINE")
             else:
                 print("SUBMIT_MODE=SYNC_SINGLE_BUFFER_FALLBACK")
                 if submit_async_cfg and scene_buf_back is None:
                     print("SUBMIT_FALLBACK_REASON=NO_BACK_BUFFER")
+                elif submit_async_cfg and submit_wire_order_cfg and not has_wire_api:
+                    print("SUBMIT_FALLBACK_REASON=NO_WIRE_API")
                 elif submit_async_cfg and not has_async_api:
                     print("SUBMIT_FALLBACK_REASON=NO_ASYNC_API")
                 elif not submit_async_cfg:
@@ -2546,6 +2576,21 @@ def run(max_frames=None):
                     continue
                 last_tick = now
                 frame_start_us = ticks_us()
+
+                if submit_async_enabled and submit_async_inflight:
+                    wait_t0 = ticks_us()
+                    try:
+                        _lgfx.blit_wait_done()
+                    except Exception:
+                        submit_async_enabled = False
+                        submit_async_inflight = False
+                        submit_inflight_buf = None
+                        print("SUBMIT_FALLBACK_REASON=WAIT_FAIL")
+                    else:
+                        w_us = ticks_diff(ticks_us(), wait_t0)
+                        prof_submit_wait_us += w_us
+                        submit_async_inflight = False
+                        submit_inflight_buf = None
 
                 seg_t0 = ticks_us()
                 input_system.update(now)
@@ -2760,6 +2805,9 @@ def run(max_frames=None):
                 if floor_runs_by_row is None or (floor_rgb_fp is None and floor_rgb_data is None):
                     if tilemap_enabled:
                         if tilemap_compose_impl == "C_API" and tilemap_idx is not None and tileset_raw is not None:
+                            transparent_key = 0xF81F
+                            if submit_wire_order and not submit_wire_runtime_swap:
+                                transparent_key = _swap16(transparent_key)
                             _lgfx.compose_tilemap_rgb565(
                                 scene_buf,
                                 sw,
@@ -2772,7 +2820,7 @@ def run(max_frames=None):
                                 tileset_raw,
                                 tile_size,
                                 tileset_w,
-                                0xF81F,
+                                transparent_key,
                             )
                         elif tilemap_rows is not None and tileset_cache is not None:
                             _compose_tilemap_scene(scene_buf, sw, scene_h, camera_x, band_top, tilemap_rows, tileset_cache, tile_size)
@@ -2880,20 +2928,42 @@ def run(max_frames=None):
                     and drew_once
                 )
                 submit_t0 = ticks_us()
+                wait_us = 0
+                kick_us = 0
+                swap_us = 0
+                if submit_wire_order and submit_wire_runtime_swap:
+                    swap_t0 = ticks_us()
+                    _lgfx.rgb565_swap_bytes_inplace(scene_buf)
+                    swap_us = ticks_diff(ticks_us(), swap_t0)
                 if submit_async_enabled:
-                    if submit_async_inflight:
-                        _lgfx.blit_wait_done()
-                    _lgfx.blit_rect565_async(0, band_top, sw, scene_h, scene_buf)
-                    submit_async_inflight = True
-                    # Swap compose/submit buffers for next frame.
-                    tmp_buf = scene_buf
-                    scene_buf = scene_buf_back
-                    scene_buf_back = tmp_buf
+                    kick_t0 = ticks_us()
+                    try:
+                        submit_async_fn(0, band_top, sw, scene_h, scene_buf)
+                    except Exception:
+                        submit_async_enabled = False
+                        submit_async_inflight = False
+                        submit_inflight_buf = None
+                        print("SUBMIT_FALLBACK_REASON=ASYNC_KICK_FAIL")
+                        submit_wait_fn(0, band_top, sw, scene_h, scene_buf)
+                        kick_us = ticks_diff(ticks_us(), kick_t0)
+                    else:
+                        kick_us = ticks_diff(ticks_us(), kick_t0)
+                        submit_async_inflight = True
+                        submit_inflight_buf = scene_buf
+                        # Swap compose/submit buffers for next frame.
+                        tmp_buf = scene_buf
+                        scene_buf = scene_buf_back
+                        scene_buf_back = tmp_buf
                 else:
-                    _lgfx.blit_rect565_wait(0, band_top, sw, scene_h, scene_buf)
+                    kick_t0 = ticks_us()
+                    submit_wait_fn(0, band_top, sw, scene_h, scene_buf)
+                    kick_us = ticks_diff(ticks_us(), kick_t0)
                 us = ticks_diff(ticks_us(), submit_t0)
                 submit_acc += us
                 prof_submit_us += us
+                prof_submit_wait_us += wait_us
+                prof_submit_kick_us += kick_us
+                prof_submit_swap_us += swap_us
                 dirty_last_rects_count = 2
                 dirty_last_bands_count = 1
                 dirty_last_camera_static = 1 if camera_x == prev_camera_x else 0
@@ -3062,6 +3132,9 @@ def run(max_frames=None):
                     avg_sprite_us = prof_sprite_us // n
                     avg_hud_us = prof_hud_us // n
                     avg_submit_us = prof_submit_us // n
+                    avg_submit_wait_us = prof_submit_wait_us // n
+                    avg_submit_kick_us = prof_submit_kick_us // n
+                    avg_submit_swap_us = prof_submit_swap_us // n
                     avg_total_us = prof_total_us // n
                     avg_pace_us = prof_pace_us // n
                     avg_other_us = avg_total_us - (
@@ -3078,6 +3151,9 @@ def run(max_frames=None):
                     print("PROFILE sprite_us=%d" % avg_sprite_us)
                     print("PROFILE hud_us=%d" % avg_hud_us)
                     print("PROFILE submit_us=%d" % avg_submit_us)
+                    print("PROFILE submit_wait_us=%d" % avg_submit_wait_us)
+                    print("PROFILE submit_kick_us=%d" % avg_submit_kick_us)
+                    print("PROFILE submit_swap_us=%d" % avg_submit_swap_us)
                     print("PROFILE pacing_us=%d" % avg_pace_us)
                     print("PROFILE other_us=%d" % avg_other_us)
                     print("PROFILE total_us=%d" % avg_total_us)
@@ -3103,6 +3179,9 @@ def run(max_frames=None):
                     prof_sprite_us = 0
                     prof_hud_us = 0
                     prof_submit_us = 0
+                    prof_submit_wait_us = 0
+                    prof_submit_kick_us = 0
+                    prof_submit_swap_us = 0
                     prof_total_us = 0
                     prof_pace_us = 0
 
@@ -3111,7 +3190,9 @@ def run(max_frames=None):
 
             if submit_async_enabled and submit_async_inflight:
                 try:
+                    w_t0 = ticks_us()
                     _lgfx.blit_wait_done()
+                    prof_submit_wait_us += ticks_diff(ticks_us(), w_t0)
                 except Exception:
                     pass
             if far_runtime_file is not None:

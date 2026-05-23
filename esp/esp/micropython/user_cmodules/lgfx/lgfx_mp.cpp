@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 
 // Keep qstr extraction lightweight: when NO_QSTR is set, avoid preprocessing
 // the heavy LovyanGFX-backed implementation body.
@@ -326,6 +327,38 @@ static mp_obj_t lgfx_blit_rect565_wait(size_t n_args, const mp_obj_t *args) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lgfx_blit_rect565_wait_obj, 5, 5, lgfx_blit_rect565_wait);
 
+
+static mp_obj_t lgfx_blit_rect565_wire_wait(size_t n_args, const mp_obj_t *args) {
+    mp_int_t x = mp_obj_get_int(args[0]);
+    mp_int_t y = mp_obj_get_int(args[1]);
+    mp_int_t w = mp_obj_get_int(args[2]);
+    mp_int_t h = mp_obj_get_int(args[3]);
+
+    if (w <= 0 || h <= 0) {
+        return mp_const_none;
+    }
+
+    mp_buffer_info_t bufinfo;
+    mp_get_buffer_raise(args[4], &bufinfo, MP_BUFFER_READ);
+
+    size_t expected_len = (size_t)w * (size_t)h * 2u;
+    if (bufinfo.len != expected_len) {
+        mp_raise_ValueError(MP_ERROR_TEXT("buf len mismatch"));
+    }
+
+    const uint16_t *pixels = (const uint16_t *)bufinfo.buf;
+    bool prev_swap = lcd.getSwapBytes();
+    lcd.startWrite();
+    lcd.setSwapBytes(false);
+    lcd.pushImage((int32_t)x, (int32_t)y, (int32_t)w, (int32_t)h, pixels);
+    lcd.waitDMA();
+    lcd.setSwapBytes(prev_swap);
+    lcd.endWrite();
+
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lgfx_blit_rect565_wire_wait_obj, 5, 5, lgfx_blit_rect565_wire_wait);
+
 static bool lgfx_async_inflight = false;
 static bool lgfx_async_prev_swap = false;
 
@@ -353,11 +386,42 @@ static mp_obj_t lgfx_blit_rect565_async(size_t n_args, const mp_obj_t *args) {
     lgfx_async_prev_swap = lcd.getSwapBytes();
     lcd.startWrite();
     lcd.setSwapBytes(true);
-    lcd.pushImage((int32_t)x, (int32_t)y, (int32_t)w, (int32_t)h, pixels);
+    lcd.pushImageDMA((int32_t)x, (int32_t)y, (int32_t)w, (int32_t)h, pixels);
     lgfx_async_inflight = true;
     return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lgfx_blit_rect565_async_obj, 5, 5, lgfx_blit_rect565_async);
+
+
+static mp_obj_t lgfx_blit_rect565_wire_async(size_t n_args, const mp_obj_t *args) {
+    mp_int_t x = mp_obj_get_int(args[0]);
+    mp_int_t y = mp_obj_get_int(args[1]);
+    mp_int_t w = mp_obj_get_int(args[2]);
+    mp_int_t h = mp_obj_get_int(args[3]);
+
+    if (w <= 0 || h <= 0) {
+        return mp_const_none;
+    }
+    if (lgfx_async_inflight) {
+        mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("async busy"));
+    }
+
+    mp_buffer_info_t bufinfo;
+    mp_get_buffer_raise(args[4], &bufinfo, MP_BUFFER_READ);
+    size_t expected_len = (size_t)w * (size_t)h * 2u;
+    if (bufinfo.len != expected_len) {
+        mp_raise_ValueError(MP_ERROR_TEXT("buf len mismatch"));
+    }
+
+    const uint16_t *pixels = (const uint16_t *)bufinfo.buf;
+    lgfx_async_prev_swap = lcd.getSwapBytes();
+    lcd.startWrite();
+    lcd.setSwapBytes(false);
+    lcd.pushImageDMA((int32_t)x, (int32_t)y, (int32_t)w, (int32_t)h, pixels);
+    lgfx_async_inflight = true;
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lgfx_blit_rect565_wire_async_obj, 5, 5, lgfx_blit_rect565_wire_async);
 
 static mp_obj_t lgfx_blit_wait_done(void) {
     if (!lgfx_async_inflight) {
@@ -370,6 +434,268 @@ static mp_obj_t lgfx_blit_wait_done(void) {
     return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(lgfx_blit_wait_done_obj, lgfx_blit_wait_done);
+
+
+static mp_obj_t lgfx_async_probe_rgb565(size_t n_args, const mp_obj_t *args) {
+    if (n_args != 4) {
+        mp_raise_ValueError(MP_ERROR_TEXT("need 4 args"));
+    }
+    mp_buffer_info_t bufinfo;
+    mp_get_buffer_raise(args[0], &bufinfo, MP_BUFFER_READ);
+    mp_int_t w = mp_obj_get_int(args[1]);
+    mp_int_t h = mp_obj_get_int(args[2]);
+    mp_int_t small_h = mp_obj_get_int(args[3]);
+
+    if (w <= 0 || h <= 0 || small_h <= 0 || small_h > h) {
+        mp_raise_ValueError(MP_ERROR_TEXT("invalid dims"));
+    }
+
+    size_t full_len = (size_t)w * (size_t)h * 2u;
+    if (bufinfo.len < full_len) {
+        mp_raise_ValueError(MP_ERROR_TEXT("buf too small"));
+    }
+
+    const uint16_t *full_pixels = (const uint16_t *)bufinfo.buf;
+    const uint16_t *small_pixels = (const uint16_t *)bufinfo.buf;
+
+    // Ensure clean async state.
+    if (lgfx_async_inflight) {
+        lcd.waitDMA();
+        lcd.setSwapBytes(lgfx_async_prev_swap);
+        lcd.endWrite();
+        lgfx_async_inflight = false;
+    }
+
+    uint32_t t_full_kick = 0, t_full_wait = 0;
+    uint32_t t_small_kick = 0, t_small_wait = 0;
+    uint32_t t_full_1 = 0, t_full_2 = 0;
+    uint32_t t_small_1 = 0, t_small_2 = 0;
+
+    // Case 1: first full-screen async call (kick + wait split)
+    {
+        int64_t t0 = esp_timer_get_time();
+        lgfx_async_prev_swap = lcd.getSwapBytes();
+        lcd.startWrite();
+        lcd.setSwapBytes(true);
+        lcd.pushImage(0, 0, (int32_t)w, (int32_t)h, full_pixels);
+        lgfx_async_inflight = true;
+        int64_t t1 = esp_timer_get_time();
+
+        lcd.waitDMA();
+        lcd.setSwapBytes(lgfx_async_prev_swap);
+        lcd.endWrite();
+        lgfx_async_inflight = false;
+        int64_t t2 = esp_timer_get_time();
+
+        t_full_kick = (uint32_t)(t1 - t0);
+        t_full_wait = (uint32_t)(t2 - t1);
+    }
+
+    // Case 2: full-screen back-to-back calls in one write session.
+    {
+        bool prev_swap = lcd.getSwapBytes();
+        lcd.startWrite();
+        lcd.setSwapBytes(true);
+
+        int64_t t0 = esp_timer_get_time();
+        lcd.pushImage(0, 0, (int32_t)w, (int32_t)h, full_pixels);
+        int64_t t1 = esp_timer_get_time();
+        lcd.pushImage(0, 0, (int32_t)w, (int32_t)h, full_pixels);
+        int64_t t2 = esp_timer_get_time();
+
+        lcd.waitDMA();
+        lcd.setSwapBytes(prev_swap);
+        lcd.endWrite();
+
+        t_full_1 = (uint32_t)(t1 - t0);
+        t_full_2 = (uint32_t)(t2 - t1);
+    }
+
+    // Case 3: small-rect async call (kick + wait split)
+    {
+        int64_t t0 = esp_timer_get_time();
+        lgfx_async_prev_swap = lcd.getSwapBytes();
+        lcd.startWrite();
+        lcd.setSwapBytes(true);
+        lcd.pushImage(0, 0, (int32_t)w, (int32_t)small_h, small_pixels);
+        lgfx_async_inflight = true;
+        int64_t t1 = esp_timer_get_time();
+
+        lcd.waitDMA();
+        lcd.setSwapBytes(lgfx_async_prev_swap);
+        lcd.endWrite();
+        lgfx_async_inflight = false;
+        int64_t t2 = esp_timer_get_time();
+
+        t_small_kick = (uint32_t)(t1 - t0);
+        t_small_wait = (uint32_t)(t2 - t1);
+    }
+
+    // Case 4: small-rect back-to-back calls in one write session.
+    {
+        bool prev_swap = lcd.getSwapBytes();
+        lcd.startWrite();
+        lcd.setSwapBytes(true);
+
+        int64_t t0 = esp_timer_get_time();
+        lcd.pushImage(0, 0, (int32_t)w, (int32_t)small_h, small_pixels);
+        int64_t t1 = esp_timer_get_time();
+        lcd.pushImage(0, 0, (int32_t)w, (int32_t)small_h, small_pixels);
+        int64_t t2 = esp_timer_get_time();
+
+        lcd.waitDMA();
+        lcd.setSwapBytes(prev_swap);
+        lcd.endWrite();
+
+        t_small_1 = (uint32_t)(t1 - t0);
+        t_small_2 = (uint32_t)(t2 - t1);
+    }
+
+    mp_printf(&mp_plat_print, "ASYNC_PROBE full_kick_us=%u full_wait_us=%u\n", t_full_kick, t_full_wait);
+    mp_printf(&mp_plat_print, "ASYNC_PROBE full_b2b_us first=%u second=%u\n", t_full_1, t_full_2);
+    mp_printf(&mp_plat_print, "ASYNC_PROBE small_h=%d small_kick_us=%u small_wait_us=%u\n", (int)small_h, t_small_kick, t_small_wait);
+    mp_printf(&mp_plat_print, "ASYNC_PROBE small_b2b_us first=%u second=%u\n", t_small_1, t_small_2);
+
+    mp_obj_t out[8] = {
+        mp_obj_new_int_from_uint(t_full_kick),
+        mp_obj_new_int_from_uint(t_full_wait),
+        mp_obj_new_int_from_uint(t_full_1),
+        mp_obj_new_int_from_uint(t_full_2),
+        mp_obj_new_int_from_uint(t_small_kick),
+        mp_obj_new_int_from_uint(t_small_wait),
+        mp_obj_new_int_from_uint(t_small_1),
+        mp_obj_new_int_from_uint(t_small_2),
+    };
+    return mp_obj_new_tuple(8, out);
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lgfx_async_probe_rgb565_obj, 4, 4, lgfx_async_probe_rgb565);
+
+static mp_obj_t lgfx_submit_probe_rgb565(size_t n_args, const mp_obj_t *args) {
+    if (n_args != 3) {
+        mp_raise_ValueError(MP_ERROR_TEXT("need 3 args"));
+    }
+
+    mp_buffer_info_t bufinfo;
+    mp_get_buffer_raise(args[0], &bufinfo, MP_BUFFER_READ);
+    mp_int_t w = mp_obj_get_int(args[1]);
+    mp_int_t h = mp_obj_get_int(args[2]);
+    if (w <= 0 || h <= 0) {
+        mp_raise_ValueError(MP_ERROR_TEXT("invalid dims"));
+    }
+
+    size_t full_len = (size_t)w * (size_t)h * 2u;
+    if (bufinfo.len < full_len) {
+        mp_raise_ValueError(MP_ERROR_TEXT("buf too small"));
+    }
+
+    const uint16_t *pixels = (const uint16_t *)bufinfo.buf;
+
+    if (lgfx_async_inflight) {
+        lcd.waitDMA();
+        lcd.setSwapBytes(lgfx_async_prev_swap);
+        lcd.endWrite();
+        lgfx_async_inflight = false;
+    }
+
+    uint32_t t_swap_sync = 0;
+    uint32_t t_swap_dma_kick = 0;
+    uint32_t t_swap_dma_wait = 0;
+    uint32_t t_noswap_sync = 0;
+    uint32_t t_noswap_dma_kick = 0;
+    uint32_t t_noswap_dma_wait = 0;
+
+    {
+        bool prev_swap = lcd.getSwapBytes();
+        int64_t t0 = esp_timer_get_time();
+        lcd.startWrite();
+        lcd.setSwapBytes(true);
+        lcd.pushImage(0, 0, (int32_t)w, (int32_t)h, pixels);
+        lcd.waitDMA();
+        lcd.setSwapBytes(prev_swap);
+        lcd.endWrite();
+        int64_t t1 = esp_timer_get_time();
+        t_swap_sync = (uint32_t)(t1 - t0);
+    }
+
+    {
+        bool prev_swap = lcd.getSwapBytes();
+        lcd.startWrite();
+        lcd.setSwapBytes(true);
+        int64_t t0 = esp_timer_get_time();
+        lcd.pushImageDMA(0, 0, (int32_t)w, (int32_t)h, pixels);
+        int64_t t1 = esp_timer_get_time();
+        lcd.waitDMA();
+        int64_t t2 = esp_timer_get_time();
+        lcd.setSwapBytes(prev_swap);
+        lcd.endWrite();
+        t_swap_dma_kick = (uint32_t)(t1 - t0);
+        t_swap_dma_wait = (uint32_t)(t2 - t1);
+    }
+
+    {
+        bool prev_swap = lcd.getSwapBytes();
+        int64_t t0 = esp_timer_get_time();
+        lcd.startWrite();
+        lcd.setSwapBytes(false);
+        lcd.pushImage(0, 0, (int32_t)w, (int32_t)h, pixels);
+        lcd.waitDMA();
+        lcd.setSwapBytes(prev_swap);
+        lcd.endWrite();
+        int64_t t1 = esp_timer_get_time();
+        t_noswap_sync = (uint32_t)(t1 - t0);
+    }
+
+    {
+        bool prev_swap = lcd.getSwapBytes();
+        lcd.startWrite();
+        lcd.setSwapBytes(false);
+        int64_t t0 = esp_timer_get_time();
+        lcd.pushImageDMA(0, 0, (int32_t)w, (int32_t)h, pixels);
+        int64_t t1 = esp_timer_get_time();
+        lcd.waitDMA();
+        int64_t t2 = esp_timer_get_time();
+        lcd.setSwapBytes(prev_swap);
+        lcd.endWrite();
+        t_noswap_dma_kick = (uint32_t)(t1 - t0);
+        t_noswap_dma_wait = (uint32_t)(t2 - t1);
+    }
+
+    mp_printf(&mp_plat_print, "SUBMIT_PROBE_SWAP_SYNC_US=%u\n", t_swap_sync);
+    mp_printf(&mp_plat_print, "SUBMIT_PROBE_SWAP_DMA_KICK_US=%u\n", t_swap_dma_kick);
+    mp_printf(&mp_plat_print, "SUBMIT_PROBE_SWAP_DMA_WAIT_US=%u\n", t_swap_dma_wait);
+    mp_printf(&mp_plat_print, "SUBMIT_PROBE_NOSWAP_SYNC_US=%u\n", t_noswap_sync);
+    mp_printf(&mp_plat_print, "SUBMIT_PROBE_NOSWAP_DMA_KICK_US=%u\n", t_noswap_dma_kick);
+    mp_printf(&mp_plat_print, "SUBMIT_PROBE_NOSWAP_DMA_WAIT_US=%u\n", t_noswap_dma_wait);
+
+    mp_obj_t out[6] = {
+        mp_obj_new_int_from_uint(t_swap_sync),
+        mp_obj_new_int_from_uint(t_swap_dma_kick),
+        mp_obj_new_int_from_uint(t_swap_dma_wait),
+        mp_obj_new_int_from_uint(t_noswap_sync),
+        mp_obj_new_int_from_uint(t_noswap_dma_kick),
+        mp_obj_new_int_from_uint(t_noswap_dma_wait),
+    };
+    return mp_obj_new_tuple(6, out);
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lgfx_submit_probe_rgb565_obj, 3, 3, lgfx_submit_probe_rgb565);
+
+
+static mp_obj_t lgfx_rgb565_swap_bytes_inplace(mp_obj_t buf_obj) {
+    mp_buffer_info_t bufinfo;
+    mp_get_buffer_raise(buf_obj, &bufinfo, MP_BUFFER_RW);
+    if ((bufinfo.len & 1u) != 0u) {
+        mp_raise_ValueError(MP_ERROR_TEXT("buf len must be even"));
+    }
+
+    uint8_t *buf = (uint8_t *)bufinfo.buf;
+    for (size_t i = 0; i < bufinfo.len; i += 2u) {
+        uint8_t b = buf[i];
+        buf[i] = buf[i + 1u];
+        buf[i + 1u] = b;
+    }
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(lgfx_rgb565_swap_bytes_inplace_obj, lgfx_rgb565_swap_bytes_inplace);
 
 static mp_obj_t lgfx_blit_rect565_wait_copy(size_t n_args, const mp_obj_t *args) {
     mp_int_t x = mp_obj_get_int(args[0]);
@@ -1002,8 +1328,13 @@ static const mp_rom_map_elem_t lgfx_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_blit_rect565), MP_ROM_PTR(&lgfx_blit_rect565_obj) },
     { MP_ROM_QSTR(MP_QSTR_blit_rect565_rows), MP_ROM_PTR(&lgfx_blit_rect565_rows_obj) },
     { MP_ROM_QSTR(MP_QSTR_blit_rect565_wait), MP_ROM_PTR(&lgfx_blit_rect565_wait_obj) },
+    { MP_ROM_QSTR(MP_QSTR_blit_rect565_wire_wait), MP_ROM_PTR(&lgfx_blit_rect565_wire_wait_obj) },
     { MP_ROM_QSTR(MP_QSTR_blit_rect565_async), MP_ROM_PTR(&lgfx_blit_rect565_async_obj) },
+    { MP_ROM_QSTR(MP_QSTR_blit_rect565_wire_async), MP_ROM_PTR(&lgfx_blit_rect565_wire_async_obj) },
     { MP_ROM_QSTR(MP_QSTR_blit_wait_done), MP_ROM_PTR(&lgfx_blit_wait_done_obj) },
+    { MP_ROM_QSTR(MP_QSTR_async_probe_rgb565), MP_ROM_PTR(&lgfx_async_probe_rgb565_obj) },
+    { MP_ROM_QSTR(MP_QSTR_submit_probe_rgb565), MP_ROM_PTR(&lgfx_submit_probe_rgb565_obj) },
+    { MP_ROM_QSTR(MP_QSTR_rgb565_swap_bytes_inplace), MP_ROM_PTR(&lgfx_rgb565_swap_bytes_inplace_obj) },
     { MP_ROM_QSTR(MP_QSTR_blit_rect565_wait_copy), MP_ROM_PTR(&lgfx_blit_rect565_wait_copy_obj) },
     { MP_ROM_QSTR(MP_QSTR_blit_rect565_wait_copy_compat), MP_ROM_PTR(&lgfx_blit_rect565_wait_copy_compat_obj) },
     { MP_ROM_QSTR(MP_QSTR_compose_masked_rgb565), MP_ROM_PTR(&lgfx_compose_masked_rgb565_obj) },
@@ -1040,8 +1371,13 @@ static const mp_rom_map_elem_t lgfx_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_blit_rect565), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_blit_rect565_rows), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_blit_rect565_wait), MP_ROM_INT(0) },
+    { MP_ROM_QSTR(MP_QSTR_blit_rect565_wire_wait), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_blit_rect565_async), MP_ROM_INT(0) },
+    { MP_ROM_QSTR(MP_QSTR_blit_rect565_wire_async), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_blit_wait_done), MP_ROM_INT(0) },
+    { MP_ROM_QSTR(MP_QSTR_async_probe_rgb565), MP_ROM_INT(0) },
+    { MP_ROM_QSTR(MP_QSTR_submit_probe_rgb565), MP_ROM_INT(0) },
+    { MP_ROM_QSTR(MP_QSTR_rgb565_swap_bytes_inplace), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_blit_rect565_wait_copy), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_blit_rect565_wait_copy_compat), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_compose_masked_rgb565), MP_ROM_INT(0) },
