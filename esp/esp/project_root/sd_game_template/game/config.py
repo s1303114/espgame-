@@ -50,16 +50,7 @@ INPUT_DEBOUNCE_MS = 30
 SKILL_EDGE_LOCK_MS = 100
 SWAP_MIN_INTERVAL_MS = 90
 
-# Acceptance stage selector:
-# - "PHASE7": run Phase 7 near/far swap validation
-# - "PHASE8": run Phase 8 UI/save/startup validation
-# - "PHASE6": run Phase 6 deterministic entity/actor validation
-# - "PHASE5": run existing Phase 5 flow
-# - "RED_SCREEN_TEST": full-screen red display smoke test
-# - "PHASE_CAMERA_TEST": standalone camera/parallax validation path
-PHASE_ACCEPTANCE_STAGE = "PHASE_CAMERA_TEST"
-
-# Standalone camera/parallax test (must not alter Phase 7 baseline).
+# Camera/parallax mainline.
 CAMERA_TEST_MAP_W = 960
 CAMERA_TEST_MAP_H = 240
 CAMERA_TEST_FAR_W = 320
@@ -133,70 +124,4 @@ OBJECTS_COMPOSE_IMPL = "C_API"
 OBJECT_GRAVITY_ENABLED = True
 OBJECT_GRAVITY_STEP = 2
 
-# Phase 5 acceptance mode:
-# - "TEST": deterministic scripted validation
-# - "MANUAL": real joystick validation flow
-# - "LEFT_EDGE_STATIC": draw fixed blocks at x=0/4/8 (no physics/input)
-# - "AUTO": TEST when max_frames is provided, otherwise MANUAL
-PHASE5_ACCEPTANCE_MODE = "LEFT_EDGE_STATIC"
-PHASE5_TEST_FRAMES = 300
-PHASE5_MANUAL_FRAMES = 900
-PHASE5_LEFT_EDGE_TEST_FRAMES = 900
-PHASE5_LEFT_EDGE_BLOCK_W = 16
-PHASE5_LEFT_EDGE_BLOCK_H = 16
-PHASE5_LEFT_EDGE_BLOCK_Y = 72
-PHASE5_MANUAL_AXIS_ACTIVE = 30
-PHASE5_MANUAL_AXIS_STOP = 8
-PHASE5_MANUAL_STOP_FRAMES = 10
-
-# Phase 6 acceptance mode:
-# - "TEST": deterministic entity/actor validation (default)
-# - "MANUAL": interactive observation mode
-# - "AUTO": TEST when max_frames is provided, otherwise MANUAL
-PHASE6_ACCEPTANCE_MODE = "MANUAL"
-PHASE6_TEST_FRAMES = 300
-PHASE6_MANUAL_FRAMES = 900
-PHASE6_BULLET_POOL_SIZE = 6
-PHASE6_BULLET_MAX_FRAMES = 24
-PHASE6_SHOOTER_INTERVAL_FRAMES = 12
-PHASE6_BULLET_SPEED = 4
-
-# Phase 7 acceptance mode:
-# - "TEST": deterministic near/far swap validation
-# - "MANUAL": interactive swap observation
-# - "AUTO": TEST when max_frames is provided, otherwise MANUAL
-PHASE7_ACCEPTANCE_MODE = "MANUAL"
-PHASE7_TEST_FRAMES = 320
-PHASE7_MANUAL_FRAMES = 900
-PHASE7_SHOOTER_INTERVAL_FRAMES = 12
-PHASE7_TEST_SHOOTER_INTERVAL_FRAMES = 600
-
-# Deterministic trigger schedule (frame index)
-PHASE7_TEST_NEAR_START = 20
-PHASE7_TEST_FAR_START = 40
-PHASE7_TEST_NO_TARGET_START = 60
-PHASE7_TEST_HOLD_X_START = 80
-PHASE7_TEST_NO_CD_B_FRAME = 100
-PHASE7_TEST_NO_CD_X_FRAME = 104
-PHASE7_TEST_AIR_SWAP_FRAME = 130
-
-# Phase 8 acceptance mode:
-# - "TEST": deterministic UI/save validation
-# - "MANUAL": interactive HUD/save validation
-# - "AUTO": TEST when max_frames is provided, otherwise MANUAL
-PHASE8_ACCEPTANCE_MODE = "MANUAL"
-PHASE8_TEST_FRAMES = 360
-PHASE8_MANUAL_FRAMES = 900
-PHASE8_HUD_HEIGHT = 16
-PHASE8_SAVE_STATUS_TTL_FRAMES = 45
-
-# Deterministic trigger schedule (frame index)
-PHASE8_TEST_DEBUG_ON_FRAME = 8
-PHASE8_TEST_SAVE_FRAME = 22
-PHASE8_TEST_DEBUG_OFF_FRAME = 44
-PHASE8_TEST_NEAR_FRAME = 70
-PHASE8_TEST_FAR_FRAME = 96
-PHASE8_TEST_SAVE_LOAD_FRAME = 128
-
-STAGE_PATH = "/sd/game/maps/stage01.json"
 SAVE_PATH = "/sd/game/save/save0.json"

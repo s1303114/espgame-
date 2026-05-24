@@ -192,12 +192,6 @@ def _run_test_mode():
             app._boot_source_tag = "SD" if source == "sd" else "ROOT"
         except Exception:
             pass
-        try:
-            stage = str(getattr(app.config, "PHASE_ACCEPTANCE_STAGE", "")).upper()
-        except Exception:
-            stage = ""
-        if stage == "PHASE8":
-            print("PHASE8_SD_BOOT_OK")
         if getattr(app, "_lgfx", None) is None:
             print("TEST_ENTRY_FAIL_NO_LGFX")
             return False

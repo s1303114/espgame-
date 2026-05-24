@@ -265,7 +265,7 @@ idf.py -B build-ESP32_GENERIC_S3-SPIRAM_OCT_NOBT -p /dev/ttyACM0 flash
 確認目前模式（以本專案現況）：
 
 ```bash
-rg -n "PHASE_ACCEPTANCE_STAGE|CAMERA_TEST_MODE|CAMERA_SPI_TEST_PATH" /workspace/esp/esp/project_root/sd_game_template/game/config.py
+rg -n "CAMERA_TEST_MODE|CAMERA_SPI_TEST_PATH" /workspace/esp/esp/project_root/sd_game_template/game/config.py
 ```
 
 序列埠確認關鍵字：

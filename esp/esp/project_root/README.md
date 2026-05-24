@@ -1,6 +1,6 @@
 # 目前架構說明書（Camera Test 主線）
 
-本文件描述目前 `PHASE_CAMERA_TEST` 主線的實際架構（以目前程式碼與板上行為為準）。
+本文件描述目前 Camera Test 主線的實際架構（以目前程式碼與板上行為為準）。
 
 ---
 
@@ -8,9 +8,7 @@
 
 - 韌體啟動後由 `main.py` 進入 `test_entry.py`。
 - 目前 `test_entry.py` 是 `MODE="TEST"`。
-- `PHASE_ACCEPTANCE_STAGE = "PHASE_CAMERA_TEST"` 時，會進入：
-  - `sd_game_template/game/app.py`
-  - 再轉到 `sd_game_template/game/app_camera_test.py`
+- `sd_game_template/game/app.py` 目前固定進入 `sd_game_template/game/app_camera_test.py`
 - 目前已改為：
   - `TEST_MAX_FRAMES <= 0` 時，不傳 `max_frames`，測試不會在 300 幀自動結束。
 
