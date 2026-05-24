@@ -1,0 +1,5 @@
+id,type,world_x,world_y,w,h,sprite,solid,trigger,layer,swappable,src_x,src_y,src_w,src_h,gravity
+board,decor,496,48,32,48,board,0,0,1,1,0,0,32,48,1
+flower,decor,608,48,32,48,flower,0,0,1,1,32,0,32,48,1
+bush,decor,192,128,64,32,bush,0,0,1,1,64,0,64,32,1
+s_rock,checkpoint,128,128,32,32,s_rock,0,1,1,1,0,48,32,32,1
