@@ -21,6 +21,8 @@ MAX_ENTITIES = 32
 GRAVITY = 1
 MAX_FALL_SPEED = 8
 PLAYER_SPEED_X = 2
+PLAYER_GRAVITY = 1
+PLAYER_FALL_SPEED_MAX = 8
 
 # Input pins
 # Hardware mapping adjusted in Phase 4 manual validation:
@@ -46,6 +48,7 @@ JOY_AXIS_RAW_MIN = 0
 JOY_AXIS_RAW_MAX = 65535
 INPUT_DEBOUNCE_MS = 30
 SKILL_EDGE_LOCK_MS = 100
+SWAP_MIN_INTERVAL_MS = 90
 
 # Acceptance stage selector:
 # - "PHASE7": run Phase 7 near/far swap validation
@@ -84,7 +87,7 @@ CAMERA_TEST_BG_NEAR = CAMERA_TEST_BG_DIR + "/bg_near.png"
 CAMERA_TEST_BG_FAR_RGB565 = CAMERA_TEST_BG_DIR + "/bg_far.rgb565"
 CAMERA_TEST_BG_MID_RGB565 = CAMERA_TEST_BG_DIR + "/bg_mid.rgb565"
 CAMERA_TEST_BG_NEAR_RGB565 = CAMERA_TEST_BG_DIR + "/bg_near.rgb565"
-CAMERA_TEST_ROOT_BG_FAR_RGB565 = "/bg_far.rgb565"
+CAMERA_TEST_ROOT_BG_FAR_RGB565 = "/bg_far_wire.rgb565"
 CAMERA_TEST_ROOT_BG_MID_RGB565 = "/bg_mid.rgb565"
 CAMERA_TEST_ROOT_TEST_BARS_RGB565 = "/test_bars.rgb565"
 CAMERA_TEST_ROOT_TEST_GRID_RGB565 = "/test_grid.rgb565"
@@ -102,6 +105,8 @@ CAMERA_DIRTY_RECT_EXPERIMENT = True
 CAMERA_DIRTY_FALLBACK_ON_CAMERA_MOVE = True
 CAMERA_DIRTY_BAND_FULL_WIDTH = True
 CAMERA_FULL_BULK_DOUBLE_BUFFER = True
+CAMERA_FULL_BULK_WIRE_ORDER = True
+CAMERA_FULL_BULK_WIRE_RUNTIME_SWAP = False
 
 # Foreground floor layer (map1) settings.
 FLOOR_LAYER_ENABLED = False
@@ -120,10 +125,13 @@ FLOOR_USE_C_COMPOSE = True
 # Tilemap (16x16) settings.
 # app_camera_test.py uses embedded tile index CSV and this tileset atlas.
 TILEMAP_ENABLED = True
-TILESET_RGB565_PATH = "game/Tilemap/tilemap_all.rgb565"
+TILESET_RGB565_PATH = "game/Tilemap/tilemap_all_wire.rgb565"
 TILEMAP_CSV_PATH = "game/Tilemap/map1_tilemap.csv"
 TILESET_ATLAS_W = 128
 TILESET_ATLAS_H = 128
+OBJECTS_COMPOSE_IMPL = "C_API"
+OBJECT_GRAVITY_ENABLED = True
+OBJECT_GRAVITY_STEP = 2
 
 # Phase 5 acceptance mode:
 # - "TEST": deterministic scripted validation

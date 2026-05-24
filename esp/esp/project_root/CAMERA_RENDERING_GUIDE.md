@@ -11,16 +11,35 @@
 - `CAMERA_PLAYER_SPRITE_COMPOSE_IMPL = "C_API"`
 - `CAMERA_FULL_BULK_WIRE_ORDER = True`
 - `CAMERA_FULL_BULK_WIRE_RUNTIME_SWAP = False`
-- `CAMERA_FULL_BULK_DOUBLE_BUFFER = False`
+- `CAMERA_FULL_BULK_DOUBLE_BUFFER = True`
 
-提交主線目前是 **wire-order full-screen sync submit**：
+目前板上互動主線狀態：
+
+- X 鍵觸發 far swap，Y 鍵觸發 near swap。
+- swap 使用邊緣觸發與 `SWAP_MIN_INTERVAL_MS` 間隔，避免按鍵連點或長按造成重複觸發。
+- far/near swap 都走直接交換流程，不做碰撞回滾；找不到目標只輸出 `SWAP_FAIL_NO_TARGET`。
+- 玩家重力由 `PLAYER_GRAVITY` 與 `PLAYER_FALL_SPEED_MAX` 控制。
+- object 重力由 `OBJECT_GRAVITY_ENABLED` 與 `OBJECT_GRAVITY_STEP` 控制，每幀把可見 object 往地面推進。
+- tilemap、object、player sprite 都優先走 C API compose，透明 colorkey 判斷在 C++ 端完成。
+- `TEST_MAX_FRAMES = 0` 時 test entry 不傳 `max_frames`，不再 300 幀自動結束。
+
+提交主線目前是 **wire-order full-screen async DMA submit + cache sync**：
 
 - 主線標記：`SUBMIT_BYTE_ORDER=WIRE_NOSWAP`
 - 主線標記：`SUBMIT_WIRE_RUNTIME_SWAP=0`
-- 主線標記：`SUBMIT_MODE=SYNC_SINGLE_BUFFER_FALLBACK`
-- 回退原因標記：`SUBMIT_FALLBACK_REASON=CFG_OFF`
+- 主線標記：`SUBMIT_MODE=ASYNC_DOUBLE_BUFFER_MAINLINE`
 
-這裡的 `SYNC_SINGLE_BUFFER_FALLBACK` 是目前刻意選擇的穩定路徑，不代表錯誤。原因是 `wire + pushImageDMA` 直接 DMA 讀 `scene_buf` 時會出現水平條碼狀花屏，且玩家 sprite 也會被背景色覆蓋；改成 `wire + pushImage` non-DMA 後畫面穩定。
+`blit_rect565_wire_async` 在 `pushImageDMA` 前會先對 source buffer 做 CPU-to-memory cache sync：
+
+```cpp
+esp_cache_msync(
+    (void *)pixels,
+    expected_len,
+    ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED
+);
+```
+
+這是目前拿回 DMA 效能且保持畫面穩定的關鍵。未做 cache sync 的 wire DMA 會出現水平條碼狀花屏，且玩家 sprite 可能被背景色覆蓋。
 
 目前 tilemap 資源主線：
 
@@ -41,17 +60,21 @@
    - transparent key 需依 wire-order 轉成 byte-swapped raw value
 4. 玩家 sprite 合成：`compose_masked_rgb565`（C API），來源是 wire-order sprite asset。
 5. 提交到 TFT：
-   - 穩定主線：`blit_rect565_wire_wait`（`setSwapBytes(false)` + `pushImage` + `waitDMA`）
-   - 暫不使用：`blit_rect565_wire_async` / `pushImageDMA` 直接讀 scene buffer
+   - 主線：`blit_rect565_wire_async`（cache sync + `setSwapBytes(false)` + `pushImageDMA`）
+   - 下一幀開始前：若上一幀仍 in-flight，呼叫 `blit_wait_done()`
+   - 回退穩定路徑：`blit_rect565_wire_wait`（`setSwapBytes(false)` + `pushImage` + `waitDMA`）
 
-目前穩定提交路徑的 C++ 形態：
+目前主線提交路徑的 C++ 形態：
 
 ```cpp
+esp_cache_msync(
+    (void *)pixels,
+    expected_len,
+    ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED
+);
 lcd.startWrite();
 lcd.setSwapBytes(false);
-lcd.pushImage(x, y, w, h, pixels);
-lcd.waitDMA();
-lcd.endWrite();
+lcd.pushImageDMA(x, y, w, h, pixels);
 ```
 
 ## 3. 關鍵 API
@@ -62,8 +85,8 @@ lcd.endWrite();
 - `compose_tilemap_rgb565(...)`
 - `blit_rect565_wait(...)`：舊 little-endian + swap path
 - `blit_rect565_async(...)`：舊 little-endian + swap path
-- `blit_rect565_wire_wait(...)`：目前穩定主線，wire-order + non-DMA submit
-- `blit_rect565_wire_async(...)`：wire-order + DMA submit，目前不作主線
+- `blit_rect565_wire_async(...)`：目前主線，wire-order + cache sync + DMA submit
+- `blit_rect565_wire_wait(...)`：穩定回退路徑，wire-order + non-DMA submit
 - `blit_wait_done()`
 - `async_probe_rgb565(...)`
 - `submit_probe_rgb565(...)`
@@ -74,6 +97,35 @@ lcd.endWrite();
 - `--byte-order le`：舊格式，低 byte / 高 byte
 - `--byte-order wire`：目前主線資產格式，高 byte / 低 byte
 
+## 3.1 RGB565 資產轉檔規格
+
+主工具檔案：
+
+- `/workspace/esp/esp/project_root/sd_game_template/game/tools/convert_png_to_rgb565.py`
+
+工具輸出格式：
+
+- 輸出是 raw RGB565，row-major，沒有 header。檔案大小必須等於 `width * height * 2`。
+- `--byte-order le`：每個 pixel 輸出 little-endian byte order，也就是 `lo, hi`。這是舊 `setSwapBytes(true)` 路徑使用的格式。
+- `--byte-order wire`：每個 pixel 輸出 panel wire-order，也就是 `hi, lo`。這是目前主線 `blit_rect565_wire_async` 使用的格式。
+- `--preview <png>` 只會額外輸出解碼預覽 PNG，不會改變 `.rgb565` 本體格式。
+
+透明規則：
+
+- 轉檔工具本身不讀 alpha，也不把透明像素改寫成特殊 metadata；輸入 PNG 會先轉成 RGB。
+- 專案目前使用 magenta `#FF00FF` 作為 colorkey 顏色。RGB565 語意值是 `0xF81F`。
+- 若輸出 `--byte-order le`，檔案 bytes 是 `1F F8`，C compose 傳入/比較的 16-bit key 是 `0xF81F`。
+- 若輸出 `--byte-order wire`，檔案 bytes 是 `F8 1F`。因目前 C compose 以 raw little-endian 16-bit 讀 buffer，比較用 key 需 byte-swap，最終傳入值是 `0x1FF8`。
+- 目前主線是 wire-order，所以 tilemap transparent key 在 `app_camera_test.py` 會從 `0xF81F` 轉成 `0x1FF8` 後傳給 `compose_tilemap_rgb565(...)`。
+
+metadata 與 layout：
+
+- `.rgb565` 檔案本身沒有額外 metadata，沒有寬高、frame count、atlas layout 或透明設定。這些都由檔名、`config.py` 與載入端約定。
+- far 背景目前由 `CAMERA_TEST_ROOT_BG_FAR_RGB565 = "/bg_far_wire.rgb565"` 指定，尺寸約定是 `CAMERA_TEST_FAR_W x CAMERA_TEST_MAP_H = 320x240`。
+- tileset atlas 目前由 `TILESET_RGB565_PATH = "game/Tilemap/tilemap_all_wire.rgb565"` 指定，尺寸由 `TILESET_ATLAS_W = 128`、`TILESET_ATLAS_H = 128` 指定。
+- tile 大小是 `TILE_SIZE = 16`，所以目前 atlas layout 是 `8 x 8` tiles，row-major 排列。tilemap CSV index `0` 是透明，index `1` 對應 atlas 第一格，之後依 row-major 遞增。
+- 玩家 sprite 目前沒有 atlas metadata；每幀是獨立檔案 `/player_walk_<side>_<frame>_wire.rgb565`，frame 資訊由檔名與載入迴圈決定。
+
 ## 4. 觀測重點與目前瓶頸
 
 序列埠輸出重點：
@@ -82,7 +134,7 @@ lcd.endWrite();
 - `CAMERA_PLAYER_SPRITE_COMPOSE_IMPL=C_API`
 - `SUBMIT_BYTE_ORDER=WIRE_NOSWAP`
 - `SUBMIT_WIRE_RUNTIME_SWAP=0`
-- `SUBMIT_MODE=SYNC_SINGLE_BUFFER_FALLBACK`
+- `SUBMIT_MODE=ASYNC_DOUBLE_BUFFER_MAINLINE`
 - `PROFILE submit_us=...`
 - `PROFILE submit_kick_us=...`
 - `PROFILE submit_wait_us=...`
@@ -95,24 +147,25 @@ lcd.endWrite();
 | --- | ---: | --- |
 | little-endian + `swap=true` | `submit_us ~= 37.7ms` | 舊穩定路徑，但慢 |
 | wire + runtime in-place swap + DMA | `kick ~= 24.3ms`, `swap ~= 13.2ms`, 總體約 `37.6ms` | 無收益，且曾造成花屏 |
-| wire asset + DMA | `submit_us ~= 24.3ms` | 快，但出現水平條碼花屏，玩家也會被背景色覆蓋 |
-| wire asset + non-DMA `pushImage` | `submit_us ~= 34.3ms` | 目前穩定主線 |
+| wire asset + DMA，無 cache sync | `submit_us ~= 24.3ms` | 快，但出現水平條碼花屏，玩家也會被背景色覆蓋 |
+| wire asset + non-DMA `pushImage` | `submit_us ~= 34.3ms` | 穩定回退路徑 |
+| wire asset + DMA + `esp_cache_msync` | `submit_us ~= 24.5ms` | 目前主線，畫面正常 |
 
-目前穩定版實測：
+目前主線實測：
 
-- `submit_us` 約 `34.2~34.3ms`
-- `submit_kick_us` 約 `34.2~34.3ms`
-- `submit_wait_us = 0`
+- `submit_us` 約 `24.5~24.6ms`
+- `submit_kick_us` 約 `24.5~24.6ms`
+- `submit_wait_us` 約 `5.9~6.0ms`
 - `submit_swap_us = 0`
-- `fps` 約 `18.6~20.9`，依 world compose 成本而變
+- `fps` 約 `20.0~22.4`，依 world compose 成本而變
 
 關鍵結論：
 
 1. wire-order asset 是有效方向，能避免 LGFX 內部 byte-swap/convert staging。
 2. runtime in-place swap 不可作主線，因為每幀多約 `13.2ms`，且容易污染雙緩衝 buffer 狀態。
-3. `pushImageDMA` 直接讀 Python/PSRAM scene buffer 會造成水平條碼狀花屏；推測是 DMA/cache coherency 或 PSRAM DMA 路徑一致性問題。
-4. 目前穩定方案是 wire-order asset + non-DMA `pushImage` full-screen submit。
-5. 若未來要恢復 `24.3ms` DMA submit，下一步應研究 DMA 前 cache writeback / memory sync，而不是再改 tilemap 或透明色。
+3. `pushImageDMA` 直接讀 Python/PSRAM scene buffer 若不做 cache sync，會造成水平條碼狀花屏；原因是 DMA/cache coherency 或 PSRAM DMA 路徑一致性問題。
+4. 目前正式方案是 wire-order asset + `esp_cache_msync` + DMA full-screen submit。
+5. non-DMA `pushImage` 保留為穩定回退路徑。
 
 ## 4.1 已排除的畫面問題方向
 
@@ -121,8 +174,9 @@ lcd.endWrite();
 - 關閉 tilemap transparent key：背景色條碼仍存在，且透明色粉紅會被畫出。
 - 將 tilemap CSV 中 `0` tile 臨時改成 tile 1：背景色條碼仍存在，且 world compose 顯著變慢。
 - 改成 wire-order non-DMA submit：條碼消失。
+- 在 wire-order DMA submit 前加入 `esp_cache_msync(..., DIR_C2M | UNALIGNED)`：條碼消失，且保留 DMA submit 效能。
 
-因此該問題不是 tilemap transparent key，也不是 CSV 空洞；是 wire DMA submit 路徑造成的資料一致性問題。
+因此該問題不是 tilemap transparent key，也不是 CSV 空洞；是 wire DMA submit 路徑的資料一致性問題。正式修法是 DMA 前做 cache sync。
 
 ## 5. Build / Flash
 
