@@ -6,11 +6,10 @@
 
 ## 1. 啟動與入口
 
-- 韌體啟動後由 `main.py` 進入 `test_entry.py`。
-- 目前 `test_entry.py` 是 `MODE="TEST"`。
-- `sd_game_template/game/app.py` 目前固定進入 `sd_game_template/game/app_camera_test.py`
-- 目前已改為：
-  - `TEST_MAX_FRAMES <= 0` 時，不傳 `max_frames`，測試不會在 300 幀自動結束。
+- 韌體啟動後由內部 flash 的 `main.py` 掛載 SD 卡。
+- 內部 flash 只作為 launcher；遊戲程式與資產都放在 `/sd/game`。
+- `main.py` 會把 `/sd/game` 放到 `sys.path` 最前面，直接載入 SD 上的 `app.py`。
+- 沒有 SD 卡、或 `/sd/game/app.py` 不存在時，launcher 進入 safe mode，不會執行內部舊遊戲。
 
 ---
 
@@ -36,15 +35,35 @@
 
 ## 3. 資產與路徑
 
-### 3.1 背景 / Tilemap
+### 3.1 SD-only 部署
 
-- far 背景：先載入 RAM 快取（減少每幀讀檔）。
+SD 卡根目錄需要有：
+
+```text
+/sd/game/
+  app.py
+  app_camera_test.py
+  config.py
+  assets.py
+  state.py
+  actors/
+  engine/
+  save/
+  Tilemap/
+  picture/
+```
+
+內部 flash 只需要同步 `boot.py` 與 `main.py`。更新遊戲時，主要更新 SD 卡的 `/sd/game` 內容。
+
+### 3.2 背景 / Tilemap
+
+- far 背景：`/sd/game/picture/backgound/bg_far_wire.rgb565`，先載入 RAM 快取（減少每幀讀檔）。
 - Tilemap CSV：
   - `game/Tilemap/map1_tilemap.csv`
 - Tileset RGB565：
   - `game/Tilemap/tilemap_all_wire.rgb565`
 
-### 3.2 Objects
+### 3.3 Objects
 
 - 物件表：
   - `game/picture/object/objects.csv`

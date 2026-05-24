@@ -1,5 +1,5 @@
-# Main entry for internal flash.
-# Fixed launcher: always run test_entry.run() after reset.
+# SD-only launcher for internal flash.
+# Keep game code and assets on /sd/game; internal flash only boots the SD app.
 
 GAME_PATH = "/sd/game"
 
@@ -41,65 +41,59 @@ def _mount_sd():
             return False, msg
 
 
-def _is_missing_module(exc, module_name):
-    msg = str(exc).lower()
-    return ("no module named" in msg) and (module_name.lower() in msg)
-
-
-def _load_test_entry():
+def _reset_game_imports():
     import sys
 
-    while GAME_PATH in sys.path:
-        sys.path.remove(GAME_PATH)
-    if "test_entry" in sys.modules:
-        del sys.modules["test_entry"]
-    import test_entry
-    return test_entry, "root"
+    purge = []
+    for name in sys.modules:
+        if name in ("app", "app_camera_test", "config", "assets", "state"):
+            purge.append(name)
+            continue
+        if name == "engine" or name.startswith("engine."):
+            purge.append(name)
+            continue
+        if name == "actors" or name.startswith("actors."):
+            purge.append(name)
+            continue
+
+    i = 0
+    while i < len(purge):
+        name = purge[i]
+        i += 1
+        if name in sys.modules:
+            del sys.modules[name]
 
 
-def _load_test_entry_from_sd():
+def _load_sd_app():
+    import os
     import sys
 
+    os.stat(GAME_PATH + "/app.py")
     while GAME_PATH in sys.path:
         sys.path.remove(GAME_PATH)
     sys.path.insert(0, GAME_PATH)
-    if "test_entry" in sys.modules:
-        del sys.modules["test_entry"]
-    import test_entry
-    return test_entry, "sd"
+    _reset_game_imports()
+    import app
+    return app
 
 
 def main():
-    root_exc = None
+    ok, detail = _mount_sd()
+    if ok:
+        print("SD mount: %s" % detail)
+    else:
+        print("SD mount failed: %s" % detail)
+        _safe_mode("sd mount failed")
+        return
+
     try:
-        test_entry, source = _load_test_entry()
-    except Exception as exc:
-        root_exc = exc
-
-        ok, detail = _mount_sd()
-        if ok:
-            print("SD mount: %s" % detail)
-        else:
-            print("SD mount skipped: %s" % detail)
-
+        app = _load_sd_app()
+        print("Launcher source: sd")
         try:
-            test_entry, source = _load_test_entry_from_sd()
-        except Exception as sd_exc:
-            try:
-                import sys
-
-                print("Launcher import crashed (root)")
-                sys.print_exception(root_exc)
-                print("Launcher import crashed (sd)")
-                sys.print_exception(sd_exc)
-            except Exception:
-                print("Launcher import crashed root=%r sd=%r" % (root_exc, sd_exc))
-            _safe_mode("test_entry load failed")
-            return
-
-    try:
-        print("Launcher source: %s" % source)
-        test_entry.run()
+            app._boot_source_tag = "SD"
+        except Exception:
+            pass
+        app.run()
     except Exception as exc:
         try:
             import sys
@@ -107,7 +101,7 @@ def main():
             sys.print_exception(exc)
         except Exception:
             print("Launcher run crashed: %r" % (exc,))
-        _safe_mode("test_entry run failed")
+        _safe_mode("sd app run failed")
 
 
 if __name__ == "__main__":

@@ -20,7 +20,7 @@
 - 玩家重力由 `PLAYER_GRAVITY` 與 `PLAYER_FALL_SPEED_MAX` 控制。
 - object 重力由 `OBJECT_GRAVITY_ENABLED` 與 `OBJECT_GRAVITY_STEP` 控制，每幀把可見 object 往地面推進。
 - tilemap、object、player sprite 都優先走 C API compose，透明 colorkey 判斷在 C++ 端完成。
-- `TEST_MAX_FRAMES = 0` 時 test entry 不傳 `max_frames`，不再 300 幀自動結束。
+- 內部 flash 的 `main.py` 是 SD-only launcher；遊戲程式與資產都由 `/sd/game` 載入。
 
 提交主線目前是 **wire-order full-screen async DMA submit + cache sync**：
 
@@ -44,10 +44,40 @@ esp_cache_msync(
 
 - tileset：`game/Tilemap/tilemap_all_wire.rgb565`
 - 地圖：`game/Tilemap/map1_tilemap.csv`
-- far 背景：`/bg_far_wire.rgb565`
-- 玩家 sprite：`/player_walk_<side>_<frame>_wire.rgb565`
+- far 背景：`/sd/game/picture/backgound/bg_far_wire.rgb565`
+- 玩家 sprite：`/sd/game/picture/player/player_wire.rgb565`
 
 所有主線 `.rgb565` 影像資產都應是 **panel wire-order**，也就是每個 RGB565 pixel 以高 byte、低 byte 的順序存放。不要在每幀提交前做 runtime byte swap。
+
+
+## SD-only 啟動與部署
+
+內部 flash 只保留最小 launcher：
+
+- `/boot.py`
+- `/main.py`
+
+遊戲程式與資產放在 SD 卡：
+
+```text
+/sd/game/
+  app.py
+  app_camera_test.py
+  config.py
+  assets.py
+  state.py
+  actors/
+  engine/
+  save/
+  Tilemap/map1_tilemap.csv
+  Tilemap/tilemap_all_wire.rgb565
+  picture/backgound/bg_far_wire.rgb565
+  picture/object/objects.csv
+  picture/object/objects_atlas_wire.rgb565
+  picture/player/player_wire.rgb565
+```
+
+開機後 `main.py` 會掛載 SD 卡並直接從 `/sd/game/app.py` 啟動；沒有 SD 卡或 SD 上缺少 `app.py` 時會進入 safe mode。
 
 ## 2. 每幀流程
 
@@ -120,10 +150,10 @@ lcd.pushImageDMA(x, y, w, h, pixels);
 metadata 與 layout：
 
 - `.rgb565` 檔案本身沒有額外 metadata，沒有寬高、frame count、atlas layout 或透明設定。這些都由檔名、`config.py` 與載入端約定。
-- far 背景目前由 `CAMERA_TEST_ROOT_BG_FAR_RGB565 = "/bg_far_wire.rgb565"` 指定，尺寸約定是 `CAMERA_TEST_FAR_W x CAMERA_TEST_MAP_H = 320x240`。
+- far 背景目前由 `CAMERA_TEST_ROOT_BG_FAR_RGB565 = "/sd/game/picture/backgound/bg_far_wire.rgb565"` 指定，尺寸約定是 `CAMERA_TEST_FAR_W x CAMERA_TEST_MAP_H = 320x240`。
 - tileset atlas 目前由 `TILESET_RGB565_PATH = "game/Tilemap/tilemap_all_wire.rgb565"` 指定，尺寸由 `TILESET_ATLAS_W = 128`、`TILESET_ATLAS_H = 128` 指定。
 - tile 大小是 `TILE_SIZE = 16`，所以目前 atlas layout 是 `8 x 8` tiles，row-major 排列。tilemap CSV index `0` 是透明，index `1` 對應 atlas 第一格，之後依 row-major 遞增。
-- 玩家 sprite 目前沒有 atlas metadata；每幀是獨立檔案 `/player_walk_<side>_<frame>_wire.rgb565`，frame 資訊由檔名與載入迴圈決定。
+- 玩家 sprite 目前由 `CAMERA_PLAYER_SPRITESHEET_PATH = "/sd/game/picture/player/player_wire.rgb565"` 指定，spritesheet 尺寸與 frame 佈局由載入端約定。
 
 ## 4. 觀測重點與目前瓶頸
 
