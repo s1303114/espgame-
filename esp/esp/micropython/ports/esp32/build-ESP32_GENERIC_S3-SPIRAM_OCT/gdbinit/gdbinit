@@ -1,2 +1,0 @@
-source /workspace/esp/esp/micropython/ports/esp32/build-ESP32_GENERIC_S3-SPIRAM_OCT/gdbinit/symbols
-source /workspace/esp/esp/micropython/ports/esp32/build-ESP32_GENERIC_S3-SPIRAM_OCT/gdbinit/connect

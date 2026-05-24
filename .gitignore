@@ -1,1 +1,33 @@
-esp/esp/esp-idf/
+# Build outputs
+esp/esp/micropython/ports/esp32/build-*/
+esp/esp/micropython/mpy-cross/build/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Native build artifacts
+*.o
+*.obj
+*.a
+*.elf
+*.bin
+*.map
+*.uf2
+*.ninja_deps
+*.ninja_log
+compile_commands.json
+CMakeCache.txt
+CMakeFiles/
+
+# Local/test environment
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Generated logs
+*.log
+esp/esp/micropython/ports/esp32/build-*/log/
+esp/esp/.venv-mpremote/
