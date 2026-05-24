@@ -521,6 +521,70 @@ def _blend_sprite_segments_into_scene(
             scene_buf[dst_off : dst_off + (copy_px * 2)] = sprite_rgb565[src2 : src2 + (copy_px * 2)]
         i += 5
 
+def _blit_sprite_colorkey_into_scene(scene_buf, scene_w, scene_h, dst_x, dst_y, sprite_rgb565, key_b0, key_b1, sprite_w=32, sprite_h=32):
+    if dst_x >= scene_w or dst_y >= scene_h or (dst_x + sprite_w) <= 0 or (dst_y + sprite_h) <= 0:
+        return
+    src_x0 = 0
+    src_y0 = 0
+    dst_x0 = dst_x
+    dst_y0 = dst_y
+    copy_w = sprite_w
+    copy_h = sprite_h
+    if dst_x0 < 0:
+        src_x0 = -dst_x0
+        copy_w -= src_x0
+        dst_x0 = 0
+    if dst_y0 < 0:
+        src_y0 = -dst_y0
+        copy_h -= src_y0
+        dst_y0 = 0
+    if dst_x0 + copy_w > scene_w:
+        copy_w = scene_w - dst_x0
+    if dst_y0 + copy_h > scene_h:
+        copy_h = scene_h - dst_y0
+    if copy_w <= 0 or copy_h <= 0:
+        return
+
+    src_row_bytes = sprite_w * 2
+    dst_row_bytes = scene_w * 2
+    r = 0
+    while r < copy_h:
+        src_off = ((src_y0 + r) * src_row_bytes) + (src_x0 * 2)
+        dst_off = ((dst_y0 + r) * dst_row_bytes) + (dst_x0 * 2)
+        x = 0
+        while x < copy_w:
+            s0 = sprite_rgb565[src_off]
+            s1 = sprite_rgb565[src_off + 1]
+            if not (s0 == key_b0 and s1 == key_b1):
+                scene_buf[dst_off] = s0
+                scene_buf[dst_off + 1] = s1
+            src_off += 2
+            dst_off += 2
+            x += 1
+        r += 1
+
+
+def _slice_player_spritesheet_frames(sheet_rgb565, sheet_w=128, frame_w=32, frame_h=32):
+    expected = sheet_w * (frame_h * 2) * 2
+    if len(sheet_rgb565) != expected:
+        raise ValueError('spritesheet size mismatch')
+    row_bytes = sheet_w * 2
+    frame_bytes = frame_w * frame_h * 2
+    right = []
+    left = []
+    for row_idx, out_list in ((0, right), (1, left)):
+        base_y = row_idx * frame_h
+        for f in range(4):
+            base_x = f * frame_w
+            fb = bytearray(frame_bytes)
+            woff = 0
+            for y in range(frame_h):
+                src = ((base_y + y) * row_bytes) + (base_x * 2)
+                fb[woff:woff + frame_w * 2] = sheet_rgb565[src:src + frame_w * 2]
+                woff += frame_w * 2
+            out_list.append(bytes(fb))
+    return right, left
+
 
 def _compose_grid_chunk565(buf, screen_w, screen_h, strip_y, strip_h):
     line_color = 0x7BEF  # light gray
@@ -640,6 +704,322 @@ def _flatten_tilemap_rows(tile_rows):
         r += 1
     return out, map_w, map_h
 
+def _parse_objects_csv(text):
+    rows = []
+    lines = text.strip().splitlines()
+    if not lines:
+        return rows
+    header = [h.strip() for h in lines[0].split(",")]
+    idx = {}
+    i = 0
+    while i < len(header):
+        idx[header[i]] = i
+        i += 1
+    req = (
+        "world_x",
+        "world_y",
+        "w",
+        "h",
+        "solid",
+        "layer",
+        "src_x",
+        "src_y",
+        "src_w",
+        "src_h",
+    )
+    for k in req:
+        if k not in idx:
+            return []
+    li = 1
+    while li < len(lines):
+        line = lines[li].strip()
+        li += 1
+        if not line:
+            continue
+        cols = [c.strip() for c in line.split(",")]
+        try:
+            wx = int(cols[idx["world_x"]])
+            wy = int(cols[idx["world_y"]])
+            w = int(cols[idx["w"]])
+            h = int(cols[idx["h"]])
+            solid = 1 if int(cols[idx["solid"]]) != 0 else 0
+            layer = int(cols[idx["layer"]])
+            if "visible" in idx:
+                visible = 1 if int(cols[idx["visible"]]) != 0 else 0
+            else:
+                visible = 1
+            sx = int(cols[idx["src_x"]])
+            sy = int(cols[idx["src_y"]])
+            sw = int(cols[idx["src_w"]])
+            sh = int(cols[idx["src_h"]])
+        except Exception:
+            continue
+        if "swappable" in idx:
+            swappable = 1 if int(cols[idx["swappable"]]) != 0 else 0
+        else:
+            swappable = 0
+        rows.append([wx, wy, w, h, solid, layer, visible, swappable, sx, sy, sw, sh])
+    return rows
+
+
+def _load_objects_rows(path):
+    try:
+        with open(path, "r") as fp:
+            text = fp.read()
+    except Exception:
+        return []
+    try:
+        return _parse_objects_csv(text)
+    except Exception:
+        return []
+
+
+def _load_rgb565_blob(path, exp_bytes):
+    try:
+        with open(path, "rb") as fp:
+            data = fp.read()
+    except Exception:
+        return None
+    if data is None or len(data) != exp_bytes:
+        return None
+    return data
+
+def _pack_objects_for_c(rows):
+    if not rows:
+        return bytearray(), 12, 0
+    out = bytearray(len(rows) * 12)
+    oi = 0
+    bi = 0
+    while oi < len(rows):
+        wx, wy, _ow, _oh, _solid, _layer, visible, _swappable, sx, sy, sw, sh = rows[oi]
+        if visible:
+            for v in (wx, wy, sx, sy, sw, sh):
+                iv = int(v)
+                if iv < -32768:
+                    iv = -32768
+                if iv > 65535:
+                    iv = 65535
+                uv = iv & 0xFFFF
+                out[bi] = uv & 0xFF
+                out[bi + 1] = (uv >> 8) & 0xFF
+                bi += 2
+        oi += 1
+    if bi != len(out):
+        out = out[:bi]
+    count = bi // 12
+    return out, 12, count
+
+def _pick_swappable_object_index(objects_rows, player_x, player_y, player_w, player_h, pick_far, camera_x, band_top, view_w, view_h):
+    if not objects_rows:
+        return -1
+    px = player_x + (player_w // 2)
+    py = player_y + (player_h // 2)
+    best_i = -1
+    best_d2 = -1
+    oi = 0
+    while oi < len(objects_rows):
+        wx, wy, ow, oh, _solid, _layer, visible, swappable, _sx, _sy, _sw, _sh = objects_rows[oi]
+        if visible and swappable:
+            sx0 = int(wx) - int(camera_x)
+            sy0 = int(wy) - int(band_top)
+            sx1 = sx0 + int(ow)
+            sy1 = sy0 + int(oh)
+            in_view = (sx0 < view_w and sx1 > 0 and sy0 < view_h and sy1 > 0)
+            if in_view:
+                ox = int(wx) + (int(ow) // 2)
+                oy = int(wy) + (int(oh) // 2)
+                dx = ox - px
+                dy = oy - py
+                d2 = dx * dx + dy * dy
+                if best_i < 0:
+                    best_i = oi
+                    best_d2 = d2
+                else:
+                    if pick_far:
+                        if d2 > best_d2:
+                            best_i = oi
+                            best_d2 = d2
+                    else:
+                        if d2 < best_d2:
+                            best_i = oi
+                            best_d2 = d2
+        oi += 1
+    return best_i
+
+
+def _repack_single_object_entry(objects_c_buf, obj_stride, row_index, wx, wy, sx, sy, sw, sh):
+    if objects_c_buf is None or obj_stride < 12 or row_index < 0:
+        return
+    base = row_index * obj_stride
+    if base + 12 > len(objects_c_buf):
+        return
+    vals = (wx, wy, sx, sy, sw, sh)
+    bi = base
+    for v in vals:
+        iv = int(v)
+        if iv < -32768:
+            iv = -32768
+        if iv > 65535:
+            iv = 65535
+        uv = iv & 0xFFFF
+        objects_c_buf[bi] = uv & 0xFF
+        objects_c_buf[bi + 1] = (uv >> 8) & 0xFF
+        bi += 2
+
+
+def _rebuild_object_solids(objects_rows):
+    out = []
+    if not objects_rows:
+        return out
+    i = 0
+    while i < len(objects_rows):
+        wx, wy, ow, oh, solid, _layer, visible, _swappable, _sx, _sy, _sw, _sh = objects_rows[i]
+        if visible and solid:
+            out.append((wx, wy, ow, oh))
+        i += 1
+    return out
+
+
+def _object_valid_after_swap(objects_rows, row_index, tilemap_idx, tilemap_w, tilemap_h, tile_size):
+    if row_index < 0 or row_index >= len(objects_rows):
+        return False
+    wx, wy, ow, oh, solid, _layer, visible, _swappable, _sx, _sy, _sw, _sh = objects_rows[row_index]
+    if not visible or ow <= 0 or oh <= 0:
+        return False
+    # Only solid objects must stay out of tilemap blocks.
+    # Decorative/non-solid objects are allowed to overlap map graphics.
+    if solid and tilemap_idx is not None and tilemap_w > 0 and tilemap_h > 0:
+        if _aabb_collides_tilemap(tilemap_idx, tilemap_w, tilemap_h, tile_size, int(wx), int(wy), int(ow), int(oh)):
+            return False
+    i = 0
+    while i < len(objects_rows):
+        if i != row_index:
+            x2, y2, w2, h2, _s2, _l2, v2, _sw2, _sx2, _sy2, _sw3, _sh3 = objects_rows[i]
+            if v2 and w2 > 0 and h2 > 0:
+                if int(wx) < int(x2) + int(w2) and int(wx) + int(ow) > int(x2) and int(wy) < int(y2) + int(h2) and int(wy) + int(oh) > int(y2):
+                    return False
+        i += 1
+    return True
+
+
+
+def _blit_atlas_region_colorkey_into_scene(
+    scene_buf,
+    scene_w,
+    scene_h,
+    dst_x,
+    dst_y,
+    atlas_buf,
+    atlas_w,
+    atlas_h,
+    src_x,
+    src_y,
+    src_w,
+    src_h,
+    key_b0,
+    key_b1,
+):
+    if dst_x >= scene_w or dst_y >= scene_h or (dst_x + src_w) <= 0 or (dst_y + src_h) <= 0:
+        return
+    if src_x < 0 or src_y < 0 or src_w <= 0 or src_h <= 0:
+        return
+    if src_x + src_w > atlas_w or src_y + src_h > atlas_h:
+        return
+
+    src_x0 = 0
+    src_y0 = 0
+    dst_x0 = dst_x
+    dst_y0 = dst_y
+    copy_w = src_w
+    copy_h = src_h
+    if dst_x0 < 0:
+        src_x0 = -dst_x0
+        copy_w -= src_x0
+        dst_x0 = 0
+    if dst_y0 < 0:
+        src_y0 = -dst_y0
+        copy_h -= src_y0
+        dst_y0 = 0
+    if dst_x0 + copy_w > scene_w:
+        copy_w = scene_w - dst_x0
+    if dst_y0 + copy_h > scene_h:
+        copy_h = scene_h - dst_y0
+    if copy_w <= 0 or copy_h <= 0:
+        return
+
+    src_row_bytes = atlas_w * 2
+    dst_row_bytes = scene_w * 2
+    r = 0
+    while r < copy_h:
+        sy = src_y + src_y0 + r
+        sx = src_x + src_x0
+        src_off = (sy * src_row_bytes) + (sx * 2)
+        dst_off = ((dst_y0 + r) * dst_row_bytes) + (dst_x0 * 2)
+        x = 0
+        while x < copy_w:
+            s0 = atlas_buf[src_off]
+            s1 = atlas_buf[src_off + 1]
+            if not (s0 == key_b0 and s1 == key_b1):
+                scene_buf[dst_off] = s0
+                scene_buf[dst_off + 1] = s1
+            src_off += 2
+            dst_off += 2
+            x += 1
+        r += 1
+
+
+def _aabb_collides_objects(px, py, pw, ph, object_solids):
+    if not object_solids:
+        return False
+    p_right = px + pw
+    p_bottom = py + ph
+    i = 0
+    while i < len(object_solids):
+        ox, oy, ow, oh = object_solids[i]
+        if px < (ox + ow) and p_right > ox and py < (oy + oh) and p_bottom > oy:
+            return True
+        i += 1
+    return False
+
+
+def _aabb_collides_world(px, py, pw, ph, tilemap_idx, tilemap_w, tilemap_h, tile_size, object_solids):
+    if tilemap_idx is not None and tilemap_w > 0 and tilemap_h > 0:
+        if _aabb_collides_tilemap(tilemap_idx, tilemap_w, tilemap_h, tile_size, px, py, pw, ph):
+            return True
+    if _aabb_collides_objects(px, py, pw, ph, object_solids):
+        return True
+    return False
+
+
+def _move_axis_world(tilemap_idx, tilemap_w, tilemap_h, tile_size, object_solids, px, py, pw, ph, dx, dy):
+    hit_x = False
+    hit_y = False
+    nx = px
+    ny = py
+    sx = 1 if dx > 0 else -1
+    sy = 1 if dy > 0 else -1
+    ax = dx if dx >= 0 else -dx
+    ay = dy if dy >= 0 else -dy
+
+    while ax > 0:
+        tx = nx + sx
+        if _aabb_collides_world(tx, ny, pw, ph, tilemap_idx, tilemap_w, tilemap_h, tile_size, object_solids):
+            hit_x = True
+            break
+        nx = tx
+        ax -= 1
+
+    while ay > 0:
+        ty = ny + sy
+        if _aabb_collides_world(nx, ty, pw, ph, tilemap_idx, tilemap_w, tilemap_h, tile_size, object_solids):
+            hit_y = True
+            break
+        ny = ty
+        ay -= 1
+
+    return nx, ny, hit_x, hit_y
+
+
 def _swap16(v):
     return ((v & 0xFF) << 8) | ((v >> 8) & 0xFF)
 
@@ -726,6 +1106,90 @@ def _compose_tilemap_scene(scene_buf, scene_w, scene_h, camera_x, band_top, tile
             dx = (c * tile_size) - camera_x
             dy = (r * tile_size) - band_top
             _blit_tile_to_scene(scene_buf, scene_w, scene_h, dx, dy, tileset[tid], tile_size)
+
+
+def _tilemap_is_solid(tilemap_idx, tilemap_w, tilemap_h, tx, ty):
+    if tx < 0 or ty < 0 or tx >= tilemap_w or ty >= tilemap_h:
+        return False
+    return tilemap_idx[(ty * tilemap_w) + tx] != 0
+
+
+def _aabb_collides_tilemap(tilemap_idx, tilemap_w, tilemap_h, tile_size, x, y, w, h):
+    x0 = x
+    y0 = y
+    x1 = x + w - 1
+    y1 = y + h - 1
+    tx0 = x0 // tile_size
+    ty0 = y0 // tile_size
+    tx1 = x1 // tile_size
+    ty1 = y1 // tile_size
+    ty = ty0
+    while ty <= ty1:
+        tx = tx0
+        while tx <= tx1:
+            if _tilemap_is_solid(tilemap_idx, tilemap_w, tilemap_h, tx, ty):
+                return True
+            tx += 1
+        ty += 1
+    return False
+
+
+def _move_axis_tilemap(tilemap_idx, tilemap_w, tilemap_h, tile_size, x, y, w, h, delta_x, delta_y):
+    hit_x = 0
+    hit_y = 0
+    if delta_x != 0:
+        step_x = 1 if delta_x > 0 else -1
+        n = delta_x if delta_x > 0 else -delta_x
+        i = 0
+        while i < n:
+            nx = x + step_x
+            if _aabb_collides_tilemap(tilemap_idx, tilemap_w, tilemap_h, tile_size, nx, y, w, h):
+                hit_x = 1
+                break
+            x = nx
+            i += 1
+    if delta_y != 0:
+        step_y = 1 if delta_y > 0 else -1
+        n = delta_y if delta_y > 0 else -delta_y
+        i = 0
+        while i < n:
+            ny = y + step_y
+            if _aabb_collides_tilemap(tilemap_idx, tilemap_w, tilemap_h, tile_size, x, ny, w, h):
+                hit_y = 1
+                break
+            y = ny
+            i += 1
+    return x, y, hit_x, hit_y
+
+
+def _snap_spawn_to_ground(tilemap_idx, tilemap_w, tilemap_h, tile_size, x, y, w, h):
+    map_h_px = tilemap_h * tile_size
+    max_y = map_h_px - h
+    if max_y < 0:
+        max_y = 0
+    if y < 0:
+        y = 0
+    if y > max_y:
+        y = max_y
+
+    guard = map_h_px + tile_size
+    while guard > 0 and _aabb_collides_tilemap(tilemap_idx, tilemap_w, tilemap_h, tile_size, x, y, w, h):
+        if y <= 0:
+            break
+        y -= 1
+        guard -= 1
+
+    guard = map_h_px + tile_size
+    while guard > 0:
+        ny = y + 1
+        if ny > max_y:
+            break
+        if _aabb_collides_tilemap(tilemap_idx, tilemap_w, tilemap_h, tile_size, x, ny, w, h):
+            break
+        y = ny
+        guard -= 1
+
+    return y
 
 
 def _normalize_mode(v):
@@ -2106,6 +2570,20 @@ def run(max_frames=None):
             player_x = int(getattr(config, "CAMERA_TEST_PLAYER_START_X", 32))
             player_x = _clamp(player_x, 0, max_player_x)
             speed = int(getattr(config, "PLAYER_SPEED_X", 2))
+            gravity = int(getattr(config, "PLAYER_GRAVITY", 1))
+            if gravity < 0:
+                gravity = 0
+            fall_speed_max = int(getattr(config, "PLAYER_FALL_SPEED_MAX", 8))
+            if fall_speed_max < 1:
+                fall_speed_max = 1
+            vel_y = 0
+
+            object_gravity_enabled = bool(getattr(config, "OBJECT_GRAVITY_ENABLED", True))
+            object_gravity_step = int(getattr(config, "OBJECT_GRAVITY_STEP", 2))
+            if object_gravity_step < 0:
+                object_gravity_step = 0
+            if object_gravity_step > 8:
+                object_gravity_step = 8
             dbg_key = "CAMERA_TEST_STEP3_DBG_EVERY"
             if step_tag == 4:
                 dbg_key = "CAMERA_TEST_STEP4_DBG_EVERY"
@@ -2288,48 +2766,30 @@ def run(max_frames=None):
                     raise RuntimeError("CAMERA_TEST_STEP4_FAIL_ALLOC")
             elif use_sprite_player:
                 print("CAMERA_PLAYER_SPRITE_DRAW_MODE=COMPOSE")
+                print("CAMERA_PLAYER_SPRITE_TRANSPARENCY=COLORKEY")
                 print("CAMERA_PLAYER_SPRITE_COMPOSE_IMPL=%s" % sprite_compose_impl)
             if use_sprite_player:
-                side = "left"
-                while side in ("left", "right"):
-                    i = 0
-                    while i < 4:
-                        sprite_wire_suffix = "_wire" if (bool(getattr(config, "CAMERA_FULL_BULK_WIRE_ORDER", False)) and not bool(getattr(config, "CAMERA_FULL_BULK_WIRE_RUNTIME_SWAP", True))) else ""
-                        rgb_path = "/player_walk_%s_%d%s.rgb565" % (side, i, sprite_wire_suffix)
-                        mask_path = "/player_walk_%s_%d.mask1" % (side, i)
-                        try:
-                            with open(rgb_path, "rb") as rf:
-                                rb = rf.read()
-                            with open(mask_path, "rb") as mf:
-                                mb = mf.read()
-                        except Exception:
-                            print("CAMERA_TEST_STEP=4_FAIL_PLAYER_ASSET")
-                            raise RuntimeError("CAMERA_TEST_STEP4_FAIL_PLAYER_ASSET")
-                        if len(rb) != 2048:
-                            print("CAMERA_TEST_STEP=4_FAIL_PLAYER_RGB565_SIZE")
-                            raise RuntimeError("CAMERA_TEST_STEP4_FAIL_PLAYER_RGB565_SIZE")
-                        if len(mb) != 128:
-                            print("CAMERA_TEST_STEP=4_FAIL_PLAYER_MASK1_SIZE")
-                            raise RuntimeError("CAMERA_TEST_STEP4_FAIL_PLAYER_MASK1_SIZE")
-                        if side == "left":
-                            sprite_left.append(rb)
-                            if sprite_draw_mode == "COMPOSE":
-                                sprite_mask_left.append(mb)
-                            else:
-                                sprite_seg_left.append(_build_sprite_segments_32(mb))
-                        else:
-                            sprite_right.append(rb)
-                            if sprite_draw_mode == "COMPOSE":
-                                sprite_mask_right.append(mb)
-                            else:
-                                sprite_seg_right.append(_build_sprite_segments_32(mb))
-                        i += 1
-                    side = "right" if side == "left" else "done"
+                sheet_path = str(getattr(config, "CAMERA_PLAYER_SPRITESHEET_PATH", "/player_wire.rgb565"))
+                try:
+                    with open(sheet_path, "rb") as sf:
+                        sheet_rgb = sf.read()
+                    sprite_right, sprite_left = _slice_player_spritesheet_frames(sheet_rgb, 128, sprite_w, sprite_h)
+                except Exception:
+                    print("CAMERA_TEST_STEP=4_FAIL_PLAYER_ASSET")
+                    raise RuntimeError("CAMERA_TEST_STEP4_FAIL_PLAYER_ASSET")
+                print("CAMERA_PLAYER_SPRITE_SOURCE=SHEET")
                 print("CAMERA_PLAYER_SPRITE_READY=1")
             player_screen_x = player_x
             camera_x = 0
             frame = 0
             drew_once = False
+            # Swap input stability: edge trigger + min interval + per-frame lock.
+            swap_min_interval_ms = int(getattr(config, "SWAP_MIN_INTERVAL_MS", 90))
+            if swap_min_interval_ms < 0:
+                swap_min_interval_ms = 0
+            last_x_down = False
+            last_y_down = False
+            last_swap_ms = -1000000
             prev_sprite_x = None
             prev_sprite_y = None
             last_tick = ticks_ms()
@@ -2392,6 +2852,8 @@ def run(max_frames=None):
             tilemap_compose_impl = "PYTHON"
             if tilemap_enabled:
                 tilemap_idx, tilemap_w, tilemap_h = _flatten_tilemap_rows(tilemap_rows)
+                if tilemap_idx is not None and tilemap_w > 0 and tilemap_h > 0:
+                    player_y = _snap_spawn_to_ground(tilemap_idx, tilemap_w, tilemap_h, tile_size, player_x, player_y, player_w, player_h)
                 tileset_path = _resolve_asset_path(getattr(config, "TILESET_RGB565_PATH", "game/Tilemap/tilemap_all.rgb565"))
                 tileset_raw = _load_tileset_raw_rgb565(tileset_path, tileset_w, tileset_h)
                 if (
@@ -2407,6 +2869,32 @@ def run(max_frames=None):
                 floor_layer_enabled = False
                 print("TILEMAP_MODE_ON")
                 print("TILEMAP_COMPOSE_IMPL=%s" % tilemap_compose_impl)
+
+            objects_csv_path = _resolve_asset_path(getattr(config, "OBJECTS_CSV_PATH", "game/picture/object/objects.csv"))
+            objects_atlas_path = _resolve_asset_path(getattr(config, "OBJECTS_ATLAS_RGB565_PATH", "game/picture/object/objects_atlas_wire.rgb565"))
+            objects_atlas_w = int(getattr(config, "OBJECTS_ATLAS_W", 128))
+            objects_atlas_h = int(getattr(config, "OBJECTS_ATLAS_H", 128))
+            objects_compose_impl_cfg = str(getattr(config, "OBJECTS_COMPOSE_IMPL", "C_API")).upper()
+            if objects_compose_impl_cfg not in ("C_API", "PYTHON"):
+                objects_compose_impl_cfg = "C_API"
+            objects_rows = _load_objects_rows(objects_csv_path)
+            objects_atlas = _load_rgb565_blob(objects_atlas_path, objects_atlas_w * objects_atlas_h * 2)
+            objects_c_buf = bytearray()
+            objects_c_stride = 12
+            objects_c_count = 0
+            object_solids = []
+            if objects_rows and objects_atlas is not None:
+                object_solids = _rebuild_object_solids(objects_rows)
+                objects_c_buf, objects_c_stride, objects_c_count = _pack_objects_for_c(objects_rows)
+                print("OBJECT_MODE_ON")
+                print("OBJECT_COUNT=%d" % len(objects_rows))
+                print("OBJECT_C_COUNT=%d" % objects_c_count)
+                print("OBJECT_COMPOSE_IMPL_CFG=%s" % objects_compose_impl_cfg)
+                print("OBJECT_SOLID_COUNT=%d" % len(object_solids))
+            else:
+                objects_rows = []
+                objects_atlas = None
+                print("OBJECT_MODE_OFF")
             floor_rgb_fp = None
             floor_mask_fp = None
             floor_rgb_data = None
@@ -2595,13 +3083,168 @@ def run(max_frames=None):
                 seg_t0 = ticks_us()
                 input_system.update(now)
                 input_lr = int(getattr(input_system, "joy_x_axis", 0))
+                move_x = 0
                 if input_lr > 20:
-                    player_x += speed
+                    move_x = speed
                     facing = 1
                 elif input_lr < -20:
-                    player_x -= speed
+                    move_x = -speed
                     facing = -1
-                player_x = _clamp(player_x, 0, max_player_x)
+
+                # User-mapped keys: X=far swap, Y=near swap.
+                # Stable trigger: edge only + minimum interval.
+                x_now = bool(getattr(input_system, "btn_x_pressed", False)) or bool(getattr(input_system, "btn_b_pressed", False))
+                y_now = bool(getattr(input_system, "btn_y_pressed", False))
+                x_edge = x_now and (not last_x_down)
+                y_edge = y_now and (not last_y_down)
+                last_x_down = x_now
+                last_y_down = y_now
+
+                swap_pick_far = False
+                swap_triggered = False
+                if x_edge:
+                    swap_pick_far = True
+                    swap_triggered = True
+                elif y_edge:
+                    swap_pick_far = False
+                    swap_triggered = True
+
+                if swap_triggered:
+                    if ticks_diff(now, last_swap_ms) < swap_min_interval_ms:
+                        swap_triggered = False
+                    else:
+                        last_swap_ms = now
+
+                if swap_triggered and objects_rows:
+                    ti = _pick_swappable_object_index(
+                        objects_rows,
+                        player_x,
+                        player_y,
+                        player_w,
+                        player_h,
+                        swap_pick_far,
+                        camera_x,
+                        band_top,
+                        sw,
+                        scene_h,
+                    )
+                    if ti >= 0:
+                        row = objects_rows[ti]
+                        old_px = player_x
+                        old_py = player_y
+                        old_ox = int(row[0])
+                        old_oy = int(row[1])
+                        obj_w = int(row[2])
+                        obj_h = int(row[3])
+
+                        # Exchange using foot-aligned + horizontal-center correction.
+                        # player_new = object_anchor adjusted by (obj size vs player size)
+                        # object_new = player_anchor adjusted by (player size vs obj size)
+                        player_x = old_ox + ((obj_w - player_w) // 2)
+                        player_y = old_oy + (obj_h - player_h)
+                        row[0] = int(old_px + ((player_w - obj_w) // 2))
+                        row[1] = int(old_py + (player_h - obj_h))
+                        object_solids = _rebuild_object_solids(objects_rows)
+                        map_h_px_swap = tilemap_h * tile_size if (tilemap_enabled and tilemap_h > 0) else sh
+                        if map_h_px_swap < sh:
+                            map_h_px_swap = sh
+                        max_player_y_swap = map_h_px_swap - player_h
+                        if max_player_y_swap < 0:
+                            max_player_y_swap = 0
+                        player_x = _clamp(player_x, 0, max_player_x)
+                        player_y = _clamp(player_y, 0, max_player_y_swap)
+                        _repack_single_object_entry(objects_c_buf, objects_c_stride, ti, row[0], row[1], row[8], row[9], row[10], row[11])
+                        object_solids = _rebuild_object_solids(objects_rows)
+                        vel_y = 0
+                        if swap_pick_far:
+                            print("SWAP_FAR_OK idx=%d px=%d py=%d" % (ti, player_x, player_y))
+                        else:
+                            print("SWAP_NEAR_OK idx=%d px=%d py=%d" % (ti, player_x, player_y))
+                    else:
+                        print("SWAP_FAIL_NO_TARGET")
+
+                map_h_px = tilemap_h * tile_size if (tilemap_enabled and tilemap_h > 0) else sh
+                if map_h_px < sh:
+                    map_h_px = sh
+
+                if object_gravity_enabled and object_gravity_step > 0 and objects_rows and tilemap_enabled and tilemap_idx is not None and tilemap_w > 0 and tilemap_h > 0:
+                    obj_moved = False
+                    oi = 0
+                    while oi < len(objects_rows):
+                        row = objects_rows[oi]
+                        wx, wy, ow, oh, _solid, _layer, visible, _swappable, sx, sy, sw0, sh0 = row
+                        if visible and ow > 0 and oh > 0:
+                            steps = object_gravity_step
+                            moved_y = 0
+                            while steps > 0:
+                                ny = int(wy) + 1
+                                if ny + int(oh) > map_h_px:
+                                    break
+                                if _aabb_collides_tilemap(tilemap_idx, tilemap_w, tilemap_h, tile_size, int(wx), ny, int(ow), int(oh)):
+                                    break
+                                wy = ny
+                                moved_y += 1
+                                steps -= 1
+                            if moved_y > 0:
+                                row[1] = int(wy)
+                                _repack_single_object_entry(objects_c_buf, objects_c_stride, oi, row[0], row[1], row[8], row[9], row[10], row[11])
+                                obj_moved = True
+                        oi += 1
+                    if obj_moved:
+                        object_solids = _rebuild_object_solids(objects_rows)
+
+                if tilemap_enabled or object_solids:
+                    # If swap/collision correction leaves player inside solids, push upward first.
+                    unembed_guard = tile_size * 4
+                    if unembed_guard < 16:
+                        unembed_guard = 16
+                    while unembed_guard > 0 and _aabb_collides_world(player_x, player_y, player_w, player_h, tilemap_idx, tilemap_w, tilemap_h, tile_size, object_solids):
+                        player_y -= 1
+                        if player_y < 0:
+                            player_y = 0
+                            break
+                        unembed_guard -= 1
+
+                    grounded = _aabb_collides_world(player_x, player_y + 1, player_w, player_h, tilemap_idx, tilemap_w, tilemap_h, tile_size, object_solids)
+                    if not grounded:
+                        vel_y += gravity
+                        if vel_y > fall_speed_max:
+                            vel_y = fall_speed_max
+                    elif vel_y > 0:
+                        vel_y = 0
+
+                    player_x, player_y, _hit_x, hit_y = _move_axis_world(
+                        tilemap_idx,
+                        tilemap_w,
+                        tilemap_h,
+                        tile_size,
+                        object_solids,
+                        player_x,
+                        player_y,
+                        player_w,
+                        player_h,
+                        move_x,
+                        vel_y,
+                    )
+                    if hit_y:
+                        vel_y = 0
+                    if player_x < 0:
+                        player_x = 0
+                    if player_x > max_player_x:
+                        player_x = max_player_x
+                    max_player_y = map_h_px - player_h
+                    if max_player_y < 0:
+                        max_player_y = 0
+                    if player_y < 0:
+                        player_y = 0
+                        vel_y = 0
+                    elif player_y > max_player_y:
+                        player_y = max_player_y
+                        vel_y = 0
+                else:
+                    player_x += move_x
+                    player_x = _clamp(player_x, 0, max_player_x)
+
                 player_center_x = player_x + (player_w // 2)
                 target_camera_x = player_center_x - screen_half
                 camera_x = _clamp(target_camera_x, 0, camera_max)
@@ -2842,6 +3485,59 @@ def run(max_frames=None):
                             off = (far_band_h + gy) * row_bytes
                             scene_buf[off : off + row_bytes] = ground_row_buf
                             gy += 1
+                if objects_rows and objects_atlas is not None:
+                    object_colorkey_enable = bool(getattr(config, "CAMERA_OBJECT_COLORKEY_ENABLE", True))
+                    object_colorkey = -1
+                    if object_colorkey_enable:
+                        object_colorkey = int(getattr(config, "CAMERA_OBJECT_COLORKEY_RGB565", 0xF81F)) & 0xFFFF
+                        if submit_wire_order and not submit_wire_runtime_swap:
+                            object_colorkey = _swap16(object_colorkey)
+                    if (
+                        objects_compose_impl_cfg == "C_API"
+                        and hasattr(_lgfx, "compose_objects_atlas_rgb565")
+                        and objects_c_count > 0
+                    ):
+                        _lgfx.compose_objects_atlas_rgb565(
+                            scene_buf,
+                            sw,
+                            scene_h,
+                            camera_x,
+                            band_top,
+                            objects_c_buf,
+                            objects_c_stride,
+                            objects_atlas,
+                            objects_atlas_w,
+                            objects_atlas_h,
+                            object_colorkey,
+                            objects_c_count,
+                        )
+                    else:
+                        obj_key_b0 = object_colorkey & 0xFF
+                        obj_key_b1 = (object_colorkey >> 8) & 0xFF
+                        oi = 0
+                        while oi < len(objects_rows):
+                            wx, wy, _ow, _oh, _solid, _layer, visible, _swappable, sx, sy, sw0, sh0 = objects_rows[oi]
+                            if visible:
+                                dx = int(wx) - camera_x
+                                dy = int(wy) - band_top
+                                _blit_atlas_region_colorkey_into_scene(
+                                    scene_buf,
+                                    sw,
+                                    scene_h,
+                                    dx,
+                                    dy,
+                                    objects_atlas,
+                                    objects_atlas_w,
+                                    objects_atlas_h,
+                                    sx,
+                                    sy,
+                                    sw0,
+                                    sh0,
+                                    obj_key_b0,
+                                    obj_key_b1,
+                                )
+                            oi += 1
+
                 prof_world_us += ticks_diff(ticks_us(), seg_t0)
 
                 seg_t0 = ticks_us()
@@ -2854,49 +3550,42 @@ def run(max_frames=None):
                     spr_y = sprite_y - band_top
                     if facing < 0:
                         spr_rgb = sprite_left[anim_idx]
-                        if sprite_draw_mode == "COMPOSE":
-                            spr_mask = sprite_mask_left[anim_idx]
-                        else:
-                            spr_seg = sprite_seg_left[anim_idx]
                     else:
                         spr_rgb = sprite_right[anim_idx]
-                        if sprite_draw_mode == "COMPOSE":
-                            spr_mask = sprite_mask_right[anim_idx]
-                        else:
-                            spr_seg = sprite_seg_right[anim_idx]
-                    if sprite_draw_mode == "COMPOSE":
-                        if sprite_compose_impl == "C_API":
-                            if not hasattr(_lgfx, "compose_masked_rgb565"):
-                                print("CAMERA_PLAYER_SPRITE_FAIL_NO_C_API")
-                                raise RuntimeError("CAMERA_PLAYER_SPRITE_FAIL_NO_C_API")
-                            try:
-                                _lgfx.compose_masked_rgb565(
-                                    scene_buf,
-                                    sw,
-                                    scene_h,
-                                    spr_x,
-                                    spr_y,
-                                    spr_rgb,
-                                    spr_mask,
-                                    sprite_w,
-                                    sprite_h,
-                                )
-                                if not c_compose_ok_logged:
-                                    print("CAMERA_PLAYER_SPRITE_C_COMPOSE_OK")
-                                    c_compose_ok_logged = True
-                            except Exception:
-                                print("CAMERA_PLAYER_SPRITE_FAIL_C_COMPOSE")
-                                raise RuntimeError("CAMERA_PLAYER_SPRITE_FAIL_C_COMPOSE")
-                        else:
-                            _blend_sprite32_mask1_into_scene(
-                                scene_buf,
-                                sw,
-                                scene_h,
-                                spr_x,
-                                spr_y,
-                                spr_rgb,
-                                spr_mask,
-                            )
+                    player_colorkey = int(getattr(config, "CAMERA_PLAYER_COLORKEY_RGB565", 0xF81F)) & 0xFFFF
+                    player_colorkey_raw = player_colorkey
+                    if submit_wire_order and not submit_wire_runtime_swap:
+                        player_colorkey_raw = _swap16(player_colorkey)
+                    if hasattr(_lgfx, "compose_colorkey_rgb565"):
+                        _lgfx.compose_colorkey_rgb565(
+                            scene_buf,
+                            sw,
+                            scene_h,
+                            spr_x,
+                            spr_y,
+                            spr_rgb,
+                            sprite_w,
+                            sprite_h,
+                            player_colorkey_raw,
+                        )
+                        if not c_compose_ok_logged:
+                            print("CAMERA_PLAYER_SPRITE_C_COLORKEY_OK")
+                            c_compose_ok_logged = True
+                    else:
+                        key_b0 = player_colorkey_raw & 0xFF
+                        key_b1 = (player_colorkey_raw >> 8) & 0xFF
+                        _blit_sprite_colorkey_into_scene(
+                            scene_buf,
+                            sw,
+                            scene_h,
+                            spr_x,
+                            spr_y,
+                            spr_rgb,
+                            key_b0,
+                            key_b1,
+                            sprite_w,
+                            sprite_h,
+                        )
                 else:
                     px0 = player_screen_x
                     py0 = player_y - band_top

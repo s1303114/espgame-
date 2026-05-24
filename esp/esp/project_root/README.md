@@ -1,68 +1,169 @@
-# ESP32-S3 MicroPython Swap Prototype
+# 目前架構說明書（Camera Test 主線）
 
-## 專案結構
-- `boot.py`: 開機最小化初始化（保持輕量、避免副作用）。
-- `main.py`: root launcher，嘗試 SD 掛載並固定進入 `test_entry.run()`。
-- `test_entry.py`: TEST/FORMAL 模式切換與 app 匯入路徑控制。
-- `sd_game_template/game/app.py`: Phase 5~8 主迴圈與驗收 runtime。
-- `sd_game_template/game/config.py`: 顏色、按鍵、phase mode、驗收幀數常數。
-- `sd_game_template/game/engine/ui.py`: Phase 8 HUD 圖塊組裝（固定頂部區域）。
-- `sd_game_template/game/engine/save_system.py`: Phase 8 JSON save/load（容錯與白名單 reason）。
-- `sd_game_template/game/maps/stage01.json`: 主關卡資料。
-- `sd_game_template/game/save/save0.json`: 預設存檔模板。
+本文件描述目前 `PHASE_CAMERA_TEST` 主線的實際架構（以目前程式碼與板上行為為準）。
 
-正式 SD 內容目錄為 `/sd/game`，可由 `sd_game_template/game` 部署得到。
+---
 
-## 啟動流程
-1. 裝置重啟後執行 `boot.py`。
-2. 進入 `main.py`，嘗試掛載 SD（容錯，不可因無卡而 crash）。
-3. `main.py` 載入 `test_entry.py` 並呼叫 `test_entry.run()`（reset 驗收鏈固定保留）。
-4. `test_entry.py`：
-   - `MODE="TEST"`：固定幀 deterministic 驗收（root 優先、sd fallback）。
-   - `MODE="FORMAL"`：正式模式（sd 優先、root fallback）。
-5. `app.run()` 依 `config.PHASE_ACCEPTANCE_STAGE` 切到對應 phase runtime。
+## 1. 啟動與入口
 
-## 已完成功能
-- Phase 0: 顯示底層整合。
-- Phase 1: 專案骨架。
-- Phase 2: 最小顯示 API 擴充。
-- Phase 3: 局部重繪壓測。
-- Phase 4: 輸入系統（含 edge trigger）。
-- Phase 5: 玩家左右移動、重力、墜落、地圖碰撞。
-- Phase 6: `Entity / enemy_basic / enemy_shooter / bullet pool`。
-- Phase 7: `Near Swap / Far Swap / air-swap-fall`。
-- Phase 8（目前版本）：
-  - 固定頂部 HUD 圖塊（HP、X/B 提示、SAVE 狀態、DEBUG 狀態）
-  - save_system 最小可用 JSON 讀寫（事件驅動）
-  - Phase8 deterministic marker（UI/SAVE/DRAW）
-  - SD 啟動路徑容錯 marker（`PHASE8_SD_BOOT_OK`）
+- 韌體啟動後由 `main.py` 進入 `test_entry.py`。
+- 目前 `test_entry.py` 是 `MODE="TEST"`。
+- `PHASE_ACCEPTANCE_STAGE = "PHASE_CAMERA_TEST"` 時，會進入：
+  - `sd_game_template/game/app.py`
+  - 再轉到 `sd_game_template/game/app_camera_test.py`
+- 目前已改為：
+  - `TEST_MAX_FRAMES <= 0` 時，不傳 `max_frames`，測試不會在 300 幀自動結束。
 
-## 待辦項目
-- Phase 8 人工驗收最終確認（目前未宣告通過）。
-- README 後續維護：新增硬體版本差異與更多部署案例。
-- 後續 phase 的玩法擴充與系統化（非本階段範圍）。
+---
 
-## 部署 / 驗收方式
-### 部署
-1. 將 `sd_game_template/game` 部署到板上（root 或 `/sd/game`）。
-2. root 保留 `boot.py/main.py/test_entry.py`。
-3. reset 後由 `main -> test_entry -> app` 自動執行。
+## 2. 畫面渲染主線（Step 4）
 
-### deterministic 驗收
-1. `test_entry.MODE="TEST"`。
-2. 設 `config.PHASE_ACCEPTANCE_STAGE="PHASE8"`。
-3. 觀察 marker：
-   - `APP_RUN_START_PHASE8`
-   - `PHASE8_UI_OK`
-   - `PHASE8_SAVE_OK`
-   - `PHASE8_DRAW_OK`
-   - `APP_RUN_END_PHASE8`
-   - `PHASE8_SD_BOOT_OK`（由 test_entry 路徑容錯邏輯輸出）
-   - `TEST_ENTRY_PASS`
+### 2.1 每幀流程
 
-### MANUAL 驗收
-1. `config.PHASE8_ACCEPTANCE_MODE="MANUAL"`。
-2. `BTN_A`：觸發 save（SAVE OK/FAIL 圖塊短暫顯示後回中立）。
-3. `BTN_Y`：debug on/off（同步輸出 `PHASE8_DEBUG_ON/OFF`）。
-4. `BTN_X/BTN_B`：保持 Near/Far。
-5. 觀察畫面不可回歸：黑撕裂、粉紅化、白點、邊界裁切。
+1. 讀輸入（搖桿 + 按鍵）
+2. 玩家移動與重力更新
+3. 物件交換（X: far / Y: near）
+4. object 重力更新（每幀）
+5. 相機 `camera_x` 更新
+6. 以 `scene_buf` 做整屏合成（320x240）
+7. 全屏提交到 TFT（full-screen bulk）
+
+### 2.2 full-screen submit
+
+- 目前是整屏提交，不走 dirty rect 主線。
+- log 會看到 `FULLSCREEN_BULK_SUBMIT_OK`。
+- `submit_us` 是主要成本之一。
+
+---
+
+## 3. 資產與路徑
+
+### 3.1 背景 / Tilemap
+
+- far 背景：先載入 RAM 快取（減少每幀讀檔）。
+- Tilemap CSV：
+  - `game/Tilemap/map1_tilemap.csv`
+- Tileset RGB565：
+  - `game/Tilemap/tilemap_all_wire.rgb565`
+
+### 3.2 Objects
+
+- 物件表：
+  - `game/picture/object/objects.csv`
+- 物件圖集：
+  - `game/picture/object/objects_atlas_wire.rgb565`
+
+> 注意：`objects.csv` 路徑之前有切到 `game/picture/player/object/...`，會導致 `OBJECT_MODE_OFF`。目前主線已回到 `game/picture/object/objects.csv`。
+
+---
+
+## 4. C++ / MicroPython 分工
+
+### 4.1 C++（LGFX 擴充）
+
+目前主線使用 C API 進行重負載合成：
+
+- `compose_tilemap_rgb565(...)`
+- `compose_objects_atlas_rgb565(...)`
+- `compose_colorkey_rgb565(...)`（玩家 sprite colorkey）
+
+透明處理使用 colorkey（粉紅 `#FF00FF`），wire-order 主線下會用對應 key 值。
+
+### 4.2 MicroPython
+
+- 遊戲邏輯（輸入、交換、重力、相機）在 Python。
+- 交換、重力、物件座標更新後，會回寫 object C 緩衝，讓 C++ 合成立即生效。
+
+---
+
+## 5. 玩家與物件邏輯
+
+### 5.1 玩家重力
+
+- 每幀先判腳下是否有支撐（tilemap / solid object）。
+- 無支撐：`vel_y += gravity`（上限 `fall_speed_max`）。
+- 有支撐：落地時 `vel_y = 0`。
+- 使用 `_move_axis_world(...)` 做像素級碰撞移動。
+
+### 5.2 物件重力（目前已開）
+
+- 每幀對 `objects_rows` 做下落更新。
+- 條件：`OBJECT_GRAVITY_ENABLED=True` 且 `OBJECT_GRAVITY_STEP>0`。
+- 規則：每幀最多下落 `OBJECT_GRAVITY_STEP` 像素，遇到 tilemap 實體停止。
+- 更新後同步 `_repack_single_object_entry(...)` 到 C 緩衝。
+
+### 5.3 Swap（X/Y）
+
+- X：最遠可交換目標（鏡頭內）
+- Y：最近可交換目標（鏡頭內）
+- 目前採「直接交換」：
+  - 不做碰撞檢查
+  - 不做回滾
+- 交換公式是 foot-align + 水平中心修正：
+  - 玩家與物件交換後可維持較合理落點。
+
+### 5.4 Swap 輸入穩定化（已加）
+
+為了解決連點失效：
+
+- 邊緣觸發：只在按下瞬間觸發
+- 最小間隔：`SWAP_MIN_INTERVAL_MS`（預設 90ms）
+- 目前 X 鍵接受：`btn_x_pressed` 或 `btn_b_pressed`（避免板子映射差異）
+
+---
+
+## 6. 目前效能狀態（方向）
+
+大致瓶頸順序：
+
+1. 全屏提交 `submit_us`
+2. 背景合成 `bg_us`
+3. world/tilemap/object 合成 `world_us`
+
+玩家 sprite 合成已由 C API 接手，`sprite_us` 已顯著下降（相較 Python 逐像素）。
+
+---
+
+## 7. 目前可調參數（建議）
+
+在 `config.py` 可調：
+
+- `SWAP_MIN_INTERVAL_MS`：交換連點手感（建議 70~120）
+- `OBJECT_GRAVITY_ENABLED`：是否開啟物件重力
+- `OBJECT_GRAVITY_STEP`：物件下落每幀步進（建議 1~3）
+- `PLAYER_GRAVITY` / `PLAYER_FALL_SPEED_MAX`：玩家重力手感
+- `OBJECTS_COMPOSE_IMPL`：`"C_API"` / `"PYTHON"`
+
+---
+
+## 8. 驗證指標（看 log）
+
+啟動確認：
+
+- `OBJECT_MODE_ON`
+- `OBJECT_COUNT=...`
+- `OBJECT_COMPOSE_IMPL_CFG=C_API`
+- `TILEMAP_MODE_ON`
+
+交換確認：
+
+- `SWAP_FAR_OK ...`
+- `SWAP_NEAR_OK ...`
+
+效能確認：
+
+- `PROFILE fps=...`
+- `PROFILE submit_us=...`
+- `PROFILE bg_us=...`
+- `PROFILE world_us=...`
+
+---
+
+## 9. 現狀結論
+
+- 目前主線是：
+  - tilemap + object + player 皆可渲染
+  - object 重力啟用
+  - X/Y 交換可用
+  - 測試不再自動 300 幀結束
+- 行為設計上，far/near 已統一為同一交換算法（只差目標選擇）。

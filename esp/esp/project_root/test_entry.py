@@ -5,7 +5,7 @@ GAME_PATH = "/sd/game"
 
 # Set to "FORMAL" to restore formal app startup behavior.
 MODE = "TEST"
-TEST_MAX_FRAMES = 300
+TEST_MAX_FRAMES = 0
 
 
 def _gc_collect():
@@ -201,7 +201,14 @@ def _run_test_mode():
         if getattr(app, "_lgfx", None) is None:
             print("TEST_ENTRY_FAIL_NO_LGFX")
             return False
-        app.run(max_frames=TEST_MAX_FRAMES)
+        try:
+            _mf = int(TEST_MAX_FRAMES)
+        except Exception:
+            _mf = 0
+        if _mf > 0:
+            app.run(max_frames=_mf)
+        else:
+            app.run()
         print("PHASE3_RUN_OK")
         print("TEST_ENTRY_PASS")
         return True
