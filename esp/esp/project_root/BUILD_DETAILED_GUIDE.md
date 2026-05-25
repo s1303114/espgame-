@@ -54,9 +54,9 @@ df -h /workspace
 
 - 只改 `project_root/sd_game_template/game/*.py`
 - 只改遊戲 JSON、地圖、config、存檔模板
-- 只改 SD/root runtime 檔案
+- 只改 SD 上的遊戲 Python、地圖、圖片或 config
 
-只改 Python runtime 時，使用第 10 節部署即可。
+只改 Python runtime 或圖片資產時，使用第 10 節 SD-only 部署即可。
 
 ## 4. 目前標準編譯流程（推薦）
 
@@ -210,22 +210,101 @@ pkill -f "makeqstrdefs.py pp|ninja all|make -j6 BOARD=ESP32_GENERIC_S3|idf.py -D
 pgrep -af "makeqstrdefs|ninja all|idf.py|make -j|cc1"
 ```
 
-## 10. Runtime 檔案快速部署（不重編）
+## 10. SD-only Runtime 部署（不重編）
 
-只改 Python 腳本時，建議直接上板：
+目前主線是 **SD-only launcher**：
+
+- 內部 flash 只需要 `boot.py` 與 `main.py`。
+- 遊戲程式與圖片資產都放在 SD 卡 `/sd/game`。
+- 開機時 `main.py` 掛載 SD，直接從 `/sd/game/app.py` 啟動。
+- 沒有 SD 卡、或 `/sd/game/app.py` 不存在時，會進入 safe mode，不會跑內部 flash 舊遊戲。
+
+### 10.1 更新內部 flash launcher
+
+`mpremote fs cp` 不支援一行把兩個來源分別寫到兩個目標，請逐檔複製：
 
 ```bash
 cd /workspace/esp/esp/project_root
-/tmp/mpvenv/bin/mpremote connect /dev/ttyACM0 fs cp sd_game_template/game/config.py :/sd/game/config.py
-/tmp/mpvenv/bin/mpremote connect /dev/ttyACM0 fs cp sd_game_template/game/app_camera_test.py :/sd/game/app_camera_test.py
-/tmp/mpvenv/bin/mpremote connect /dev/ttyACM0 fs cp sd_game_template/game/config.py :/config.py
-/tmp/mpvenv/bin/mpremote connect /dev/ttyACM0 fs cp sd_game_template/game/app_camera_test.py :/app_camera_test.py
-/tmp/mpvenv/bin/mpremote connect /dev/ttyACM0 reset
+/tmp/mpvenv/bin/mpremote connect /dev/ttyACM0 fs cp boot.py :boot.py
+/tmp/mpvenv/bin/mpremote connect /dev/ttyACM0 fs cp main.py :main.py
 ```
 
-為什麼同時寫 `/sd/game` 與 `/`：
+### 10.2 掛載 SD 並同步整包 game
 
-- 板子啟動來源可能是 SD 或 root，雙寫可避免來源不一致。
+先掛載 SD，再把整個 `sd_game_template/game` 複製到 `/sd/game`：
+
+```bash
+cd /workspace/esp/esp/project_root
+/tmp/mpvenv/bin/mpremote connect /dev/ttyACM0 exec "import machine, os
+try:
+    os.listdir('/sd')
+except Exception:
+    try:
+        os.mount(machine.SDCard(slot=2, sck=5, mosi=6, miso=7, cs=4), '/sd')
+    except Exception:
+        os.mount(machine.SDCard(slot=3, sck=5, mosi=6, miso=7, cs=4), '/sd')
+print('SD_READY')" fs -r -f cp sd_game_template/game :/sd/
+```
+
+若這條命令完成後 `/sd/game` 沒出現，通常是 `mpremote connect` 後的狀態與掛載狀態不一致。改用同一個已掛載 session：
+
+```bash
+cd /workspace/esp/esp/project_root
+/tmp/mpvenv/bin/mpremote resume fs -r -f cp sd_game_template/game :/sd/
+/tmp/mpvenv/bin/mpremote resume fs ls :/sd/game
+```
+
+### 10.3 reset 與來源驗證
+
+```bash
+/tmp/mpvenv/bin/mpremote connect /dev/ttyACM0 reset
+/tmp/mpvenv/bin/mpremote connect /dev/ttyACM0 repl
+```
+
+正常啟動後 log 會看到遊戲主線輸出，例如：
+
+- `FULLSCREEN_BULK_SUBMIT_OK`
+- `PROFILE fps=...`
+- `APP_RUN_START_PHASE_CAMERA_TEST`
+
+若要確認目前載入來源，按 `Ctrl-C` 中斷後輸入：
+
+```python
+import app, config
+print('APP_FILE', app.__file__)
+print('BG_PATH', config.CAMERA_TEST_ROOT_BG_FAR_RGB565)
+```
+
+成功條件：
+
+```text
+APP_FILE /sd/game/app.py
+BG_PATH /sd/game/picture/backgound/bg_far_wire.rgb565
+```
+
+### 10.4 SD 卡目錄結構
+
+SD 卡根目錄應有：
+
+```text
+/sd/game/
+  app.py
+  app_camera_test.py
+  config.py
+  assets.py
+  state.py
+  actors/
+  engine/
+  save/
+  Tilemap/map1_tilemap.csv
+  Tilemap/tilemap_all_wire.rgb565
+  picture/backgound/bg_far_wire.rgb565
+  picture/object/objects.csv
+  picture/object/objects_atlas_wire.rgb565
+  picture/player/player_wire.rgb565
+```
+
+注意：內部 flash 目前可能仍殘留舊的 `app.py`、`app_camera_test.py`、舊圖片等檔案；SD-only `main.py` 不會載入它們。若要清理，可另行只保留內部 flash 的 `boot.py/main.py`。
 
 ## 11. 直接在原路徑編譯（備援，不建議用於 Windows 掛載）
 
@@ -270,6 +349,7 @@ rg -n "CAMERA_TEST_MODE|CAMERA_SPI_TEST_PATH" /workspace/esp/esp/project_root/sd
 
 序列埠確認關鍵字：
 
+- `APP_FILE /sd/game/app.py`（手動查來源時）
 - `APP_RUN_START_PHASE_CAMERA_TEST`
 - `CAMERA_TEST_MODE=...`
 - `FULLSCREEN_BULK_SUBMIT_OK`（若使用 map1 + full bulk 主線）
@@ -277,7 +357,7 @@ rg -n "CAMERA_TEST_MODE|CAMERA_SPI_TEST_PATH" /workspace/esp/esp/project_root/sd
 
 ## 14. 一鍵流程（可直接貼上）
 
-### 14.1 編譯 + 燒錄 + import 驗證
+### 14.1 編譯 + 燒錄 + launcher/SD 部署 + import 驗證
 
 ```bash
 cd /workspace/esp/esp/project_root
@@ -287,7 +367,23 @@ cd /tmp/esp-mp-local/micropython/ports/esp32
 source /opt/esp/idf/export.sh
 idf.py -B build-ESP32_GENERIC_S3-SPIRAM_OCT_NOBT -p /dev/ttyACM0 flash
 /tmp/mpvenv/bin/mpremote connect /dev/ttyACM0 exec "import lgfx; print('LGFX_IMPORT_OK')"
+
+cd /workspace/esp/esp/project_root
+/tmp/mpvenv/bin/mpremote connect /dev/ttyACM0 fs cp boot.py :boot.py
+/tmp/mpvenv/bin/mpremote connect /dev/ttyACM0 fs cp main.py :main.py
+/tmp/mpvenv/bin/mpremote connect /dev/ttyACM0 exec "import machine, os
+try:
+    os.listdir('/sd')
+except Exception:
+    try:
+        os.mount(machine.SDCard(slot=2, sck=5, mosi=6, miso=7, cs=4), '/sd')
+    except Exception:
+        os.mount(machine.SDCard(slot=3, sck=5, mosi=6, miso=7, cs=4), '/sd')
+print('SD_READY')" fs -r -f cp sd_game_template/game :/sd/
+/tmp/mpvenv/bin/mpremote connect /dev/ttyACM0 reset
 ```
+
+如果 `/sd/game` 沒出現，使用第 10.2 節的 `mpremote resume` 方式補同步。
 
 ### 14.2 只編譯不燒錄
 
@@ -311,4 +407,5 @@ idf.py -B build-ESP32_GENERIC_S3-SPIRAM_OCT_NOBT -p /dev/ttyACM0 flash
 1. build 成功，產生 `micropython.bin`
 2. flash 成功，出現 hash verified + reset done
 3. 板上可 `import lgfx`
-4. 目標模式在序列埠可見，例如 `CAMERA_TEST_MODE=...`
+4. SD 來源確認為 `/sd/game/app.py`
+5. 目標模式在序列埠可見，例如 `CAMERA_TEST_MODE=...`
