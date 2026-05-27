@@ -3053,6 +3053,31 @@ def run(max_frames=None):
                 elif not submit_async_cfg:
                     print("SUBMIT_FALLBACK_REASON=CFG_OFF")
 
+            native_band_h = int(getattr(config, "CAMERA_BAND_PIPELINE_H", 60))
+            if native_band_h < 1:
+                native_band_h = 60
+            if native_band_h > sh:
+                native_band_h = sh
+            native_band_pipeline_enabled = (
+                bool(getattr(config, "CAMERA_BAND_PIPELINE_NATIVE", False))
+                and submit_wire_order
+                and not submit_wire_runtime_swap
+                and hasattr(_lgfx, "render_scene_bands_rgb565")
+                and far_band_buf is not None
+                and tilemap_idx is not None
+                and tileset_raw is not None
+                and objects_atlas is not None
+                and use_sprite_player
+                and scene_buf_back is not None
+            )
+            if native_band_pipeline_enabled:
+                submit_async_enabled = False
+                submit_async_inflight = False
+                print("SUBMIT_MODE=NATIVE_BAND_PIPELINE")
+                print("BAND_PIPELINE_NATIVE_ON h=%d" % native_band_h)
+            elif bool(getattr(config, "CAMERA_BAND_PIPELINE_NATIVE", False)):
+                print("BAND_PIPELINE_NATIVE_FALLBACK")
+
             while True:
                 now = ticks_ms()
                 elapsed = ticks_diff(now, last_tick)
@@ -3274,276 +3299,8 @@ def run(max_frames=None):
                         anim_idx = 0
                 prof_update_us += ticks_diff(ticks_us(), seg_t0)
 
-                # Compose dynamic band: far upper area + camera-phased ground + player.
-                seg_t0 = ticks_us()
-                camera_dx = camera_x - floor_bg_cached_camera_x
-                camera_move_strip = None
-                if floor_use_c_compose:
-                    if far_band_buf is not None:
-                        scene_buf[:far_len] = far_band_buf
-                    else:
-                        row = 0
-                        while row < far_band_h:
-                            src_off = ((band_top + row) * sw) * 2
-                            far_runtime_file.seek(src_off)
-                            dst_off = row * row_bytes
-                            row_view = memoryview(scene_buf)[dst_off : dst_off + row_bytes]
-                            n = far_runtime_file.readinto(row_view)
-                            if n != row_bytes:
-                                print("CAMERA_TEST_STEP=%d_FAIL_READ" % step_tag)
-                                raise RuntimeError("CAMERA_TEST_STEP%d_FAIL_READ" % step_tag)
-                            row += 1
-                    floor_src_x = int(camera_x * floor_scroll_factor) + int(floor_scroll_x_offset)
-                    prev_floor_x = floor_bg_cached_camera_x
-                    try:
-                        _lgfx.compose_masked_rgb565(
-                            scene_buf,
-                            sw,
-                            scene_h,
-                            -floor_src_x,
-                            floor_screen_y - band_top,
-                            floor_rgb_data,
-                            floor_mask_data,
-                            floor_w,
-                            floor_h,
-                        )
-                        prev_floor_x = floor_bg_cached_camera_x
-                        floor_bg_cached_camera_x = camera_x
-                    except Exception:
-                        floor_use_c_compose = False
-                        print("FLOOR_LAYER_COMPOSE_C_FAIL")
-                    dx_submit = camera_x - prev_floor_x
-                    if drew_once and dx_submit != 0 and abs(dx_submit) < sw:
-                        strip_w = dx_submit if dx_submit > 0 else -dx_submit
-                        if dx_submit > 0:
-                            camera_move_strip = (sw - strip_w, strip_w, 0, scene_h)
-                        else:
-                            camera_move_strip = (0, strip_w, 0, scene_h)
-                elif floor_bg_cache is not None and floor_bg_cache_ready:
-                    dx = camera_dx
-                    if dx == 0:
-                        scene_buf[:] = floor_bg_cache
-                    elif abs(dx) < sw and far_band_buf is not None:
-                        shift_px = dx if dx > 0 else -dx
-                        shift_bytes = shift_px * 2
-                        row_bytes_local = sw * 2
-                        row_idx = 0
-                        if dx > 0:
-                            while row_idx < scene_h:
-                                b0 = row_idx * row_bytes_local
-                                floor_bg_cache[b0 : b0 + (row_bytes_local - shift_bytes)] = floor_bg_cache[
-                                    b0 + shift_bytes : b0 + row_bytes_local
-                                ]
-                                row_idx += 1
-                            _compose_floor_layer_strip_rows(
-                                floor_bg_cache,
-                                sw,
-                                scene_h,
-                                band_top,
-                                sw - shift_px,
-                                shift_px,
-                                camera_x,
-                                floor_rgb_fp,
-                                floor_w,
-                                floor_h,
-                                floor_screen_y,
-                                floor_scroll_factor,
-                                floor_scroll_x_offset,
-                                floor_runs_by_row,
-                                far_band_buf,
-                                floor_rgb_data,
-                            )
-                            camera_move_strip = (sw - shift_px, shift_px, 0, scene_h)
-                        else:
-                            while row_idx < scene_h:
-                                b0 = row_idx * row_bytes_local
-                                floor_bg_cache[b0 + shift_bytes : b0 + row_bytes_local] = floor_bg_cache[
-                                    b0 : b0 + (row_bytes_local - shift_bytes)
-                                ]
-                                row_idx += 1
-                            _compose_floor_layer_strip_rows(
-                                floor_bg_cache,
-                                sw,
-                                scene_h,
-                                band_top,
-                                0,
-                                shift_px,
-                                camera_x,
-                                floor_rgb_fp,
-                                floor_w,
-                                floor_h,
-                                floor_screen_y,
-                                floor_scroll_factor,
-                                floor_scroll_x_offset,
-                                floor_runs_by_row,
-                                far_band_buf,
-                                floor_rgb_data,
-                            )
-                            camera_move_strip = (0, shift_px, 0, scene_h)
-                        floor_bg_cached_camera_x = camera_x
-                        scene_buf[:] = floor_bg_cache
-                    else:
-                        # Rebuild cache in full when camera changes.
-                        # This is slower in theory than strip-delta, but more stable on MicroPython.
-                        scene_buf[:far_len] = far_band_buf
-                        _compose_floor_layer_rows(
-                            scene_buf,
-                            sw,
-                            scene_h,
-                            band_top,
-                            camera_x,
-                            floor_rgb_fp,
-                            floor_mask_fp,
-                            floor_w,
-                            floor_h,
-                            floor_screen_y,
-                            floor_scroll_factor,
-                            floor_scroll_x_offset,
-                            floor_runs_by_row,
-                            floor_rgb_data,
-                        )
-                        floor_bg_cache[:] = scene_buf
-                        floor_bg_cached_camera_x = camera_x
-                        scene_buf[:] = floor_bg_cache
-                else:
-                    if far_band_buf is not None:
-                        scene_buf[:far_len] = far_band_buf
-                    else:
-                        row = 0
-                        while row < far_band_h:
-                            src_off = ((band_top + row) * sw) * 2
-                            far_runtime_file.seek(src_off)
-                            dst_off = row * row_bytes
-                            row_view = memoryview(scene_buf)[dst_off : dst_off + row_bytes]
-                            n = far_runtime_file.readinto(row_view)
-                            if n != row_bytes:
-                                print("CAMERA_TEST_STEP=%d_FAIL_READ" % step_tag)
-                                raise RuntimeError("CAMERA_TEST_STEP%d_FAIL_READ" % step_tag)
-                            row += 1
-
-                    if (floor_rgb_data is not None or floor_rgb_fp is not None) and floor_runs_by_row is not None:
-                        _compose_floor_layer_rows(
-                            scene_buf,
-                            sw,
-                            scene_h,
-                            band_top,
-                            camera_x,
-                            floor_rgb_fp,
-                            floor_mask_fp,
-                            floor_w,
-                            floor_h,
-                            floor_screen_y,
-                            floor_scroll_factor,
-                            floor_scroll_x_offset,
-                            floor_runs_by_row,
-                            floor_rgb_data,
-                        )
-                    if floor_bg_cache is not None:
-                        floor_bg_cache[:] = scene_buf
-                        floor_bg_cached_camera_x = camera_x
-                        floor_bg_cache_ready = True
-                prof_bg_us += ticks_diff(ticks_us(), seg_t0)
-
-                seg_t0 = ticks_us()
-                if floor_runs_by_row is None or (floor_rgb_fp is None and floor_rgb_data is None):
-                    if tilemap_enabled:
-                        if tilemap_compose_impl == "C_API" and tilemap_idx is not None and tileset_raw is not None:
-                            transparent_key = 0xF81F
-                            if submit_wire_order and not submit_wire_runtime_swap:
-                                transparent_key = _swap16(transparent_key)
-                            _lgfx.compose_tilemap_rgb565(
-                                scene_buf,
-                                sw,
-                                scene_h,
-                                camera_x,
-                                band_top,
-                                tilemap_idx,
-                                tilemap_w,
-                                tilemap_h,
-                                tileset_raw,
-                                tile_size,
-                                tileset_w,
-                                transparent_key,
-                            )
-                        elif tilemap_rows is not None and tileset_cache is not None:
-                            _compose_tilemap_scene(scene_buf, sw, scene_h, camera_x, band_top, tilemap_rows, tileset_cache, tile_size)
-                        else:
-                            pass
-                    else:
-                        phase_off = camera_x & 31
-                        gx = 0
-                        gi = 0
-                        while gx < sw:
-                            phase = ((phase_off + gx) // 16) & 1
-                            color = config.COLOR_TILE_SOLID if phase == 0 else 0x31A6
-                            ground_row_buf[gi] = color & 0xFF
-                            ground_row_buf[gi + 1] = (color >> 8) & 0xFF
-                            gi += 2
-                            gx += 1
-                        gy = 0
-                        while gy < ground_h:
-                            off = (far_band_h + gy) * row_bytes
-                            scene_buf[off : off + row_bytes] = ground_row_buf
-                            gy += 1
-                if objects_rows and objects_atlas is not None:
-                    object_colorkey_enable = bool(getattr(config, "CAMERA_OBJECT_COLORKEY_ENABLE", True))
-                    object_colorkey = -1
-                    if object_colorkey_enable:
-                        object_colorkey = int(getattr(config, "CAMERA_OBJECT_COLORKEY_RGB565", 0xF81F)) & 0xFFFF
-                        if submit_wire_order and not submit_wire_runtime_swap:
-                            object_colorkey = _swap16(object_colorkey)
-                    if (
-                        objects_compose_impl_cfg == "C_API"
-                        and hasattr(_lgfx, "compose_objects_atlas_rgb565")
-                        and objects_c_count > 0
-                    ):
-                        _lgfx.compose_objects_atlas_rgb565(
-                            scene_buf,
-                            sw,
-                            scene_h,
-                            camera_x,
-                            band_top,
-                            objects_c_buf,
-                            objects_c_stride,
-                            objects_atlas,
-                            objects_atlas_w,
-                            objects_atlas_h,
-                            object_colorkey,
-                            objects_c_count,
-                        )
-                    else:
-                        obj_key_b0 = object_colorkey & 0xFF
-                        obj_key_b1 = (object_colorkey >> 8) & 0xFF
-                        oi = 0
-                        while oi < len(objects_rows):
-                            wx, wy, _ow, _oh, _solid, _layer, visible, _swappable, sx, sy, sw0, sh0 = objects_rows[oi]
-                            if visible:
-                                dx = int(wx) - camera_x
-                                dy = int(wy) - band_top
-                                _blit_atlas_region_colorkey_into_scene(
-                                    scene_buf,
-                                    sw,
-                                    scene_h,
-                                    dx,
-                                    dy,
-                                    objects_atlas,
-                                    objects_atlas_w,
-                                    objects_atlas_h,
-                                    sx,
-                                    sy,
-                                    sw0,
-                                    sh0,
-                                    obj_key_b0,
-                                    obj_key_b1,
-                                )
-                            oi += 1
-
-                prof_world_us += ticks_diff(ticks_us(), seg_t0)
-
-                seg_t0 = ticks_us()
-                spr_x = 0
-                spr_y = 0
-                if use_sprite_player:
+                if native_band_pipeline_enabled:
+                    submit_t0 = ticks_us()
                     sprite_x = player_screen_x + draw_off_x
                     sprite_y = player_y + draw_off_y
                     spr_x = sprite_x
@@ -3552,115 +3309,453 @@ def run(max_frames=None):
                         spr_rgb = sprite_left[anim_idx]
                     else:
                         spr_rgb = sprite_right[anim_idx]
-                    player_colorkey = int(getattr(config, "CAMERA_PLAYER_COLORKEY_RGB565", 0xF81F)) & 0xFFFF
-                    player_colorkey_raw = player_colorkey
-                    if submit_wire_order and not submit_wire_runtime_swap:
-                        player_colorkey_raw = _swap16(player_colorkey)
-                    if hasattr(_lgfx, "compose_colorkey_rgb565"):
-                        _lgfx.compose_colorkey_rgb565(
-                            scene_buf,
-                            sw,
-                            scene_h,
-                            spr_x,
-                            spr_y,
-                            spr_rgb,
-                            sprite_w,
-                            sprite_h,
-                            player_colorkey_raw,
-                        )
-                        if not c_compose_ok_logged:
-                            print("CAMERA_PLAYER_SPRITE_C_COLORKEY_OK")
-                            c_compose_ok_logged = True
-                    else:
-                        key_b0 = player_colorkey_raw & 0xFF
-                        key_b1 = (player_colorkey_raw >> 8) & 0xFF
-                        _blit_sprite_colorkey_into_scene(
-                            scene_buf,
-                            sw,
-                            scene_h,
-                            spr_x,
-                            spr_y,
-                            spr_rgb,
-                            key_b0,
-                            key_b1,
-                            sprite_w,
-                            sprite_h,
-                        )
-                else:
-                    px0 = player_screen_x
-                    py0 = player_y - band_top
-                    px1 = px0 + player_w
-                    py1 = py0 + player_h
-                    sx0 = 0 if px0 < 0 else px0
-                    sy0 = 0 if py0 < 0 else py0
-                    sx1 = sw if px1 > sw else px1
-                    sy1 = scene_h if py1 > scene_h else py1
-                    if sx1 > sx0 and sy1 > sy0:
-                        _fill_buffer_rect565(
-                            scene_buf,
-                            sw,
-                            sx0,
-                            sy0,
-                            sx1 - sx0,
-                            sy1 - sy0,
-                            config.COLOR_PLAYER,
-                        )
-                prof_sprite_us += ticks_diff(ticks_us(), seg_t0)
-
-                camera_static = 1 if camera_x == prev_camera_x else 0
-                dirty_last_camera_static = camera_static
-                use_dirty_path = (
-                    dirty_rect_experiment
-                    and use_sprite_player
-                    and sprite_draw_mode == "COMPOSE"
-                    and (camera_static == 1 or not dirty_fallback_on_camera_move)
-                    and drew_once
-                )
-                submit_t0 = ticks_us()
-                wait_us = 0
-                kick_us = 0
-                swap_us = 0
-                if submit_wire_order and submit_wire_runtime_swap:
-                    swap_t0 = ticks_us()
-                    _lgfx.rgb565_swap_bytes_inplace(scene_buf)
-                    swap_us = ticks_diff(ticks_us(), swap_t0)
-                if submit_async_enabled:
-                    kick_t0 = ticks_us()
+                    player_colorkey_raw = _swap16(int(getattr(config, "CAMERA_PLAYER_COLORKEY_RGB565", 0xF81F)) & 0xFFFF)
+                    transparent_key = _swap16(0xF81F)
+                    object_colorkey = -1
+                    if bool(getattr(config, "CAMERA_OBJECT_COLORKEY_ENABLE", True)):
+                        object_colorkey = _swap16(int(getattr(config, "CAMERA_OBJECT_COLORKEY_RGB565", 0xF81F)) & 0xFFFF)
                     try:
-                        submit_async_fn(0, band_top, sw, scene_h, scene_buf)
-                    except Exception:
-                        submit_async_enabled = False
-                        submit_async_inflight = False
-                        submit_inflight_buf = None
-                        print("SUBMIT_FALLBACK_REASON=ASYNC_KICK_FAIL")
+                        band_res = _lgfx.render_scene_bands_rgb565(
+                            scene_buf,
+                            scene_buf_back,
+                            sw,
+                            sh,
+                            native_band_h,
+                            far_band_buf,
+                            camera_x,
+                            tilemap_idx,
+                            tilemap_w,
+                            tilemap_h,
+                            tileset_raw,
+                            tile_size,
+                            tileset_w,
+                            transparent_key,
+                            objects_c_buf,
+                            objects_c_stride,
+                            objects_atlas,
+                            objects_atlas_w,
+                            objects_atlas_h,
+                            object_colorkey,
+                            objects_c_count,
+                            spr_rgb,
+                            sprite_w,
+                            sprite_h,
+                            spr_x,
+                            sprite_y,
+                            player_colorkey_raw,
+                            False,
+                        )
+                    except Exception as exc:
+                        native_band_pipeline_enabled = False
+                        print("BAND_PIPELINE_NATIVE_FAIL")
+                        raise
+                    us = ticks_diff(ticks_us(), submit_t0)
+                    band_count = int(band_res[0])
+                    band_compose_us = int(band_res[1])
+                    kick_us = int(band_res[2])
+                    wait_us = int(band_res[3])
+                    swap_us = 0
+                    submit_acc += us
+                    prof_submit_us += us
+                    prof_submit_wait_us += wait_us
+                    prof_submit_kick_us += kick_us
+                    prof_submit_swap_us += swap_us
+                    dirty_last_rects_count = band_count
+                    dirty_last_bands_count = band_count
+                    dirty_last_camera_static = 1 if camera_x == prev_camera_x else 0
+                    if dirty_log_countdown <= 0:
+                        print("BAND_PIPELINE_SUBMIT_OK")
+                        dirty_log_countdown = 30
+                    if dirty_log_countdown > 0:
+                        dirty_log_countdown -= 1
+                else:
+                    # Compose dynamic band: far upper area + camera-phased ground + player.
+                    seg_t0 = ticks_us()
+                    camera_dx = camera_x - floor_bg_cached_camera_x
+                    camera_move_strip = None
+                    if floor_use_c_compose:
+                        if far_band_buf is not None:
+                            scene_buf[:far_len] = far_band_buf
+                        else:
+                            row = 0
+                            while row < far_band_h:
+                                src_off = ((band_top + row) * sw) * 2
+                                far_runtime_file.seek(src_off)
+                                dst_off = row * row_bytes
+                                row_view = memoryview(scene_buf)[dst_off : dst_off + row_bytes]
+                                n = far_runtime_file.readinto(row_view)
+                                if n != row_bytes:
+                                    print("CAMERA_TEST_STEP=%d_FAIL_READ" % step_tag)
+                                    raise RuntimeError("CAMERA_TEST_STEP%d_FAIL_READ" % step_tag)
+                                row += 1
+                        floor_src_x = int(camera_x * floor_scroll_factor) + int(floor_scroll_x_offset)
+                        prev_floor_x = floor_bg_cached_camera_x
+                        try:
+                            _lgfx.compose_masked_rgb565(
+                                scene_buf,
+                                sw,
+                                scene_h,
+                                -floor_src_x,
+                                floor_screen_y - band_top,
+                                floor_rgb_data,
+                                floor_mask_data,
+                                floor_w,
+                                floor_h,
+                            )
+                            prev_floor_x = floor_bg_cached_camera_x
+                            floor_bg_cached_camera_x = camera_x
+                        except Exception:
+                            floor_use_c_compose = False
+                            print("FLOOR_LAYER_COMPOSE_C_FAIL")
+                        dx_submit = camera_x - prev_floor_x
+                        if drew_once and dx_submit != 0 and abs(dx_submit) < sw:
+                            strip_w = dx_submit if dx_submit > 0 else -dx_submit
+                            if dx_submit > 0:
+                                camera_move_strip = (sw - strip_w, strip_w, 0, scene_h)
+                            else:
+                                camera_move_strip = (0, strip_w, 0, scene_h)
+                    elif floor_bg_cache is not None and floor_bg_cache_ready:
+                        dx = camera_dx
+                        if dx == 0:
+                            scene_buf[:] = floor_bg_cache
+                        elif abs(dx) < sw and far_band_buf is not None:
+                            shift_px = dx if dx > 0 else -dx
+                            shift_bytes = shift_px * 2
+                            row_bytes_local = sw * 2
+                            row_idx = 0
+                            if dx > 0:
+                                while row_idx < scene_h:
+                                    b0 = row_idx * row_bytes_local
+                                    floor_bg_cache[b0 : b0 + (row_bytes_local - shift_bytes)] = floor_bg_cache[
+                                        b0 + shift_bytes : b0 + row_bytes_local
+                                    ]
+                                    row_idx += 1
+                                _compose_floor_layer_strip_rows(
+                                    floor_bg_cache,
+                                    sw,
+                                    scene_h,
+                                    band_top,
+                                    sw - shift_px,
+                                    shift_px,
+                                    camera_x,
+                                    floor_rgb_fp,
+                                    floor_w,
+                                    floor_h,
+                                    floor_screen_y,
+                                    floor_scroll_factor,
+                                    floor_scroll_x_offset,
+                                    floor_runs_by_row,
+                                    far_band_buf,
+                                    floor_rgb_data,
+                                )
+                                camera_move_strip = (sw - shift_px, shift_px, 0, scene_h)
+                            else:
+                                while row_idx < scene_h:
+                                    b0 = row_idx * row_bytes_local
+                                    floor_bg_cache[b0 + shift_bytes : b0 + row_bytes_local] = floor_bg_cache[
+                                        b0 : b0 + (row_bytes_local - shift_bytes)
+                                    ]
+                                    row_idx += 1
+                                _compose_floor_layer_strip_rows(
+                                    floor_bg_cache,
+                                    sw,
+                                    scene_h,
+                                    band_top,
+                                    0,
+                                    shift_px,
+                                    camera_x,
+                                    floor_rgb_fp,
+                                    floor_w,
+                                    floor_h,
+                                    floor_screen_y,
+                                    floor_scroll_factor,
+                                    floor_scroll_x_offset,
+                                    floor_runs_by_row,
+                                    far_band_buf,
+                                    floor_rgb_data,
+                                )
+                                camera_move_strip = (0, shift_px, 0, scene_h)
+                            floor_bg_cached_camera_x = camera_x
+                            scene_buf[:] = floor_bg_cache
+                        else:
+                            # Rebuild cache in full when camera changes.
+                            # This is slower in theory than strip-delta, but more stable on MicroPython.
+                            scene_buf[:far_len] = far_band_buf
+                            _compose_floor_layer_rows(
+                                scene_buf,
+                                sw,
+                                scene_h,
+                                band_top,
+                                camera_x,
+                                floor_rgb_fp,
+                                floor_mask_fp,
+                                floor_w,
+                                floor_h,
+                                floor_screen_y,
+                                floor_scroll_factor,
+                                floor_scroll_x_offset,
+                                floor_runs_by_row,
+                                floor_rgb_data,
+                            )
+                            floor_bg_cache[:] = scene_buf
+                            floor_bg_cached_camera_x = camera_x
+                            scene_buf[:] = floor_bg_cache
+                    else:
+                        if far_band_buf is not None:
+                            scene_buf[:far_len] = far_band_buf
+                        else:
+                            row = 0
+                            while row < far_band_h:
+                                src_off = ((band_top + row) * sw) * 2
+                                far_runtime_file.seek(src_off)
+                                dst_off = row * row_bytes
+                                row_view = memoryview(scene_buf)[dst_off : dst_off + row_bytes]
+                                n = far_runtime_file.readinto(row_view)
+                                if n != row_bytes:
+                                    print("CAMERA_TEST_STEP=%d_FAIL_READ" % step_tag)
+                                    raise RuntimeError("CAMERA_TEST_STEP%d_FAIL_READ" % step_tag)
+                                row += 1
+
+                        if (floor_rgb_data is not None or floor_rgb_fp is not None) and floor_runs_by_row is not None:
+                            _compose_floor_layer_rows(
+                                scene_buf,
+                                sw,
+                                scene_h,
+                                band_top,
+                                camera_x,
+                                floor_rgb_fp,
+                                floor_mask_fp,
+                                floor_w,
+                                floor_h,
+                                floor_screen_y,
+                                floor_scroll_factor,
+                                floor_scroll_x_offset,
+                                floor_runs_by_row,
+                                floor_rgb_data,
+                            )
+                        if floor_bg_cache is not None:
+                            floor_bg_cache[:] = scene_buf
+                            floor_bg_cached_camera_x = camera_x
+                            floor_bg_cache_ready = True
+                    prof_bg_us += ticks_diff(ticks_us(), seg_t0)
+
+                    seg_t0 = ticks_us()
+                    if floor_runs_by_row is None or (floor_rgb_fp is None and floor_rgb_data is None):
+                        if tilemap_enabled:
+                            if tilemap_compose_impl == "C_API" and tilemap_idx is not None and tileset_raw is not None:
+                                transparent_key = 0xF81F
+                                if submit_wire_order and not submit_wire_runtime_swap:
+                                    transparent_key = _swap16(transparent_key)
+                                _lgfx.compose_tilemap_rgb565(
+                                    scene_buf,
+                                    sw,
+                                    scene_h,
+                                    camera_x,
+                                    band_top,
+                                    tilemap_idx,
+                                    tilemap_w,
+                                    tilemap_h,
+                                    tileset_raw,
+                                    tile_size,
+                                    tileset_w,
+                                    transparent_key,
+                                )
+                            elif tilemap_rows is not None and tileset_cache is not None:
+                                _compose_tilemap_scene(scene_buf, sw, scene_h, camera_x, band_top, tilemap_rows, tileset_cache, tile_size)
+                            else:
+                                pass
+                        else:
+                            phase_off = camera_x & 31
+                            gx = 0
+                            gi = 0
+                            while gx < sw:
+                                phase = ((phase_off + gx) // 16) & 1
+                                color = config.COLOR_TILE_SOLID if phase == 0 else 0x31A6
+                                ground_row_buf[gi] = color & 0xFF
+                                ground_row_buf[gi + 1] = (color >> 8) & 0xFF
+                                gi += 2
+                                gx += 1
+                            gy = 0
+                            while gy < ground_h:
+                                off = (far_band_h + gy) * row_bytes
+                                scene_buf[off : off + row_bytes] = ground_row_buf
+                                gy += 1
+                    if objects_rows and objects_atlas is not None:
+                        object_colorkey_enable = bool(getattr(config, "CAMERA_OBJECT_COLORKEY_ENABLE", True))
+                        object_colorkey = -1
+                        if object_colorkey_enable:
+                            object_colorkey = int(getattr(config, "CAMERA_OBJECT_COLORKEY_RGB565", 0xF81F)) & 0xFFFF
+                            if submit_wire_order and not submit_wire_runtime_swap:
+                                object_colorkey = _swap16(object_colorkey)
+                        if (
+                            objects_compose_impl_cfg == "C_API"
+                            and hasattr(_lgfx, "compose_objects_atlas_rgb565")
+                            and objects_c_count > 0
+                        ):
+                            _lgfx.compose_objects_atlas_rgb565(
+                                scene_buf,
+                                sw,
+                                scene_h,
+                                camera_x,
+                                band_top,
+                                objects_c_buf,
+                                objects_c_stride,
+                                objects_atlas,
+                                objects_atlas_w,
+                                objects_atlas_h,
+                                object_colorkey,
+                                objects_c_count,
+                            )
+                        else:
+                            obj_key_b0 = object_colorkey & 0xFF
+                            obj_key_b1 = (object_colorkey >> 8) & 0xFF
+                            oi = 0
+                            while oi < len(objects_rows):
+                                wx, wy, _ow, _oh, _solid, _layer, visible, _swappable, sx, sy, sw0, sh0 = objects_rows[oi]
+                                if visible:
+                                    dx = int(wx) - camera_x
+                                    dy = int(wy) - band_top
+                                    _blit_atlas_region_colorkey_into_scene(
+                                        scene_buf,
+                                        sw,
+                                        scene_h,
+                                        dx,
+                                        dy,
+                                        objects_atlas,
+                                        objects_atlas_w,
+                                        objects_atlas_h,
+                                        sx,
+                                        sy,
+                                        sw0,
+                                        sh0,
+                                        obj_key_b0,
+                                        obj_key_b1,
+                                    )
+                                oi += 1
+
+                    prof_world_us += ticks_diff(ticks_us(), seg_t0)
+
+                    seg_t0 = ticks_us()
+                    spr_x = 0
+                    spr_y = 0
+                    if use_sprite_player:
+                        sprite_x = player_screen_x + draw_off_x
+                        sprite_y = player_y + draw_off_y
+                        spr_x = sprite_x
+                        spr_y = sprite_y - band_top
+                        if facing < 0:
+                            spr_rgb = sprite_left[anim_idx]
+                        else:
+                            spr_rgb = sprite_right[anim_idx]
+                        player_colorkey = int(getattr(config, "CAMERA_PLAYER_COLORKEY_RGB565", 0xF81F)) & 0xFFFF
+                        player_colorkey_raw = player_colorkey
+                        if submit_wire_order and not submit_wire_runtime_swap:
+                            player_colorkey_raw = _swap16(player_colorkey)
+                        if hasattr(_lgfx, "compose_colorkey_rgb565"):
+                            _lgfx.compose_colorkey_rgb565(
+                                scene_buf,
+                                sw,
+                                scene_h,
+                                spr_x,
+                                spr_y,
+                                spr_rgb,
+                                sprite_w,
+                                sprite_h,
+                                player_colorkey_raw,
+                            )
+                            if not c_compose_ok_logged:
+                                print("CAMERA_PLAYER_SPRITE_C_COLORKEY_OK")
+                                c_compose_ok_logged = True
+                        else:
+                            key_b0 = player_colorkey_raw & 0xFF
+                            key_b1 = (player_colorkey_raw >> 8) & 0xFF
+                            _blit_sprite_colorkey_into_scene(
+                                scene_buf,
+                                sw,
+                                scene_h,
+                                spr_x,
+                                spr_y,
+                                spr_rgb,
+                                key_b0,
+                                key_b1,
+                                sprite_w,
+                                sprite_h,
+                            )
+                    else:
+                        px0 = player_screen_x
+                        py0 = player_y - band_top
+                        px1 = px0 + player_w
+                        py1 = py0 + player_h
+                        sx0 = 0 if px0 < 0 else px0
+                        sy0 = 0 if py0 < 0 else py0
+                        sx1 = sw if px1 > sw else px1
+                        sy1 = scene_h if py1 > scene_h else py1
+                        if sx1 > sx0 and sy1 > sy0:
+                            _fill_buffer_rect565(
+                                scene_buf,
+                                sw,
+                                sx0,
+                                sy0,
+                                sx1 - sx0,
+                                sy1 - sy0,
+                                config.COLOR_PLAYER,
+                            )
+                    prof_sprite_us += ticks_diff(ticks_us(), seg_t0)
+
+                    camera_static = 1 if camera_x == prev_camera_x else 0
+                    dirty_last_camera_static = camera_static
+                    use_dirty_path = (
+                        dirty_rect_experiment
+                        and use_sprite_player
+                        and sprite_draw_mode == "COMPOSE"
+                        and (camera_static == 1 or not dirty_fallback_on_camera_move)
+                        and drew_once
+                    )
+                    submit_t0 = ticks_us()
+                    wait_us = 0
+                    kick_us = 0
+                    swap_us = 0
+                    if submit_wire_order and submit_wire_runtime_swap:
+                        swap_t0 = ticks_us()
+                        _lgfx.rgb565_swap_bytes_inplace(scene_buf)
+                        swap_us = ticks_diff(ticks_us(), swap_t0)
+                    if submit_async_enabled:
+                        kick_t0 = ticks_us()
+                        try:
+                            submit_async_fn(0, band_top, sw, scene_h, scene_buf)
+                        except Exception:
+                            submit_async_enabled = False
+                            submit_async_inflight = False
+                            submit_inflight_buf = None
+                            print("SUBMIT_FALLBACK_REASON=ASYNC_KICK_FAIL")
+                            submit_wait_fn(0, band_top, sw, scene_h, scene_buf)
+                            kick_us = ticks_diff(ticks_us(), kick_t0)
+                        else:
+                            kick_us = ticks_diff(ticks_us(), kick_t0)
+                            submit_async_inflight = True
+                            submit_inflight_buf = scene_buf
+                            # Swap compose/submit buffers for next frame.
+                            tmp_buf = scene_buf
+                            scene_buf = scene_buf_back
+                            scene_buf_back = tmp_buf
+                    else:
+                        kick_t0 = ticks_us()
                         submit_wait_fn(0, band_top, sw, scene_h, scene_buf)
                         kick_us = ticks_diff(ticks_us(), kick_t0)
-                    else:
-                        kick_us = ticks_diff(ticks_us(), kick_t0)
-                        submit_async_inflight = True
-                        submit_inflight_buf = scene_buf
-                        # Swap compose/submit buffers for next frame.
-                        tmp_buf = scene_buf
-                        scene_buf = scene_buf_back
-                        scene_buf_back = tmp_buf
-                else:
-                    kick_t0 = ticks_us()
-                    submit_wait_fn(0, band_top, sw, scene_h, scene_buf)
-                    kick_us = ticks_diff(ticks_us(), kick_t0)
-                us = ticks_diff(ticks_us(), submit_t0)
-                submit_acc += us
-                prof_submit_us += us
-                prof_submit_wait_us += wait_us
-                prof_submit_kick_us += kick_us
-                prof_submit_swap_us += swap_us
-                dirty_last_rects_count = 2
-                dirty_last_bands_count = 1
-                dirty_last_camera_static = 1 if camera_x == prev_camera_x else 0
-                if dirty_log_countdown <= 0:
-                    print("FULLSCREEN_BULK_SUBMIT_OK")
-                    dirty_log_countdown = 30
-                if dirty_log_countdown > 0:
-                    dirty_log_countdown -= 1
+                    us = ticks_diff(ticks_us(), submit_t0)
+                    submit_acc += us
+                    prof_submit_us += us
+                    prof_submit_wait_us += wait_us
+                    prof_submit_kick_us += kick_us
+                    prof_submit_swap_us += swap_us
+                    dirty_last_rects_count = 2
+                    dirty_last_bands_count = 1
+                    dirty_last_camera_static = 1 if camera_x == prev_camera_x else 0
+                    if dirty_log_countdown <= 0:
+                        print("FULLSCREEN_BULK_SUBMIT_OK")
+                        dirty_log_countdown = 30
+                    if dirty_log_countdown > 0:
+                        dirty_log_countdown -= 1
 
                 prev_camera_x = camera_x
                 if use_sprite_player:

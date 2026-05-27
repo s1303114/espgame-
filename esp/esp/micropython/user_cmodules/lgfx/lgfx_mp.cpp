@@ -19,7 +19,8 @@ extern "C" {
 
 #if !defined(NO_QSTR)
 #include "lgfx_config.hpp"
-static LGFX lcd;
+#include "lgfx_shared.hpp"
+LGFX lcd;
 
 static uint8_t *read_file_bytes(const char *path, size_t *out_len) {
     mp_obj_t args[2] = {
@@ -1559,6 +1560,8 @@ static const mp_rom_map_elem_t lgfx_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_blit_wait_done), MP_ROM_PTR(&lgfx_blit_wait_done_obj) },
     { MP_ROM_QSTR(MP_QSTR_async_probe_rgb565), MP_ROM_PTR(&lgfx_async_probe_rgb565_obj) },
     { MP_ROM_QSTR(MP_QSTR_submit_probe_rgb565), MP_ROM_PTR(&lgfx_submit_probe_rgb565_obj) },
+    { MP_ROM_QSTR(MP_QSTR_band_submit_probe_rgb565), MP_ROM_PTR(&lgfx_band_submit_probe_rgb565_obj) },
+    { MP_ROM_QSTR(MP_QSTR_render_scene_bands_rgb565), MP_ROM_PTR(&lgfx_render_scene_bands_rgb565_obj) },
     { MP_ROM_QSTR(MP_QSTR_rgb565_swap_bytes_inplace), MP_ROM_PTR(&lgfx_rgb565_swap_bytes_inplace_obj) },
     { MP_ROM_QSTR(MP_QSTR_blit_rect565_wait_copy), MP_ROM_PTR(&lgfx_blit_rect565_wait_copy_obj) },
     { MP_ROM_QSTR(MP_QSTR_blit_rect565_wait_copy_compat), MP_ROM_PTR(&lgfx_blit_rect565_wait_copy_compat_obj) },
@@ -1604,6 +1607,8 @@ static const mp_rom_map_elem_t lgfx_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_blit_wait_done), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_async_probe_rgb565), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_submit_probe_rgb565), MP_ROM_INT(0) },
+    { MP_ROM_QSTR(MP_QSTR_band_submit_probe_rgb565), MP_ROM_INT(0) },
+    { MP_ROM_QSTR(MP_QSTR_render_scene_bands_rgb565), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_rgb565_swap_bytes_inplace), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_blit_rect565_wait_copy), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_blit_rect565_wait_copy_compat), MP_ROM_INT(0) },
