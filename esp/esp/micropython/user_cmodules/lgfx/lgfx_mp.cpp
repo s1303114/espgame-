@@ -2,7 +2,6 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
-#include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "esp_cache.h"
 
@@ -254,44 +253,6 @@ static mp_obj_t lgfx_blit_rect565(size_t n_args, const mp_obj_t *args) {
     return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lgfx_blit_rect565_obj, 5, 5, lgfx_blit_rect565);
-
-static mp_obj_t lgfx_blit_rect565_rows(size_t n_args, const mp_obj_t *args) {
-    mp_int_t x = mp_obj_get_int(args[0]);
-    mp_int_t y = mp_obj_get_int(args[1]);
-    mp_int_t w = mp_obj_get_int(args[2]);
-    mp_int_t h = mp_obj_get_int(args[3]);
-
-    if (w <= 0 || h <= 0) {
-        return mp_const_none;
-    }
-
-    mp_buffer_info_t bufinfo;
-    mp_get_buffer_raise(args[4], &bufinfo, MP_BUFFER_READ);
-
-    size_t expected_len = (size_t)w * (size_t)h * 2u;
-    if (bufinfo.len != expected_len) {
-        mp_raise_ValueError(MP_ERROR_TEXT("buf len mismatch"));
-    }
-
-    // Display transfer safety policy (current known-good baseline):
-    // - Large-frame path must use row-compatible transfer only.
-    // - pushImage(..., h=1) per row + waitDMA() per row is stable.
-    // - Do not replace this with h>1 bulk for mainline rendering.
-    const uint16_t *pixels = (const uint16_t *)bufinfo.buf;
-    bool prev_swap = lcd.getSwapBytes();
-    lcd.startWrite();
-    lcd.setSwapBytes(true);
-    for (mp_int_t row = 0; row < h; ++row) {
-        const uint16_t *row_ptr = pixels + ((size_t)row * (size_t)w);
-        lcd.pushImage((int32_t)x, (int32_t)(y + row), (int32_t)w, 1, row_ptr);
-        lcd.waitDMA();
-    }
-    lcd.setSwapBytes(prev_swap);
-    lcd.endWrite();
-
-    return mp_const_none;
-}
-static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lgfx_blit_rect565_rows_obj, 5, 5, lgfx_blit_rect565_rows);
 
 static mp_obj_t lgfx_blit_rect565_wait(size_t n_args, const mp_obj_t *args) {
     mp_int_t x = mp_obj_get_int(args[0]);
@@ -688,315 +649,6 @@ static mp_obj_t lgfx_submit_probe_rgb565(size_t n_args, const mp_obj_t *args) {
     return mp_obj_new_tuple(6, out);
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lgfx_submit_probe_rgb565_obj, 3, 3, lgfx_submit_probe_rgb565);
-
-
-static mp_obj_t lgfx_rgb565_swap_bytes_inplace(mp_obj_t buf_obj) {
-    mp_buffer_info_t bufinfo;
-    mp_get_buffer_raise(buf_obj, &bufinfo, MP_BUFFER_RW);
-    if ((bufinfo.len & 1u) != 0u) {
-        mp_raise_ValueError(MP_ERROR_TEXT("buf len must be even"));
-    }
-
-    uint8_t *buf = (uint8_t *)bufinfo.buf;
-    for (size_t i = 0; i < bufinfo.len; i += 2u) {
-        uint8_t b = buf[i];
-        buf[i] = buf[i + 1u];
-        buf[i + 1u] = b;
-    }
-    return mp_const_none;
-}
-static MP_DEFINE_CONST_FUN_OBJ_1(lgfx_rgb565_swap_bytes_inplace_obj, lgfx_rgb565_swap_bytes_inplace);
-
-static mp_obj_t lgfx_blit_rect565_wait_copy(size_t n_args, const mp_obj_t *args) {
-    mp_int_t x = mp_obj_get_int(args[0]);
-    mp_int_t y = mp_obj_get_int(args[1]);
-    mp_int_t w = mp_obj_get_int(args[2]);
-    mp_int_t h = mp_obj_get_int(args[3]);
-    mp_int_t src_stride = w;
-    mp_int_t src_x = 0;
-    mp_int_t src_y = 0;
-    mp_int_t chunk_h = 0;
-
-    if (w <= 0 || h <= 0) {
-        return mp_const_none;
-    }
-
-    if (n_args == 6) {
-        // Backward-compatible form:
-        // blit_rect565_wait_copy(x, y, w, h, src_buf, chunk_h)
-        chunk_h = mp_obj_get_int(args[5]);
-    } else if (n_args == 9) {
-        // Stride-aware form:
-        // blit_rect565_wait_copy(x, y, w, h, src_buf, src_stride, src_x, src_y, chunk_h)
-        src_stride = mp_obj_get_int(args[5]);
-        src_x = mp_obj_get_int(args[6]);
-        src_y = mp_obj_get_int(args[7]);
-        chunk_h = mp_obj_get_int(args[8]);
-    } else {
-        mp_raise_ValueError(MP_ERROR_TEXT("need 6 or 9 args"));
-    }
-
-    if (chunk_h <= 0) {
-        mp_raise_ValueError(MP_ERROR_TEXT("chunk_h must > 0"));
-    }
-    if (src_stride <= 0) {
-        mp_raise_ValueError(MP_ERROR_TEXT("src_stride must > 0"));
-    }
-    if (src_x < 0 || src_y < 0) {
-        mp_raise_ValueError(MP_ERROR_TEXT("src_x/src_y must >= 0"));
-    }
-    if (src_x + w > src_stride) {
-        mp_raise_ValueError(MP_ERROR_TEXT("src rect exceeds stride"));
-    }
-
-    mp_buffer_info_t src_bufinfo;
-    mp_get_buffer_raise(args[4], &src_bufinfo, MP_BUFFER_READ);
-
-    if ((src_bufinfo.len & 1u) != 0u) {
-        mp_raise_ValueError(MP_ERROR_TEXT("src len must be rgb565"));
-    }
-
-    size_t src_stride_bytes = (size_t)src_stride * 2u;
-    size_t row_bytes = (size_t)w * 2u;
-    size_t src_base = ((size_t)src_y * (size_t)src_stride + (size_t)src_x) * 2u;
-    size_t needed_rows = (size_t)h;
-    size_t needed_bytes = 0;
-    if (needed_rows > 0) {
-        needed_bytes = src_base + ((needed_rows - 1u) * src_stride_bytes) + row_bytes;
-    }
-    if (needed_bytes > src_bufinfo.len) {
-        mp_raise_ValueError(MP_ERROR_TEXT("src buf too small"));
-    }
-
-    mp_int_t lines = chunk_h;
-    if (lines > h) {
-        lines = h;
-    }
-    size_t chunk_bytes = row_bytes * (size_t)lines;
-
-    uint8_t *dma_chunk = (uint8_t *)heap_caps_malloc(chunk_bytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-    if (dma_chunk == nullptr) {
-        mp_raise_msg(&mp_type_MemoryError, MP_ERROR_TEXT("no dma chunk"));
-    }
-
-    // Experimental path:
-    // - Source addressing is stride-safe, but transfer still uses pushImage(..., h>1).
-    // - Keep for diagnostics only; not approved as mainline large-frame path.
-    const uint8_t *src = (const uint8_t *)src_bufinfo.buf;
-    bool prev_swap = lcd.getSwapBytes();
-    lcd.startWrite();
-    lcd.setSwapBytes(true);
-
-    mp_int_t row = 0;
-    while (row < h) {
-        mp_int_t draw_h = lines;
-        if (row + draw_h > h) {
-            draw_h = h - row;
-        }
-        size_t copy_bytes = row_bytes * (size_t)draw_h;
-        if (copy_bytes > chunk_bytes) {
-            heap_caps_free(dma_chunk);
-            lcd.setSwapBytes(prev_swap);
-            lcd.endWrite();
-            mp_raise_ValueError(MP_ERROR_TEXT("chunk bytes mismatch"));
-        }
-
-        // Copy row-by-row from source stride to contiguous DMA chunk.
-        mp_int_t r = 0;
-        while (r < draw_h) {
-            size_t src_index = ((size_t)(src_y + row + r) * (size_t)src_stride + (size_t)src_x) * 2u;
-            if (src_index + row_bytes > src_bufinfo.len) {
-                heap_caps_free(dma_chunk);
-                lcd.setSwapBytes(prev_swap);
-                lcd.endWrite();
-                mp_raise_ValueError(MP_ERROR_TEXT("src oob"));
-            }
-            memcpy(dma_chunk + ((size_t)r * row_bytes), src + src_index, row_bytes);
-            ++r;
-        }
-        lcd.pushImage((int32_t)x, (int32_t)(y + row), (int32_t)w, (int32_t)draw_h, (const uint16_t *)dma_chunk);
-        lcd.waitDMA();
-        row += draw_h;
-    }
-
-    lcd.setSwapBytes(prev_swap);
-    lcd.endWrite();
-    heap_caps_free(dma_chunk);
-    return mp_const_none;
-}
-static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lgfx_blit_rect565_wait_copy_obj, 6, 9, lgfx_blit_rect565_wait_copy);
-
-static mp_obj_t lgfx_blit_rect565_wait_copy_compat(size_t n_args, const mp_obj_t *args) {
-    if (n_args != 9) {
-        mp_raise_ValueError(MP_ERROR_TEXT("need 9 args"));
-    }
-    mp_int_t x = mp_obj_get_int(args[0]);
-    mp_int_t y = mp_obj_get_int(args[1]);
-    mp_int_t w = mp_obj_get_int(args[2]);
-    mp_int_t h = mp_obj_get_int(args[3]);
-    mp_int_t src_stride = mp_obj_get_int(args[5]);
-    mp_int_t src_x = mp_obj_get_int(args[6]);
-    mp_int_t src_y = mp_obj_get_int(args[7]);
-    mp_int_t chunk_h = mp_obj_get_int(args[8]);
-
-    if (w <= 0 || h <= 0) {
-        return mp_const_none;
-    }
-    if (chunk_h <= 0) {
-        mp_raise_ValueError(MP_ERROR_TEXT("chunk_h must > 0"));
-    }
-    if (src_stride <= 0) {
-        mp_raise_ValueError(MP_ERROR_TEXT("src_stride must > 0"));
-    }
-    if (src_x < 0 || src_y < 0) {
-        mp_raise_ValueError(MP_ERROR_TEXT("src_x/src_y must >= 0"));
-    }
-    if (src_x + w > src_stride) {
-        mp_raise_ValueError(MP_ERROR_TEXT("src rect exceeds stride"));
-    }
-
-    mp_buffer_info_t src_bufinfo;
-    mp_get_buffer_raise(args[4], &src_bufinfo, MP_BUFFER_READ);
-    if ((src_bufinfo.len & 1u) != 0u) {
-        mp_raise_ValueError(MP_ERROR_TEXT("src len must be rgb565"));
-    }
-
-    size_t src_stride_bytes = (size_t)src_stride * 2u;
-    size_t row_bytes = (size_t)w * 2u;
-    size_t src_base = ((size_t)src_y * (size_t)src_stride + (size_t)src_x) * 2u;
-    size_t needed_rows = (size_t)h;
-    size_t needed_bytes = 0;
-    if (needed_rows > 0) {
-        needed_bytes = src_base + ((needed_rows - 1u) * src_stride_bytes) + row_bytes;
-    }
-    if (needed_bytes > src_bufinfo.len) {
-        mp_raise_ValueError(MP_ERROR_TEXT("src buf too small"));
-    }
-
-    // Mainline-safe large-frame model:
-    // - Stride-aware source selection.
-    // - Row-compatible transfer only: pushImage(..., h=1) + waitDMA() per row.
-    const uint8_t *src = (const uint8_t *)src_bufinfo.buf;
-    bool prev_swap = lcd.getSwapBytes();
-    lcd.startWrite();
-    lcd.setSwapBytes(true);
-
-    mp_int_t row = 0;
-    while (row < h) {
-        mp_int_t draw_h = chunk_h;
-        if (row + draw_h > h) {
-            draw_h = h - row;
-        }
-        mp_int_t r = 0;
-        while (r < draw_h) {
-            size_t src_index = ((size_t)(src_y + row + r) * (size_t)src_stride + (size_t)src_x) * 2u;
-            if (src_index + row_bytes > src_bufinfo.len) {
-                lcd.setSwapBytes(prev_swap);
-                lcd.endWrite();
-                mp_raise_ValueError(MP_ERROR_TEXT("src oob"));
-            }
-            const uint16_t *row_ptr = (const uint16_t *)(src + src_index);
-            lcd.pushImage((int32_t)x, (int32_t)(y + row + r), (int32_t)w, 1, row_ptr);
-            lcd.waitDMA();
-            ++r;
-        }
-        row += draw_h;
-    }
-
-    lcd.setSwapBytes(prev_swap);
-    lcd.endWrite();
-    return mp_const_none;
-}
-static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(
-    lgfx_blit_rect565_wait_copy_compat_obj,
-    9,
-    9,
-    lgfx_blit_rect565_wait_copy_compat
-);
-
-static mp_obj_t lgfx_compose_masked_rgb565(size_t n_args, const mp_obj_t *args) {
-    mp_buffer_info_t dst_bufinfo;
-    mp_buffer_info_t sprite_bufinfo;
-    mp_buffer_info_t mask_bufinfo;
-    mp_get_buffer_raise(args[0], &dst_bufinfo, MP_BUFFER_RW);
-    mp_int_t dst_w = mp_obj_get_int(args[1]);
-    mp_int_t dst_h = mp_obj_get_int(args[2]);
-    mp_int_t dst_x = mp_obj_get_int(args[3]);
-    mp_int_t dst_y = mp_obj_get_int(args[4]);
-    mp_get_buffer_raise(args[5], &sprite_bufinfo, MP_BUFFER_READ);
-    mp_get_buffer_raise(args[6], &mask_bufinfo, MP_BUFFER_READ);
-    mp_int_t sprite_w = mp_obj_get_int(args[7]);
-    mp_int_t sprite_h = mp_obj_get_int(args[8]);
-
-    if (dst_w <= 0 || dst_h <= 0 || sprite_w <= 0 || sprite_h <= 0) {
-        mp_raise_ValueError(MP_ERROR_TEXT("invalid dims"));
-    }
-
-    size_t dst_expected_min = (size_t)dst_w * (size_t)dst_h * 2u;
-    size_t sprite_expected_min = (size_t)sprite_w * (size_t)sprite_h * 2u;
-    size_t mask_row_bytes = ((size_t)sprite_w + 7u) / 8u;
-    size_t mask_expected_min = mask_row_bytes * (size_t)sprite_h;
-    if (dst_bufinfo.len < dst_expected_min) {
-        mp_raise_ValueError(MP_ERROR_TEXT("dst buf too small"));
-    }
-    if (sprite_bufinfo.len < sprite_expected_min) {
-        mp_raise_ValueError(MP_ERROR_TEXT("sprite buf too small"));
-    }
-    if (mask_bufinfo.len < mask_expected_min) {
-        mp_raise_ValueError(MP_ERROR_TEXT("mask buf too small"));
-    }
-
-    mp_int_t src_x0 = 0;
-    mp_int_t src_y0 = 0;
-    mp_int_t draw_x0 = dst_x;
-    mp_int_t draw_y0 = dst_y;
-    if (draw_x0 < 0) {
-        src_x0 = -draw_x0;
-        draw_x0 = 0;
-    }
-    if (draw_y0 < 0) {
-        src_y0 = -draw_y0;
-        draw_y0 = 0;
-    }
-
-    mp_int_t vis_w = sprite_w - src_x0;
-    mp_int_t vis_h = sprite_h - src_y0;
-    if (vis_w <= 0 || vis_h <= 0) {
-        return mp_const_none;
-    }
-    if (draw_x0 + vis_w > dst_w) {
-        vis_w = dst_w - draw_x0;
-    }
-    if (draw_y0 + vis_h > dst_h) {
-        vis_h = dst_h - draw_y0;
-    }
-    if (vis_w <= 0 || vis_h <= 0) {
-        return mp_const_none;
-    }
-
-    uint8_t *dst = (uint8_t *)dst_bufinfo.buf;
-    const uint8_t *sprite = (const uint8_t *)sprite_bufinfo.buf;
-    const uint8_t *mask = (const uint8_t *)mask_bufinfo.buf;
-    for (mp_int_t y = 0; y < vis_h; ++y) {
-        mp_int_t sy = src_y0 + y;
-        mp_int_t dy = draw_y0 + y;
-        for (mp_int_t x = 0; x < vis_w; ++x) {
-            mp_int_t sx = src_x0 + x;
-            mp_int_t dx = draw_x0 + x;
-            size_t byte_index = (size_t)sy * mask_row_bytes + ((size_t)sx / 8u);
-            int bit_index = 7 - (int)(sx % 8);
-            uint8_t visible = (mask[byte_index] >> bit_index) & 0x01u;
-            if (visible) {
-                size_t src_index = ((size_t)sy * (size_t)sprite_w + (size_t)sx) * 2u;
-                size_t dst_index = ((size_t)dy * (size_t)dst_w + (size_t)dx) * 2u;
-                dst[dst_index] = sprite[src_index];
-                dst[dst_index + 1] = sprite[src_index + 1];
-            }
-        }
-    }
-    return mp_const_none;
-}
-static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lgfx_compose_masked_rgb565_obj, 9, 9, lgfx_compose_masked_rgb565);
 
 
 static mp_obj_t lgfx_compose_tilemap_rgb565(size_t n_args, const mp_obj_t *args) {
@@ -1552,7 +1204,6 @@ static const mp_rom_map_elem_t lgfx_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_rotation), MP_ROM_PTR(&lgfx_rotation_obj) },
     { MP_ROM_QSTR(MP_QSTR_fill_rect), MP_ROM_PTR(&lgfx_fill_rect_obj) },
     { MP_ROM_QSTR(MP_QSTR_blit_rect565), MP_ROM_PTR(&lgfx_blit_rect565_obj) },
-    { MP_ROM_QSTR(MP_QSTR_blit_rect565_rows), MP_ROM_PTR(&lgfx_blit_rect565_rows_obj) },
     { MP_ROM_QSTR(MP_QSTR_blit_rect565_wait), MP_ROM_PTR(&lgfx_blit_rect565_wait_obj) },
     { MP_ROM_QSTR(MP_QSTR_blit_rect565_wire_wait), MP_ROM_PTR(&lgfx_blit_rect565_wire_wait_obj) },
     { MP_ROM_QSTR(MP_QSTR_blit_rect565_async), MP_ROM_PTR(&lgfx_blit_rect565_async_obj) },
@@ -1562,10 +1213,6 @@ static const mp_rom_map_elem_t lgfx_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_submit_probe_rgb565), MP_ROM_PTR(&lgfx_submit_probe_rgb565_obj) },
     { MP_ROM_QSTR(MP_QSTR_band_submit_probe_rgb565), MP_ROM_PTR(&lgfx_band_submit_probe_rgb565_obj) },
     { MP_ROM_QSTR(MP_QSTR_render_scene_bands_rgb565), MP_ROM_PTR(&lgfx_render_scene_bands_rgb565_obj) },
-    { MP_ROM_QSTR(MP_QSTR_rgb565_swap_bytes_inplace), MP_ROM_PTR(&lgfx_rgb565_swap_bytes_inplace_obj) },
-    { MP_ROM_QSTR(MP_QSTR_blit_rect565_wait_copy), MP_ROM_PTR(&lgfx_blit_rect565_wait_copy_obj) },
-    { MP_ROM_QSTR(MP_QSTR_blit_rect565_wait_copy_compat), MP_ROM_PTR(&lgfx_blit_rect565_wait_copy_compat_obj) },
-    { MP_ROM_QSTR(MP_QSTR_compose_masked_rgb565), MP_ROM_PTR(&lgfx_compose_masked_rgb565_obj) },
     { MP_ROM_QSTR(MP_QSTR_compose_tilemap_rgb565), MP_ROM_PTR(&lgfx_compose_tilemap_rgb565_obj) },
     { MP_ROM_QSTR(MP_QSTR_compose_colorkey_rgb565), MP_ROM_PTR(&lgfx_compose_colorkey_rgb565_obj) },
     { MP_ROM_QSTR(MP_QSTR_compose_objects_atlas_rgb565), MP_ROM_PTR(&lgfx_compose_objects_atlas_rgb565_obj) },
@@ -1599,7 +1246,6 @@ static const mp_rom_map_elem_t lgfx_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_rotation), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_fill_rect), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_blit_rect565), MP_ROM_INT(0) },
-    { MP_ROM_QSTR(MP_QSTR_blit_rect565_rows), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_blit_rect565_wait), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_blit_rect565_wire_wait), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_blit_rect565_async), MP_ROM_INT(0) },
@@ -1609,10 +1255,6 @@ static const mp_rom_map_elem_t lgfx_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_submit_probe_rgb565), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_band_submit_probe_rgb565), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_render_scene_bands_rgb565), MP_ROM_INT(0) },
-    { MP_ROM_QSTR(MP_QSTR_rgb565_swap_bytes_inplace), MP_ROM_INT(0) },
-    { MP_ROM_QSTR(MP_QSTR_blit_rect565_wait_copy), MP_ROM_INT(0) },
-    { MP_ROM_QSTR(MP_QSTR_blit_rect565_wait_copy_compat), MP_ROM_INT(0) },
-    { MP_ROM_QSTR(MP_QSTR_compose_masked_rgb565), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_compose_tilemap_rgb565), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_compose_colorkey_rgb565), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_compose_objects_atlas_rgb565), MP_ROM_INT(0) },

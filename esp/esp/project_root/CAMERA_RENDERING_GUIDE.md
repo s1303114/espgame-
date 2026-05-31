@@ -9,7 +9,6 @@
 - `FLOOR_LAYER_ENABLED = False`
 - `CAMERA_PLAYER_SPRITE_COMPOSE_IMPL = "C_API"`
 - `CAMERA_FULL_BULK_WIRE_ORDER = True`
-- `CAMERA_FULL_BULK_WIRE_RUNTIME_SWAP = False`
 - `CAMERA_FULL_BULK_DOUBLE_BUFFER = True`
 - `CAMERA_BAND_PIPELINE_NATIVE = True`
 - `CAMERA_BAND_PIPELINE_H = 60`
@@ -27,7 +26,6 @@
 提交主線目前是 **native 4-band pipeline + wire-order DMA + cache sync**：
 
 - 主線標記：`SUBMIT_BYTE_ORDER=WIRE_NOSWAP`
-- 主線標記：`SUBMIT_WIRE_RUNTIME_SWAP=0`
 - 初始化時仍會偵測 full-screen async 能力：`SUBMIT_MODE=ASYNC_DOUBLE_BUFFER_MAINLINE`
 - 正式主線會切到：`SUBMIT_MODE=NATIVE_BAND_PIPELINE`
 - band 啟動標記：`BAND_PIPELINE_NATIVE_ON h=60`
@@ -131,7 +129,6 @@ lcd.pushImageDMA(x, y, w, h, pixels);
 - `async_probe_rgb565(...)`
 - `submit_probe_rgb565(...)`
 - `band_submit_probe_rgb565(...)`
-- `rgb565_swap_bytes_inplace(...)`：只保留給實驗，不作主線。
 
 `project_root/sd_game_template/game/tools/convert_png_to_rgb565.py`：
 
@@ -174,7 +171,6 @@ metadata 與 layout：
 - `TILEMAP_COMPOSE_IMPL=C_API`
 - `CAMERA_PLAYER_SPRITE_COMPOSE_IMPL=C_API`
 - `SUBMIT_BYTE_ORDER=WIRE_NOSWAP`
-- `SUBMIT_WIRE_RUNTIME_SWAP=0`
 - `SUBMIT_MODE=NATIVE_BAND_PIPELINE`
 - `BAND_PIPELINE_NATIVE_ON h=60`
 - `PROFILE submit_us=...`
@@ -214,7 +210,6 @@ metadata 與 layout：
 關鍵結論：
 
 1. wire-order asset 是有效方向，能避免 LGFX 內部 byte-swap/convert staging。
-2. runtime in-place swap 不可作主線，因為每幀多約 `13.2ms`，且容易污染雙緩衝 buffer 狀態。
 3. `pushImageDMA` 直接讀 Python/PSRAM scene buffer 若不做 cache sync，會造成水平條碼狀花屏；原因是 DMA/cache coherency 或 PSRAM DMA 路徑一致性問題。
 4. 目前正式方案是 wire-order asset + `esp_cache_msync` + native band DMA pipeline。
 5. full-screen wire DMA 與 non-DMA `pushImage` 保留為回退與測試路徑。
@@ -243,7 +238,6 @@ metadata 與 layout：
 - `CAMERA_BAND_PIPELINE_NATIVE = True`
 - `CAMERA_BAND_PIPELINE_H = 60`
 - `CAMERA_FULL_BULK_WIRE_ORDER = True`
-- `CAMERA_FULL_BULK_WIRE_RUNTIME_SWAP = False`
 - firmware 內有 `render_scene_bands_rgb565`
 - far background 已 RAM cache
 - tilemap / tileset / object atlas / player sprite 都已載入

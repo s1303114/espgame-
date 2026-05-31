@@ -37,7 +37,6 @@ SD 遊戲根目錄至少需要：
 - `CAMERA_BAND_PIPELINE_NATIVE = True`
 - `CAMERA_BAND_PIPELINE_H = 60`
 - `CAMERA_FULL_BULK_WIRE_ORDER = True`
-- `CAMERA_FULL_BULK_WIRE_RUNTIME_SWAP = False`
 
 螢幕 `320x240` 拆成 4 條 `320x60` band。Python 每幀更新遊戲狀態後，把 far background、tilemap、object atlas、player sprite、special overlay、enemy 描述子傳給：
 
@@ -60,7 +59,6 @@ C++ 在每個 band 內完成：
 - `SUBMIT_MODE=NATIVE_BAND_PIPELINE`
 - `BAND_PIPELINE_NATIVE_ON h=60`
 - `SUBMIT_BYTE_ORDER=WIRE_NOSWAP`
-- `SUBMIT_WIRE_RUNTIME_SWAP=0`
 
 目前實測大約：
 

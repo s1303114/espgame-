@@ -66,7 +66,7 @@ _MODE_BOARD_GENERATED_GRID_TEST = "BOARD_GENERATED_GRID_TEST"
 _MODE_ROOT_RGB565_GRID_PATTERN = "ROOT_RGB565_GRID_PATTERN"
 _MODE_BLIT_SINGLE_BLOCK_TEST = "BLIT_SINGLE_BLOCK_TEST"
 _MODE_BLIT_FULL_BUFFER_TEST = "BLIT_FULL_BUFFER_TEST"
-_MODE_BLIT_ROWS_GRID_TEST = "BLIT_ROWS_GRID_TEST"
+_MODE_BLIT_WAIT_GRID_TEST = "BLIT_WAIT_GRID_TEST"
 _MODE_ROWS_SAFE_PROGRESSIVE = "ROWS_SAFE_PROGRESSIVE"
 _MODE_ROWS_SAFE_NEAR_TILE_TEST = "ROWS_SAFE_NEAR_TILE_TEST"
 _MODE_FULL_BUFFER_TEST = "FULL_BUFFER_TEST"
@@ -412,7 +412,7 @@ def _blit_scene_rect565_rows(scene_buf, scene_w, scene_h, band_top, rx, ry, rw, 
         dst_off += copy_row_bytes
         r += 1
 
-    _lgfx.blit_rect565_rows(rx, band_top + ry, rw, rh, memoryview(tmp_buf)[:need])
+    _lgfx.blit_rect565_wait(rx, band_top + ry, rw, rh, memoryview(tmp_buf)[:need])
     return tmp_buf, 1
 
 
@@ -2299,7 +2299,7 @@ def _normalize_mode(v):
         _MODE_ROOT_RGB565_GRID_PATTERN,
         _MODE_BLIT_SINGLE_BLOCK_TEST,
         _MODE_BLIT_FULL_BUFFER_TEST,
-        _MODE_BLIT_ROWS_GRID_TEST,
+        _MODE_BLIT_WAIT_GRID_TEST,
         _MODE_ROWS_SAFE_PROGRESSIVE,
         _MODE_ROWS_SAFE_NEAR_TILE_TEST,
         _MODE_FULL_BUFFER_TEST,
@@ -2760,15 +2760,15 @@ def _ensure_prerequisites(mode, png_single_stage):
         _MODE_ROOT_RGB565_GRID_PATTERN,
         _MODE_BLIT_SINGLE_BLOCK_TEST,
         _MODE_BLIT_FULL_BUFFER_TEST,
-        _MODE_BLIT_ROWS_GRID_TEST,
+        _MODE_BLIT_WAIT_GRID_TEST,
         _MODE_ROWS_SAFE_PROGRESSIVE,
         _MODE_ROWS_SAFE_NEAR_TILE_TEST,
         _MODE_FULL_BUFFER_TEST,
         _MODE_SPI_TFT_SPEED_TEST,
         _MODE_SPI_TFT_BULK_WAIT_TEST,
     )
-    if mode == _MODE_BLIT_ROWS_GRID_TEST and not hasattr(_lgfx, "blit_rect565_rows"):
-        raise RuntimeError("CAMERA_TEST_FAIL_NO_BLIT_ROWS")
+    if mode == _MODE_BLIT_WAIT_GRID_TEST and not hasattr(_lgfx, "blit_rect565_wait"):
+        raise RuntimeError("CAMERA_TEST_FAIL_NO_BLIT_WAIT")
     if needs_png:
         if mode == _MODE_DIRECT_BG_ONLY:
             if not hasattr(_lgfx, "draw_png_mem"):
@@ -2883,7 +2883,7 @@ def run(max_frames=None):
         print("BLIT_SINGLE_BLOCK_START")
     if mode == _MODE_BLIT_FULL_BUFFER_TEST:
         print("BLIT_FULL_BUFFER_START")
-    if mode == _MODE_BLIT_ROWS_GRID_TEST:
+    if mode == _MODE_BLIT_WAIT_GRID_TEST:
         print("BLIT_ROWS_GRID_START")
     if mode == _MODE_BOARD_GENERATED_GRID_TEST:
         print("CAMERA_TEST_BOARD_GRID_START")
@@ -2913,9 +2913,9 @@ def run(max_frames=None):
         pass
 
     if mode == _MODE_ROWS_SAFE_NEAR_TILE_TEST:
-        if not hasattr(_lgfx, "blit_rect565_rows"):
-            print("CAMERA_TEST_NEAR_FAIL_NO_BLIT_ROWS")
-            raise RuntimeError("CAMERA_TEST_NEAR_FAIL_NO_BLIT_ROWS")
+        if not hasattr(_lgfx, "blit_rect565_wait"):
+            print("CAMERA_TEST_NEAR_FAIL_NO_BLIT_WAIT")
+            raise RuntimeError("CAMERA_TEST_NEAR_FAIL_NO_BLIT_WAIT")
 
         far_raw = str(getattr(config, "CAMERA_TEST_ROOT_BG_FAR_RGB565", "/bg_far.rgb565"))
         try:
@@ -3004,7 +3004,7 @@ def run(max_frames=None):
                 if n != need:
                     print("CAMERA_TEST_NEAR_FAIL_READ")
                     raise RuntimeError("CAMERA_TEST_NEAR_FAIL_READ")
-                _lgfx.blit_rect565_rows(0, y, sw, h, view)
+                _lgfx.blit_rect565_wait(0, y, sw, h, view)
                 y += h
 
         far_band_buf = bytearray(sw * far_band_h * 2)
@@ -3137,7 +3137,7 @@ def run(max_frames=None):
                     row_fill_cache,
                 )
 
-            _lgfx.blit_rect565_rows(0, band_top, sw, scene_h, scene_buf)
+            _lgfx.blit_rect565_wait(0, band_top, sw, scene_h, scene_buf)
 
             frame += 1
             if not drew_once:
@@ -3178,22 +3178,15 @@ def run(max_frames=None):
         return
 
     if mode in (_MODE_SPI_TFT_SPEED_TEST, _MODE_SPI_TFT_BULK_WAIT_TEST):
-        if not hasattr(_lgfx, "blit_rect565_rows"):
-            print("SPI_TFT_FAIL_NO_ROWS_API")
-            raise RuntimeError("SPI_TFT_FAIL_NO_ROWS_API")
+        if not hasattr(_lgfx, "blit_rect565_wait"):
+            print("SPI_TFT_FAIL_NO_WAIT_API")
+            raise RuntimeError("SPI_TFT_FAIL_NO_WAIT_API")
         # Mainline lock: force full-screen bulk path only.
         path = "BULK_WAIT_DIRECT"
 
         if path in ("BULK_WAIT_DIRECT", "CHUNK_WAIT_DIRECT_16") and not hasattr(_lgfx, "blit_rect565_wait"):
             print("SPI_TFT_FAIL_NO_BULK_WAIT_API")
             raise RuntimeError("SPI_TFT_FAIL_NO_BULK_WAIT_API")
-        if path in ("CHUNK_WAIT_COPY_16", "CHUNK_WAIT_COPY_32") and not hasattr(_lgfx, "blit_rect565_wait_copy"):
-            print("SPI_TFT_FAIL_NO_BULK_WAIT_COPY_API")
-            raise RuntimeError("SPI_TFT_FAIL_NO_BULK_WAIT_COPY_API")
-        if path in ("CHUNK_WAIT_COPY_COMPAT_1", "CHUNK_WAIT_COPY_COMPAT_2", "CHUNK_WAIT_COPY_COMPAT_4", "CHUNK_WAIT_COPY_COMPAT_8") and not hasattr(_lgfx, "blit_rect565_wait_copy_compat"):
-            print("SPI_TFT_FAIL_NO_BULK_WAIT_COPY_COMPAT_API")
-            raise RuntimeError("SPI_TFT_FAIL_NO_BULK_WAIT_COPY_COMPAT_API")
-
         sw = int(config.SCREEN_W)
         sh = int(config.SCREEN_H)
         frame_bytes = sw * sh * 2
@@ -3236,7 +3229,7 @@ def run(max_frames=None):
 
             try:
                 if path == "ROWS_STATIC_GRID":
-                    _lgfx.blit_rect565_rows(0, 0, sw, sh, buf)
+                    _lgfx.blit_rect565_wait(0, 0, sw, sh, buf)
                 elif path == "BULK_WAIT_DIRECT":
                     _lgfx.blit_rect565_wait(0, 0, sw, sh, buf)
                 elif path == "CHUNK_WAIT_DIRECT_16":
@@ -3253,19 +3246,19 @@ def run(max_frames=None):
                         _lgfx.blit_rect565_wait(0, y, sw, h, mv[off:end])
                         y += h
                 elif path == "CHUNK_WAIT_COPY_16":
-                    _lgfx.blit_rect565_wait_copy(0, 0, sw, sh, buf, 16)
+                    _lgfx.blit_rect565_wait(0, 0, sw, sh, buf)
                 elif path == "CHUNK_WAIT_COPY_32":
-                    _lgfx.blit_rect565_wait_copy(0, 0, sw, sh, buf, 32)
+                    _lgfx.blit_rect565_wait(0, 0, sw, sh, buf)
                 elif path == "CHUNK_WAIT_COPY_COMPAT_1":
-                    _lgfx.blit_rect565_wait_copy_compat(0, 0, sw, sh, buf, sw, 0, 0, 1)
+                    _lgfx.blit_rect565_wait(0, 0, sw, sh, buf)
                 elif path == "CHUNK_WAIT_COPY_COMPAT_2":
-                    _lgfx.blit_rect565_wait_copy_compat(0, 0, sw, sh, buf, sw, 0, 0, 2)
+                    _lgfx.blit_rect565_wait(0, 0, sw, sh, buf)
                 elif path == "CHUNK_WAIT_COPY_COMPAT_4":
-                    _lgfx.blit_rect565_wait_copy_compat(0, 0, sw, sh, buf, sw, 0, 0, 4)
+                    _lgfx.blit_rect565_wait(0, 0, sw, sh, buf)
                 elif path == "CHUNK_WAIT_COPY_COMPAT_8":
-                    _lgfx.blit_rect565_wait_copy_compat(0, 0, sw, sh, buf, sw, 0, 0, 8)
+                    _lgfx.blit_rect565_wait(0, 0, sw, sh, buf)
                 else:
-                    _lgfx.blit_rect565_rows(0, 0, sw, sh, buf)
+                    _lgfx.blit_rect565_wait(0, 0, sw, sh, buf)
             except Exception:
                 print("SPI_TFT_FAIL_DRAW")
                 raise RuntimeError("SPI_TFT_FAIL_DRAW")
@@ -3292,7 +3285,7 @@ def run(max_frames=None):
         return
 
     if mode == _MODE_FULL_BUFFER_TEST:
-        if not hasattr(_lgfx, "blit_rect565_rows"):
+        if not hasattr(_lgfx, "blit_rect565_wait"):
             print("FULL_BUFFER_FAIL_DRAW")
             raise RuntimeError("FULL_BUFFER_FAIL_DRAW")
 
@@ -3371,9 +3364,6 @@ def run(max_frames=None):
         c_compose_ok_logged = False
 
         if enable_sprite:
-            if not hasattr(_lgfx, "compose_masked_rgb565"):
-                print("FULL_BUFFER_FAIL_NO_C_API")
-                raise RuntimeError("FULL_BUFFER_FAIL_NO_C_API")
             side = "left"
             while side in ("left", "right"):
                 i = 0
@@ -3474,21 +3464,15 @@ def run(max_frames=None):
                 else:
                     spr_rgb = sprite_right[anim_idx]
                     spr_mask = sprite_mask_right[anim_idx]
-                try:
-                    _lgfx.compose_masked_rgb565(
-                        frame_buf,
-                        sw,
-                        sh,
-                        sprite_x,
-                        sprite_y,
-                        spr_rgb,
-                        spr_mask,
-                        sprite_w,
-                        sprite_h,
-                    )
-                except Exception:
-                    print("FULL_BUFFER_FAIL_DRAW")
-                    raise RuntimeError("FULL_BUFFER_FAIL_DRAW")
+                _blend_sprite32_mask1_into_scene(
+                    frame_buf,
+                    sw,
+                    sh,
+                    sprite_x,
+                    sprite_y,
+                    spr_rgb,
+                    spr_mask,
+                )
                 if not c_compose_ok_logged:
                     print("FULL_BUFFER_PLAYER_C_API_OK")
                     c_compose_ok_logged = True
@@ -3504,7 +3488,7 @@ def run(max_frames=None):
                 _draw_digits_to_buf(frame_buf, sw, sh, coord_x, 4, hud_coord_text, 0xFFFF)
 
             try:
-                _lgfx.blit_rect565_rows(0, 0, sw, sh, frame_buf)
+                _lgfx.blit_rect565_wait(0, 0, sw, sh, frame_buf)
             except Exception:
                 print("FULL_BUFFER_FAIL_DRAW")
                 raise RuntimeError("FULL_BUFFER_FAIL_DRAW")
@@ -3557,7 +3541,7 @@ def run(max_frames=None):
             print("CAMERA_TEST_STEP=%d_FAIL_NOT_IMPLEMENTED" % step)
             raise RuntimeError("CAMERA_TEST_STEP_NOT_IMPLEMENTED")
 
-        if not hasattr(_lgfx, "blit_rect565_rows"):
+        if not hasattr(_lgfx, "blit_rect565_wait"):
             if step == 1:
                 print("CAMERA_TEST_STEP=1_FAIL_NO_BLIT_ROWS")
                 raise RuntimeError("CAMERA_TEST_STEP1_FAIL_NO_BLIT_ROWS")
@@ -3755,7 +3739,7 @@ def run(max_frames=None):
                     if n != need:
                         print("CAMERA_TEST_STEP=%d_FAIL_READ" % step_tag)
                         raise RuntimeError("CAMERA_TEST_STEP%d_FAIL_READ" % step_tag)
-                    _lgfx.blit_rect565_rows(0, y, sw, h, view)
+                    _lgfx.blit_rect565_wait(0, y, sw, h, view)
                     y += h
 
             ground_h = 16
@@ -3904,13 +3888,9 @@ def run(max_frames=None):
             prof_submit_swap_us = 0
             prof_total_us = 0
             prof_pace_us = 0
-            dirty_rect_experiment = (
-                step_tag == 4 and bool(getattr(config, "CAMERA_DIRTY_RECT_EXPERIMENT", False))
-            )
-            dirty_fallback_on_camera_move = bool(
-                getattr(config, "CAMERA_DIRTY_FALLBACK_ON_CAMERA_MOVE", True)
-            )
-            dirty_band_full_width = bool(getattr(config, "CAMERA_DIRTY_BAND_FULL_WIDTH", True))
+            partial_rect_experiment_disabled = False
+            dirty_fallback_on_camera_move = True
+            dirty_band_full_width = True
             dirty_prev_sprite_x = None
             dirty_prev_sprite_y = None
             prev_camera_x = camera_x
@@ -4109,8 +4089,7 @@ def run(max_frames=None):
                     if (
                         floor_rgb_data is not None
                         and floor_mask_data is not None
-                        and bool(getattr(config, "FLOOR_USE_C_COMPOSE", False))
-                        and hasattr(_lgfx, "compose_masked_rgb565")
+                        and False
                     ):
                         floor_use_c_compose = True
                         print("FLOOR_LAYER_COMPOSE_C_READY")
@@ -4180,18 +4159,17 @@ def run(max_frames=None):
                 except Exception:
                     floor_bg_cache = None
             dirty_log_countdown = 0
-            if dirty_rect_experiment:
-                print("DIRTY_RECT_EXPERIMENT_ON")
+            if partial_rect_experiment_disabled:
+                print("PARTIAL_RECT_EXPERIMENT_DISABLED")
 
             submit_async_cfg = bool(getattr(config, "CAMERA_FULL_BULK_DOUBLE_BUFFER", True))
             submit_wire_order_cfg = bool(getattr(config, "CAMERA_FULL_BULK_WIRE_ORDER", False))
-            submit_wire_runtime_swap = bool(getattr(config, "CAMERA_FULL_BULK_WIRE_RUNTIME_SWAP", submit_wire_order_cfg))
+            submit_wire_runtime_swap = False
             has_async_api = hasattr(_lgfx, "blit_rect565_async") and hasattr(_lgfx, "blit_wait_done")
             has_wire_api = (
                 hasattr(_lgfx, "blit_rect565_wire_async")
                 and hasattr(_lgfx, "blit_rect565_wire_wait")
                 and hasattr(_lgfx, "blit_wait_done")
-                and (not submit_wire_runtime_swap or hasattr(_lgfx, "rgb565_swap_bytes_inplace"))
             )
             submit_wire_order = submit_wire_order_cfg and has_wire_api
             submit_async_fn = _lgfx.blit_rect565_wire_async if submit_wire_order else _lgfx.blit_rect565_async
@@ -4762,7 +4740,7 @@ def run(max_frames=None):
                         floor_src_x = int(camera_x * floor_scroll_factor) + int(floor_scroll_x_offset)
                         prev_floor_x = floor_bg_cached_camera_x
                         try:
-                            _lgfx.compose_masked_rgb565(
+                            _lgfx.compose_colorkey_rgb565(
                                 scene_buf,
                                 sw,
                                 scene_h,
@@ -5133,7 +5111,7 @@ def run(max_frames=None):
                     camera_static = 1 if camera_x == prev_camera_x else 0
                     dirty_last_camera_static = camera_static
                     use_dirty_path = (
-                        dirty_rect_experiment
+                        partial_rect_experiment_disabled
                         and use_sprite_player
                         and sprite_draw_mode == "COMPOSE"
                         and (camera_static == 1 or not dirty_fallback_on_camera_move)
@@ -5143,10 +5121,6 @@ def run(max_frames=None):
                     wait_us = 0
                     kick_us = 0
                     swap_us = 0
-                    if submit_wire_order and submit_wire_runtime_swap:
-                        swap_t0 = ticks_us()
-                        _lgfx.rgb565_swap_bytes_inplace(scene_buf)
-                        swap_us = ticks_diff(ticks_us(), swap_t0)
                     if submit_async_enabled:
                         kick_t0 = ticks_us()
                         try:
@@ -5210,7 +5184,7 @@ def run(max_frames=None):
                         # Left segment: FPS at fixed top-left.
                         _fill_buffer_color565(top_hud_buf, top_hud_w * top_hud_h, top_hud_bg)
                         _draw_digits_to_buf(top_hud_buf, top_hud_w, top_hud_h, 4, 4, top_hud_fps_text, coord_hud_color)
-                        _lgfx.blit_rect565_rows(0, 0, top_hud_w, top_hud_h, top_hud_buf)
+                        _lgfx.blit_rect565_wait(0, 0, top_hud_w, top_hud_h, top_hud_buf)
                         # Right segment: coord right-aligned at screen edge using same small buffer.
                         right_x = sw - top_hud_w
                         if right_x < 0:
@@ -5228,7 +5202,7 @@ def run(max_frames=None):
                             coord_hud_text,
                             coord_hud_color,
                         )
-                        _lgfx.blit_rect565_rows(right_x, 0, top_hud_w, top_hud_h, top_hud_buf)
+                        _lgfx.blit_rect565_wait(right_x, 0, top_hud_w, top_hud_h, top_hud_buf)
                     prof_hud_us += ticks_diff(ticks_us(), seg_t0)
 
                 frame_total_us = ticks_diff(ticks_us(), frame_start_us)
@@ -5329,7 +5303,7 @@ def run(max_frames=None):
                             % (player_x, camera_x, player_screen_x, player_screen_x + draw_off_x, min_screen_x)
                         )
                         print("PLAYER_BOUNDARY_CLAMP_APPLIED=%d" % boundary_clamp_last)
-                    if dirty_rect_experiment:
+                    if partial_rect_experiment_disabled:
                         print("DIRTY_CAMERA_STATIC=%d" % dirty_last_camera_static)
                         print("DIRTY_RECTS_COUNT=%d" % dirty_last_rects_count)
                         print("DIRTY_BANDS_COUNT=%d" % dirty_last_bands_count)
@@ -5370,7 +5344,7 @@ def run(max_frames=None):
                     print("PROFILE other_us=%d" % avg_other_us)
                     print("PROFILE total_us=%d" % avg_total_us)
                     print("PROFILE fps=%.2f" % fps_prof)
-                    if dirty_rect_experiment:
+                    if partial_rect_experiment_disabled:
                         n_dirty = profile_every
                         avg_dirty_us = dirty_us_acc // n_dirty
                         avg_fallback_us = fallback_us_acc // n_dirty
@@ -5477,7 +5451,7 @@ def run(max_frames=None):
                             sy1 - sy0,
                             config.COLOR_PLAYER,
                         )
-                _lgfx.blit_rect565_rows(0, y, sw, h, view)
+                _lgfx.blit_rect565_wait(0, y, sw, h, view)
                 y += h
 
         if step == 1:
@@ -5548,7 +5522,7 @@ def run(max_frames=None):
         print("APP_RUN_END_PHASE_CAMERA_TEST")
         return
 
-    if mode == _MODE_BLIT_ROWS_GRID_TEST:
+    if mode == _MODE_BLIT_WAIT_GRID_TEST:
         _lgfx.fill(0x0000)
         sw = int(config.SCREEN_W)
         sh = int(config.SCREEN_H)
@@ -5570,7 +5544,7 @@ def run(max_frames=None):
                 h = sh - y
             view = memoryview(buf)[: row_bytes * h]
             _compose_grid_chunk565(view, sw, sh, y, h)
-            _lgfx.blit_rect565_rows(0, y, sw, h, view)
+            _lgfx.blit_rect565_wait(0, y, sw, h, view)
             y += h
         print("BLIT_ROWS_GRID_OK")
         print("BLIT_ROWS_GRID_HOLD")
@@ -5748,8 +5722,8 @@ def run(max_frames=None):
         return
 
     if mode == _MODE_ROOT_FAR_RGB565_ONLY:
-        if not hasattr(_lgfx, "blit_rect565_rows"):
-            raise RuntimeError("CAMERA_TEST_FAIL_NO_BLIT_ROWS")
+        if not hasattr(_lgfx, "blit_rect565_wait"):
+            raise RuntimeError("CAMERA_TEST_FAIL_NO_BLIT_WAIT")
         _lgfx.fill(0x0000)
         far_raw = str(getattr(config, "CAMERA_TEST_ROOT_BG_FAR_RGB565", "/bg_far.rgb565"))
         sw = int(config.SCREEN_W)
@@ -5773,7 +5747,7 @@ def run(max_frames=None):
                 n = f.readinto(view)
                 if n != need:
                     raise RuntimeError("CAMERA_TEST_FAIL_RGB565_READ:%d!=%d" % (n if n is not None else -1, need))
-                _lgfx.blit_rect565_rows(0, y, sw, h, view)
+                _lgfx.blit_rect565_wait(0, y, sw, h, view)
                 y += h
         print("CAMERA_TEST_ROOT_FAR_DRAW_OK")
         print("CAMERA_TEST_ROOT_FAR_HOLD")
