@@ -3726,21 +3726,8 @@ def run(max_frames=None):
                 print("CAMERA_COORD_HUD_READY")
                 print("CAMERA_TOP_HUD_READY")
 
-            # Draw far once (fixed x=0) via streamed chunks (no full-frame allocation).
-            with open(far_raw, "rb") as ff:
-                y = 0
-                while y < sh:
-                    h = chunk_h
-                    if y + h > sh:
-                        h = sh - y
-                    need = row_bytes * h
-                    view = memoryview(buf)[:need]
-                    n = ff.readinto(view)
-                    if n != need:
-                        print("CAMERA_TEST_STEP=%d_FAIL_READ" % step_tag)
-                        raise RuntimeError("CAMERA_TEST_STEP%d_FAIL_READ" % step_tag)
-                    _lgfx.blit_rect565_wait(0, y, sw, h, view)
-                    y += h
+            # Keep the panel black until the first fully composed native-band frame.
+            # Far background is loaded into RAM below, but no startup preview is submitted.
 
             ground_h = 16
             ground_y0 = sh - ground_h
