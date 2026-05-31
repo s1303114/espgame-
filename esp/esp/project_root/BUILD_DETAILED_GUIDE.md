@@ -130,7 +130,7 @@ idf.py -B build-ESP32_GENERIC_S3-SPIRAM_OCT_NOBT -p /dev/ttyACM0 flash
 燒錄完成後，確認 `lgfx` module 可 import：
 
 ```bash
-/tmp/mpvenv/bin/mpremote connect /dev/ttyACM0 exec "import lgfx; print('LGFX_IMPORT_OK'); print('HAS_WAIT', hasattr(lgfx,'blit_rect565_wait')); print('HAS_ROWS', hasattr(lgfx,'blit_rect565_rows')); print('HAS_COPY', hasattr(lgfx,'blit_rect565_wait_copy')); print('HAS_COMP', hasattr(lgfx,'compose_masked_rgb565'))"
+/tmp/mpvenv/bin/mpremote connect /dev/ttyACM0 exec "import lgfx; print('LGFX_IMPORT_OK'); print('HAS_WAIT', hasattr(lgfx,'blit_rect565_wait')); print('HAS_COMP', hasattr(lgfx,'compose_colorkey_rgb565')); print('HAS_BAND', hasattr(lgfx,'render_scene_bands_rgb565'))"
 ```
 
 最低成功條件：
@@ -161,6 +161,30 @@ LOCAL_ROOT=/tmp/esp-mp-local ./build_local_tmp.sh
 
 腳本會重新複製原始碼到 `/tmp/esp-mp-local`，既有 build 目錄會保留，因此通常會走增量編譯。
 
+若 `build_local_tmp.sh` 本身卡在 `/workspace -> /tmp` 複製階段，但你只改了少數幾個 user_cmodule 檔案，可以直接同步到現有 `/tmp/esp-mp-local` 後增量重編，例如：
+
+```bash
+cp /workspace/esp/esp/micropython/user_cmodules/lgfx/lgfx_mp.cpp /tmp/esp-mp-local/micropython/user_cmodules/lgfx/lgfx_mp.cpp
+cp /workspace/esp/esp/micropython/user_cmodules/lgfx/lgfx_band.cpp /tmp/esp-mp-local/micropython/user_cmodules/lgfx/lgfx_band.cpp
+cp /workspace/esp/esp/micropython/user_cmodules/lgfx/lgfx_shared.hpp /tmp/esp-mp-local/micropython/user_cmodules/lgfx/lgfx_shared.hpp
+
+cd /tmp/esp-mp-local/micropython/ports/esp32
+source /opt/esp/idf/export.sh
+make -j6 BOARD=ESP32_GENERIC_S3 BOARD_VARIANT=SPIRAM_OCT_NOBT USER_C_MODULES=/tmp/esp-mp-local/micropython/user_cmodules
+```
+
+重點是「所有改過的檔案都要同步」。這次已實際踩到一個陷阱：只同步 `lgfx_band.cpp` / `lgfx_shared.hpp`，漏掉 `lgfx_mp.cpp`，會導致 firmware 雖然刷進新的 native band renderer，但板上 `lgfx` 模組仍然沒有匯出 `render_scene_bands_rgb565`，開機就會一直走 `BAND_PIPELINE_NATIVE_FALLBACK`。
+
+這種情況先不要猜 qstr 壞掉，先直接在板上檢查：
+
+```bash
+/tmp/mpvenv/bin/mpremote connect /dev/ttyACM0 exec "import lgfx
+print('HAS_RENDER_SCENE_BANDS', hasattr(lgfx, 'render_scene_bands_rgb565'))
+print('HAS_NAME', 'render_scene_bands_rgb565' in dir(lgfx))"
+```
+
+若兩個都不是 `True`，代表你目前刷進去的 firmware export table 還是舊的，先回頭檢查 `/tmp` 本地鏡像是否漏同步。
+
 ### 7.3 使用新暫存目錄重編
 
 如果不想碰舊 cache：
@@ -189,6 +213,8 @@ ps -eo pid,ppid,stat,wchan,etime,pcpu,pmem,cmd | rg "makeqstrdefs|cc1|ninja all|
 ```
 
 如果看到 `C:\` 和 `p9_cli`，這是 Windows/9p 掛載 I/O 問題，不是 `lgfx_mp.cpp` 或 qstr 定義壞掉。處理方式是停掉卡住的 build，改用第 4 節 `/tmp` 本機編譯。
+
+如果 `build_local_tmp.sh` 是卡在這個階段，而不是卡在編譯本身，那就不要在同一個卡住的 `/workspace` build 上繼續猜測 C++ 錯誤；直接停掉它，改用上面那種「同步到既有 `/tmp/esp-mp-local` 再重編」的流程會更快。
 
 ## 9. 卡住時如何停止 build
 
@@ -229,30 +255,102 @@ cd /workspace/esp/esp/project_root
 /tmp/mpvenv/bin/mpremote connect /dev/ttyACM0 fs cp main.py :main.py
 ```
 
-### 10.2 掛載 SD 並同步整包 game
+### 10.2 掛載 SD 並同步 game
 
-先掛載 SD，再把整個 `sd_game_template/game` 複製到 `/sd/game`：
+這一段有一個這次實機已確認的陷阱：
+
+- `os.listdir('/sd')` 不能拿來判斷「外接 SD 已掛載」，因為板上內部檔案系統本身就可能存在 `/sd` 目錄。
+- `mpremote fs cp ... :/sd/...` 顯示成功，甚至顯示 `Up to date`，也不代表真的寫到了外接 SD 卡。
+- 判斷是否真的寫到外接 SD，唯一可信的方法是：**寫入後 `umount` 再 `mount`，重新讀檔確認內容仍然是新版。**
+
+因此，標準做法不要先用 `os.listdir('/sd')` 判斷，而是先強制重掛載，再用同一個已掛載 session 複製檔案。
+
+### 10.2.1 強制掛載外接 SD
 
 ```bash
 cd /workspace/esp/esp/project_root
 /tmp/mpvenv/bin/mpremote connect /dev/ttyACM0 exec "import machine, os
 try:
-    os.listdir('/sd')
-except Exception:
-    try:
-        os.mount(machine.SDCard(slot=2, sck=5, mosi=6, miso=7, cs=4), '/sd')
-    except Exception:
-        os.mount(machine.SDCard(slot=3, sck=5, mosi=6, miso=7, cs=4), '/sd')
-print('SD_READY')" fs -r -f cp sd_game_template/game :/sd/
+    os.umount('/sd')
+    print('PRE_UMOUNT_OK')
+except Exception as e:
+    print('PRE_UMOUNT_SKIP', e)
+try:
+    os.mount(machine.SDCard(slot=2, sck=5, mosi=6, miso=7, cs=4), '/sd')
+    print('SD_MOUNTED_SLOT2')
+except Exception as e1:
+    print('SD_MOUNT_SLOT2_ERR', e1)
+    os.mount(machine.SDCard(slot=3, sck=5, mosi=6, miso=7, cs=4), '/sd')
+    print('SD_MOUNTED_SLOT3')
+"
 ```
 
-若這條命令完成後 `/sd/game` 沒出現，通常是 `mpremote connect` 後的狀態與掛載狀態不一致。改用同一個已掛載 session：
+看到 `SD_MOUNTED_SLOT2` 或 `SD_MOUNTED_SLOT3` 才算真的把外接 SD 掛上去。
+
+### 10.2.2 用同一個 session 逐檔同步
+
+這次實測中，逐檔複製最穩定，也比較容易判斷是哪個檔案沒有更新：
 
 ```bash
 cd /workspace/esp/esp/project_root
-/tmp/mpvenv/bin/mpremote resume fs -r -f cp sd_game_template/game :/sd/
-/tmp/mpvenv/bin/mpremote resume fs ls :/sd/game
+/tmp/mpvenv/bin/mpremote resume fs cp sd_game_template/game/app.py :/sd/game/app.py
+/tmp/mpvenv/bin/mpremote resume fs cp sd_game_template/game/app_camera_test.py :/sd/game/app_camera_test.py
+/tmp/mpvenv/bin/mpremote resume fs cp sd_game_template/game/config.py :/sd/game/config.py
 ```
+
+如果要同步更多資產或整包目錄，可以另外做，但核心啟動鏈至少先確認上述檔案已經真的寫入外接 SD。
+
+如果這次改的是 native overlay / native band 相關 Python 路徑，建議至少同步：
+
+- `sd_game_template/game/app.py`
+- `sd_game_template/game/app_camera_test.py`
+- `sd_game_template/game/config.py`
+- `sd_game_template/game/sd_config.py`（若使用 SD 專用入口且語法檢查通過）
+
+### 10.2.3 重掛載驗證是否真的寫入外接 SD
+
+不要只看 `cp` 的輸出。請立刻做一次 `umount -> mount -> read back`：
+
+```bash
+/tmp/mpvenv/bin/mpremote connect /dev/ttyACM0 exec "import os, machine
+try:
+    os.umount('/sd')
+except Exception:
+    pass
+try:
+    os.mount(machine.SDCard(slot=2, sck=5, mosi=6, miso=7, cs=4), '/sd')
+except Exception:
+    os.mount(machine.SDCard(slot=3, sck=5, mosi=6, miso=7, cs=4), '/sd')
+with open('/sd/game/app_camera_test.py', 'r') as f:
+    s = f.read()
+with open('/sd/game/config.py', 'r') as f:
+    c = f.read()
+print('REMOUNT_V2_START', 'APP_RUN_START_PHASE_CAMERA_TEST_V2' in s)
+print('REMOUNT_V2_FAR', 'SWAP_FAR_OK_V2' in s)
+print('REMOUNT_BTN_A_39', 'BTN_A_PIN = 39' in c)
+print('REMOUNT_BTN_B_40', 'BTN_B_PIN = 40' in c)
+print('REMOUNT_BTN_X_38', 'BTN_X_PIN = 38' in c)
+"
+```
+
+若要驗證 native overlay 版本是否真的上到外接 SD，可以把 readback 改成檢查：
+
+```bash
+/tmp/mpvenv/bin/mpremote connect /dev/ttyACM0 exec "import os, machine
+try:
+    os.umount('/sd')
+except Exception:
+    pass
+try:
+    os.mount(machine.SDCard(slot=2, sck=5, mosi=6, miso=7, cs=4), '/sd')
+except Exception:
+    os.mount(machine.SDCard(slot=3, sck=5, mosi=6, miso=7, cs=4), '/sd')
+app = open('/sd/game/app_camera_test.py', 'r').read()
+print('APP_HAS_NATIVE_OVERLAY_PACK', '_pack_special_render_overlays' in app)
+print('APP_CALLS_NATIVE_OVERLAY', 'overlay_desc_buf,' in app)"
+```
+
+只要重掛載後檔案內容又變回舊版，就表示你剛才沒有真的寫到外接 SD，而是寫到了別的地方或用了錯的 session 狀態。
 
 ### 10.3 reset 與來源驗證
 
@@ -263,9 +361,17 @@ cd /workspace/esp/esp/project_root
 
 正常啟動後 log 會看到遊戲主線輸出，例如：
 
-- `FULLSCREEN_BULK_SUBMIT_OK`
+- `SUBMIT_MODE=NATIVE_BAND_PIPELINE`
+- `BAND_PIPELINE_NATIVE_ON h=60`
 - `PROFILE fps=...`
 - `APP_RUN_START_PHASE_CAMERA_TEST`
+
+如果你剛剛有在修改按鍵邏輯、啟動 wrapper 或 launcher，建議在程式裡保留一個容易辨識的 startup marker，然後 reset 後直接看 UART。例如這次使用過：
+
+- `RUNTIME_APP_CAMERA_TEST_DEBUG_V2`
+- `APP_RUN_START_PHASE_CAMERA_TEST_V2`
+
+如果 reset 後看不到這些 marker，就不要先懷疑邏輯沒改到，先回頭檢查第 10.2.3 節，確認外接 SD 上的檔案是否真的更新成功。
 
 若要確認目前載入來源，按 `Ctrl-C` 中斷後輸入：
 
@@ -352,7 +458,8 @@ rg -n "CAMERA_TEST_MODE|CAMERA_SPI_TEST_PATH" /workspace/esp/esp/project_root/sd
 - `APP_FILE /sd/game/app.py`（手動查來源時）
 - `APP_RUN_START_PHASE_CAMERA_TEST`
 - `CAMERA_TEST_MODE=...`
-- `FULLSCREEN_BULK_SUBMIT_OK`（若使用 map1 + full bulk 主線）
+- `SUBMIT_MODE=NATIVE_BAND_PIPELINE`
+- `BAND_PIPELINE_NATIVE_ON h=60`
 - `PROFILE fps=...`
 
 ## 14. 一鍵流程（可直接貼上）
@@ -373,17 +480,25 @@ cd /workspace/esp/esp/project_root
 /tmp/mpvenv/bin/mpremote connect /dev/ttyACM0 fs cp main.py :main.py
 /tmp/mpvenv/bin/mpremote connect /dev/ttyACM0 exec "import machine, os
 try:
-    os.listdir('/sd')
-except Exception:
-    try:
-        os.mount(machine.SDCard(slot=2, sck=5, mosi=6, miso=7, cs=4), '/sd')
-    except Exception:
-        os.mount(machine.SDCard(slot=3, sck=5, mosi=6, miso=7, cs=4), '/sd')
-print('SD_READY')" fs -r -f cp sd_game_template/game :/sd/
+    os.umount('/sd')
+    print('PRE_UMOUNT_OK')
+except Exception as e:
+    print('PRE_UMOUNT_SKIP', e)
+try:
+    os.mount(machine.SDCard(slot=2, sck=5, mosi=6, miso=7, cs=4), '/sd')
+    print('SD_MOUNTED_SLOT2')
+except Exception as e1:
+    print('SD_MOUNT_SLOT2_ERR', e1)
+    os.mount(machine.SDCard(slot=3, sck=5, mosi=6, miso=7, cs=4), '/sd')
+    print('SD_MOUNTED_SLOT3')
+"
+/tmp/mpvenv/bin/mpremote resume fs cp sd_game_template/game/app.py :/sd/game/app.py
+/tmp/mpvenv/bin/mpremote resume fs cp sd_game_template/game/app_camera_test.py :/sd/game/app_camera_test.py
+/tmp/mpvenv/bin/mpremote resume fs cp sd_game_template/game/config.py :/sd/game/config.py
 /tmp/mpvenv/bin/mpremote connect /dev/ttyACM0 reset
 ```
 
-如果 `/sd/game` 沒出現，使用第 10.2 節的 `mpremote resume` 方式補同步。
+如果 `/sd/game` 沒出現，或 reset 後仍然跑舊版，回到第 10.2 節，使用「強制掛載外接 SD -> 同一 session 逐檔同步 -> 重掛載驗證」的流程重新部署。
 
 ### 14.2 只編譯不燒錄
 
@@ -409,3 +524,21 @@ idf.py -B build-ESP32_GENERIC_S3-SPIRAM_OCT_NOBT -p /dev/ttyACM0 flash
 3. 板上可 `import lgfx`
 4. SD 來源確認為 `/sd/game/app.py`
 5. 目標模式在序列埠可見，例如 `CAMERA_TEST_MODE=...`
+
+
+## 15. Native band pipeline 檢查
+
+部署後若 FPS 或畫面不符合預期，先確認板上 firmware 與 SD 檔案版本一致：
+
+```bash
+/tmp/mpvenv/bin/mpremote connect /dev/ttyACM0 exec "import lgfx; print('HAS_RENDER_SCENE_BANDS', hasattr(lgfx, 'render_scene_bands_rgb565'))"
+```
+
+開機 log 應看到：
+
+- `SUBMIT_MODE=NATIVE_BAND_PIPELINE`
+- `BAND_PIPELINE_NATIVE_ON h=60`
+
+若缺少 `render_scene_bands_rgb565`，代表 firmware 仍是舊版或 `/tmp/esp-mp-local` 漏同步 `lgfx_mp.cpp` / `lgfx_band.cpp` / `lgfx_shared.hpp`。
+
+目前 `app_camera_sd.py` 語法檢查未通過，不要同步或加入追蹤。主線仍以 `/sd/game/app.py` -> `app_camera_test.py` 為準。

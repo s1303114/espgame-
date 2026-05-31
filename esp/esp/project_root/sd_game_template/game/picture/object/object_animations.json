@@ -1,0 +1,22 @@
+{
+  "respawn_stone": {
+    "source_png": "game/picture/spawn/Spawnpoint_rock.png",
+    "sheet_rgb565": "game/picture/spawn/Spawnpoint_rock_wire.rgb565",
+    "frame_w": 32,
+    "frame_h": 32,
+    "frames": 4,
+    "frame_hold": 4,
+    "fps": 6,
+    "loop": true
+  },
+  "resurrection_anchor": {
+    "source_png": "game/picture/spawn/Resurrection_ Anchor.png",
+    "sheet_rgb565": "game/picture/spawn/Resurrection_Anchor_wire.rgb565",
+    "frame_w": 32,
+    "frame_h": 32,
+    "frames": 8,
+    "frame_hold": 4,
+    "fps": 10,
+    "loop": false
+  }
+}

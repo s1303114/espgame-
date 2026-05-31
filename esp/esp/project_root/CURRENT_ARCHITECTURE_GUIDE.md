@@ -1,21 +1,91 @@
-# 玩家技能架構（X/Y 交換）
+# 目前專案架構（主線）
 
-本文件只描述「玩家技能」相關架構。
+本文件整理目前板上主線。核心原則是：內部 flash 只放 launcher，遊戲程式與資產從 SD 載入；每幀遊戲狀態由 Python 更新，重型畫面合成與 TFT submit 交給 C++ native API。
 
 ---
 
-## 1. 技能定義
+## 0. 執行與渲染主線
 
-目前有兩個核心技能：
+### 啟動路徑
 
-- X：與鏡頭範圍內「最遠」可交換目標交換
+- 內部 flash：`/boot.py`、`/main.py`
+- SD 遊戲根目錄：`/sd/game`
+- 啟動後由 `/sd/game/app.py` 進入 camera test 主線。
+- 目前 boot log 會顯示 `Launcher source: sd`。
+
+### 每幀責任分工
+
+Python (`app_camera_test.py`) 負責：
+
+- input update
+- player movement / gravity
+- object gravity
+- B/Y swap skill
+- camera tracking
+- enemy / bullet / respawn state
+- 選擇本幀 player sprite frame
+- 打包 object、special overlay、enemy render descriptors
+- 將本幀狀態與資源 buffer 傳給 C++ renderer
+
+C++ (`lgfx` user module) 負責：
+
+- far background band copy
+- tilemap compose
+- object atlas compose
+- special object / respawn anchor / bullet overlay compose
+- enemy compose
+- player colorkey compose
+- native band pipeline submit
+- RGB565 wire-order DMA cache sync
+
+目前主線 renderer：
+
+- `lgfx.render_scene_bands_rgb565(...)`
+- `CAMERA_BAND_PIPELINE_NATIVE = True`
+- `CAMERA_BAND_PIPELINE_H = 60`
+- 4 bands：`320x60 * 4`
+- 輸出標記：`SUBMIT_MODE=NATIVE_BAND_PIPELINE`、`BAND_PIPELINE_NATIVE_ON h=60`
+
+目前實測約：
+
+- `PROFILE total_us ~= 35.7ms`
+- `PROFILE fps ~= 28.0`
+
+### 資料與資產
+
+主線資產都使用 wire-order RGB565：
+
+- far bg：`/sd/game/picture/backgound/bg_far_wire.rgb565`
+- tilemap CSV：`/sd/game/Tilemap/map1_tilemap.csv`
+- tileset：`/sd/game/Tilemap/tilemap_all_wire.rgb565`
+- objects CSV：`/sd/game/picture/object/objects.csv`
+- object animations：`/sd/game/picture/object/object_animations.json`
+- objects atlas：`/sd/game/picture/object/objects_atlas_wire.rgb565`
+- player sheet：`/sd/game/picture/player/player_wire.rgb565`
+- enemies CSV：`/sd/game/picture/enemy/enemies.csv`
+- enemy sheet：`/sd/game/picture/enemy/enemy_bow_animation_wire.rgb565`
+
+透明色主線規則：
+
+- 語意 colorkey：RGB565 `0xF81F` (`#FF00FF`)
+- wire-order raw buffer 內比較值：`0x1FF8`
+- Python 傳給 C++ compose 前會做 `_swap16(...)`
+
+---
+
+## 1. 玩家技能架構（B/Y 交換）
+
+### 技能定義
+
+目前有兩個核心交換技能：
+
+- B：與鏡頭範圍內「最遠」可交換目標交換
 - Y：與鏡頭範圍內「最近」可交換目標交換
+- X：目前不觸發 swap
 
 兩者共享同一套交換算法，差別只在目標選擇（far / near）。
 
----
-
-## 2. 觸發與輸入層
+### 觸發與輸入層
 
 技能觸發在 `app_camera_test.py` 主迴圈內。
 
@@ -27,12 +97,11 @@
 
 按鍵映射：
 
-- X 技能：`btn_x_pressed` 或 `btn_b_pressed`（兼容板子映射）
-- Y 技能：`btn_y_pressed`
+- B 技能：far swap（`btn_b_pressed`）
+- Y 技能：near swap（`btn_y_pressed`）
+- X：目前不觸發 swap
 
----
-
-## 3. 目標挑選規則
+### 目標挑選規則
 
 目標挑選由 `_pick_swappable_object_index(...)` 負責。
 
@@ -45,90 +114,81 @@
 距離計算：
 
 - 以玩家中心點到物件中心點的距離平方 `d2` 計算
-- X（far）：選 `d2` 最大
-- Y（near）：選 `d2` 最小
+- far：選 `d2` 最大
+- near：選 `d2` 最小
 
 找不到目標時輸出：
 
-- `SWAP_FAIL_NO_TARGET`
+- `SWAP_FAIL_NO_TARGET_V2`
 
----
-
-## 4. 交換落點算法（目前主線）
+### 交換落點算法（目前主線）
 
 交換採用「足底對齊 + 水平置中修正」：
 
-- 玩家新位置
-  - `player_x = old_obj_x + ((obj_w - player_w) // 2)`
-  - `player_y = old_obj_y + (obj_h - player_h)`
-- 物件新位置
-  - `obj_x = old_player_x + ((player_w - obj_w) // 2)`
-  - `obj_y = old_player_y + (player_h - obj_h)`
+- 玩家新位置：`player_x = old_obj_x + ((obj_w - player_w) // 2)`，`player_y = old_obj_y + (obj_h - player_h)`
+- 物件新位置：`obj_x = old_player_x + ((player_w - obj_w) // 2)`，`obj_y = old_player_y + (player_h - obj_h)`
 
-目前你指定的策略是：
+目前策略：
 
 - 直接交換生效
 - 不做碰撞檢查
 - 不做回滾
 
-因此 far/near 行為一致，不會因碰撞檢查走不同分支。
-
----
-
-## 5. 資料結構（objects.csv）
-
-技能依賴 `objects.csv` 內以下欄位：
-
-- `world_x, world_y`：物件世界座標（左上角）
-- `w, h`：物件尺寸
-- `visible`：是否可見
-- `swappable`：是否可被交換（1 可交換，0 不可）
-
-目前路徑：
-
-- `game/picture/object/objects.csv`
-
----
-
-## 6. 與重力/渲染的關係
-
 交換成功後：
 
-- 會立即更新 `objects_rows`
-- 會回寫 `objects_c_buf`（給 C++ 合成用）
-- 玩家重力在後續幀照常生效
-- object 重力（若啟用）也在後續幀照常生效
-
-渲染上，技能不直接畫圖；它只改世界座標，畫面由原本渲染管線刷新。
+- 立即更新 `objects_rows`
+- 回寫 `objects_c_buf`
+- 重建 `object_solids`
+- 玩家與 object 重力後續照常生效
 
 ---
 
-## 7. 可調參數
+## 2. Native Band Pipeline
 
-在 `config.py` 可調：
+目前正式 renderer 是 `render_scene_bands_rgb565(...)`。Python 仍保留 full-screen compose/submit fallback，但主線應看到：
 
-- `SWAP_MIN_INTERVAL_MS`：技能連點間隔（建議 70~120）
+- `SUBMIT_MODE=NATIVE_BAND_PIPELINE`
+- `BAND_PIPELINE_NATIVE_ON h=60`
+
+C++ 回傳 profile tuple：
+
+```text
+(band_count, compose_us, kick_us, wait_us, total_us)
+```
+
+Python 會將 native call 整體記入 `PROFILE submit_us`，並將 `kick_us / wait_us` 拆到：
+
+- `PROFILE submit_kick_us`
+- `PROFILE submit_wait_us`
+
+注意：native band 模式的 `submit_us` 不是舊版純 TFT submit，而是 C++ compose + band DMA pipeline 的總耗時。
 
 ---
 
-## 8. 驗證方式（看 log）
+## 3. 可調參數
 
-成功：
+在 `config.py` / `sd_config.py` 可調：
 
-- `SWAP_FAR_OK idx=... px=... py=...`
-- `SWAP_NEAR_OK idx=... px=... py=...`
-
-失敗：
-
-- `SWAP_FAIL_NO_TARGET`
+- `CAMERA_BAND_PIPELINE_H`：band 高度，目前 60
+- `SWAP_MIN_INTERVAL_MS`：交換連點間隔，建議 70~120
+- `OBJECT_GRAVITY_ENABLED`：是否開啟物件重力
+- `OBJECT_GRAVITY_STEP`：物件下落每幀步進
+- `PLAYER_GRAVITY` / `PLAYER_FALL_SPEED_MAX`：玩家重力手感
+- `CAMERA_OBJECT_COLORKEY_ENABLE` / `CAMERA_OBJECT_COLORKEY_RGB565`：object atlas colorkey
+- `ENEMY_*`：enemy 偵測、移動、射擊與子彈參數
 
 ---
 
-## 9. 設計結論
+## 4. 設計結論
 
-目前技能架構是：
+目前主線是：
 
-- 輸入層穩定（邊緣觸發 + 間隔）
-- 目標選擇清楚（far/near）
-- 交換算法統一（只有目標不同）
-- 與渲染層/重力層解耦（只改座標，不改繪製流程）
+```text
+SD-only launcher
+ -> Python game state update
+ -> packed render descriptors
+ -> C++ native 4-band compose
+ -> wire-order DMA submit with cache sync
+```
+
+這條路徑已取代舊 full-screen Python compose + full-screen submit 主線。後續優化應集中在 band cache、static world cache、camera moving strip cache，以及 band 高度調參。

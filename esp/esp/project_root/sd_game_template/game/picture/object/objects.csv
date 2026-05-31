@@ -1,5 +1,8 @@
-id,type,world_x,world_y,w,h,sprite,solid,trigger,layer,swappable,src_x,src_y,src_w,src_h,gravity
-board,decor,496,48,32,48,board,0,0,1,1,0,0,32,48,1
-flower,decor,608,48,32,48,flower,0,0,1,1,32,0,32,48,1
-bush,decor,192,128,64,32,bush,0,0,1,1,64,0,64,32,1
-s_rock,checkpoint,128,128,32,32,s_rock,0,1,1,1,0,48,32,32,1
+id,type,world_x,world_y,w,h,sprite,solid,trigger,layer,swappable,src_x,src_y,src_w,src_h,gravity,anim_id,checkpoint
+house,decor,0,32,64,112,house,0,0,1,0,0,0,64,112,0,,0
+respawn_stone_01,checkpoint,128,112,32,32,respawn_stone,0,1,1,1,0,0,32,32,0,respawn_stone,1
+grass,decor,224,112,32,32,grass,0,0,1,1,144,0,32,32,1,,0
+plants,decor,432,112,32,32,plants,0,0,1,1,176,0,32,32,1,,0
+quartz,decor,544,80,32,32,quartz,0,0,1,1,208,0,32,32,1,,0
+board,decor,656,64,32,32,board,0,0,1,1,112,0,32,32,1,,0
+tree,decor,832,64,160,160,tree,0,0,1,0,96,96,160,160,0,,0

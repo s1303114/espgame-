@@ -34,6 +34,14 @@ except Exception:
     gc = None
 
 try:
+    import ujson as json
+except Exception:
+    try:
+        import json
+    except Exception:
+        json = None
+
+try:
     from engine.font_zh import draw_digits_to_buf as _draw_digits_to_buf
     from engine.font_zh import get_digits_text_width as _get_digits_text_width
 except Exception:
@@ -64,6 +72,10 @@ _MODE_ROWS_SAFE_NEAR_TILE_TEST = "ROWS_SAFE_NEAR_TILE_TEST"
 _MODE_FULL_BUFFER_TEST = "FULL_BUFFER_TEST"
 _MODE_SPI_TFT_SPEED_TEST = "SPI_TFT_SPEED_TEST"
 _MODE_SPI_TFT_BULK_WAIT_TEST = "SPI_TFT_BULK_WAIT_TEST"
+
+_ENEMY_STATE_IDLE = 0
+_ENEMY_STATE_WALK = 1
+_ENEMY_STATE_SHOOT = 2
 
 
 def _resolve_asset_path(path):
@@ -704,11 +716,12 @@ def _flatten_tilemap_rows(tile_rows):
         r += 1
     return out, map_w, map_h
 
-def _parse_objects_csv(text):
+def _parse_objects_csv_with_meta(text):
     rows = []
+    meta_rows = []
     lines = text.strip().splitlines()
     if not lines:
-        return rows
+        return rows, meta_rows
     header = [h.strip() for h in lines[0].split(",")]
     idx = {}
     i = 0
@@ -729,7 +742,20 @@ def _parse_objects_csv(text):
     )
     for k in req:
         if k not in idx:
-            return []
+            return [], []
+
+    def _col(cols, key, default=""):
+        pos = idx.get(key, -1)
+        if pos < 0 or pos >= len(cols):
+            return default
+        return cols[pos].strip()
+
+    def _to_int(value, default=0):
+        try:
+            return int(value)
+        except Exception:
+            return default
+
     li = 1
     while li < len(lines):
         line = lines[li].strip()
@@ -738,27 +764,45 @@ def _parse_objects_csv(text):
             continue
         cols = [c.strip() for c in line.split(",")]
         try:
-            wx = int(cols[idx["world_x"]])
-            wy = int(cols[idx["world_y"]])
-            w = int(cols[idx["w"]])
-            h = int(cols[idx["h"]])
-            solid = 1 if int(cols[idx["solid"]]) != 0 else 0
-            layer = int(cols[idx["layer"]])
+            wx = _to_int(_col(cols, "world_x"))
+            wy = _to_int(_col(cols, "world_y"))
+            w = _to_int(_col(cols, "w"))
+            h = _to_int(_col(cols, "h"))
+            solid = 1 if _to_int(_col(cols, "solid")) != 0 else 0
+            layer = _to_int(_col(cols, "layer"))
             if "visible" in idx:
-                visible = 1 if int(cols[idx["visible"]]) != 0 else 0
+                visible = 1 if _to_int(_col(cols, "visible")) != 0 else 0
             else:
                 visible = 1
-            sx = int(cols[idx["src_x"]])
-            sy = int(cols[idx["src_y"]])
-            sw = int(cols[idx["src_w"]])
-            sh = int(cols[idx["src_h"]])
+            sx = _to_int(_col(cols, "src_x"))
+            sy = _to_int(_col(cols, "src_y"))
+            sw = _to_int(_col(cols, "src_w"))
+            sh = _to_int(_col(cols, "src_h"))
         except Exception:
             continue
-        if "swappable" in idx:
-            swappable = 1 if int(cols[idx["swappable"]]) != 0 else 0
-        else:
-            swappable = 0
+        swappable = 1 if _to_int(_col(cols, "swappable")) != 0 else 0
+        obj_type = _col(cols, "type", "")
+        checkpoint = 1 if _to_int(_col(cols, "checkpoint"), 0) != 0 else 0
+        if checkpoint == 0 and obj_type in ("checkpoint", "respawn_stone"):
+            checkpoint = 1
+        anim_id = _col(cols, "anim_id", "")
         rows.append([wx, wy, w, h, solid, layer, visible, swappable, sx, sy, sw, sh])
+        meta_rows.append(
+            {
+                "id": _col(cols, "id", ""),
+                "type": obj_type,
+                "sprite": _col(cols, "sprite", ""),
+                "gravity": _to_int(_col(cols, "gravity"), 0),
+                "anim_id": anim_id,
+                "checkpoint": checkpoint,
+                "special_render": 1 if anim_id else 0,
+            }
+        )
+    return rows, meta_rows
+
+
+def _parse_objects_csv(text):
+    rows, _meta_rows = _parse_objects_csv_with_meta(text)
     return rows
 
 
@@ -774,6 +818,18 @@ def _load_objects_rows(path):
         return []
 
 
+def _load_objects_rows_and_meta(path):
+    try:
+        with open(path, "r") as fp:
+            text = fp.read()
+    except Exception:
+        return [], []
+    try:
+        return _parse_objects_csv_with_meta(text)
+    except Exception:
+        return [], []
+
+
 def _load_rgb565_blob(path, exp_bytes):
     try:
         with open(path, "rb") as fp:
@@ -784,7 +840,808 @@ def _load_rgb565_blob(path, exp_bytes):
         return None
     return data
 
-def _pack_objects_for_c(rows):
+
+def _load_object_animations(path):
+    if json is None:
+        return {}
+    try:
+        with open(path, "r") as fp:
+            raw = json.load(fp)
+    except Exception:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    for anim_id in raw:
+        spec = raw.get(anim_id)
+        if not isinstance(spec, dict):
+            continue
+        rgb565_path = spec.get("sheet_rgb565") or spec.get("rgb565") or spec.get("path")
+        frame_w = int(spec.get("frame_w", 0) or 0)
+        frame_h = int(spec.get("frame_h", 0) or 0)
+        frame_count = int(spec.get("frames", 0) or 0)
+        fps = int(spec.get("fps", 0) or 0)
+        if (not rgb565_path) or frame_w <= 0 or frame_h <= 0 or frame_count <= 0:
+            continue
+        abs_path = _resolve_asset_path(rgb565_path)
+        sheet_w = int(spec.get("sheet_w", frame_w * frame_count) or (frame_w * frame_count))
+        sheet_h = int(spec.get("sheet_h", frame_h) or frame_h)
+        if sheet_w < (frame_w * frame_count) or sheet_h < frame_h:
+            continue
+        row_bytes = sheet_w * 2
+        frame_bytes = frame_w * frame_h * 2
+        sheet = _load_rgb565_blob(abs_path, sheet_w * sheet_h * 2)
+        if sheet is None:
+            continue
+        frames = []
+        fi = 0
+        while fi < frame_count:
+            frame_buf = bytearray(frame_bytes)
+            row = 0
+            while row < frame_h:
+                src_off = (row * row_bytes) + (fi * frame_w * 2)
+                dst_off = row * frame_w * 2
+                frame_buf[dst_off : dst_off + (frame_w * 2)] = sheet[src_off : src_off + (frame_w * 2)]
+                row += 1
+            frames.append(frame_buf)
+            fi += 1
+        out[anim_id] = {
+            "frames": frames,
+            "frame_w": frame_w,
+            "frame_h": frame_h,
+            "fps": fps,
+            "frame_hold": int(spec.get("frame_hold", 4) or 4),
+            "loop": bool(spec.get("loop", True)),
+        }
+    return out
+
+
+def _csv_header_index(line):
+    if not line:
+        return {}
+    header = [h.strip() for h in str(line).split(",")]
+    out = {}
+    i = 0
+    while i < len(header):
+        out[header[i]] = i
+        i += 1
+    return out
+
+
+def _parse_enemies_csv(text):
+    rows = []
+    meta_rows = []
+    if not text:
+        return rows, meta_rows
+    lines = text.splitlines()
+    if not lines:
+        return rows, meta_rows
+    idx = _csv_header_index(lines[0])
+    if not idx:
+        return rows, meta_rows
+
+    def _col(cols, key, default=""):
+        pos = idx.get(key, -1)
+        if pos < 0 or pos >= len(cols):
+            return default
+        return cols[pos].strip()
+
+    def _to_int(value, default=0):
+        try:
+            return int(value)
+        except Exception:
+            return default
+
+    line_i = 1
+    while line_i < len(lines):
+        line = lines[line_i].strip()
+        line_i += 1
+        if (not line) or line.startswith("#"):
+            continue
+        cols = [c.strip() for c in line.split(",")]
+        try:
+            wx = _to_int(_col(cols, "world_x"))
+            wy = _to_int(_col(cols, "world_y"))
+            w = _to_int(_col(cols, "w"))
+            h = _to_int(_col(cols, "h"))
+        except Exception:
+            continue
+        swappable = 1 if _to_int(_col(cols, "swappable"), 0) != 0 else 0
+        facing = _to_int(_col(cols, "facing"), -1)
+        if facing >= 0:
+            facing = 1
+        else:
+            facing = -1
+        rows.append([wx, wy, w, h, 1, swappable])
+        meta_rows.append(
+            {
+                "id": _col(cols, "id", ""),
+                "type": _col(cols, "type", "bow"),
+                "facing": facing,
+            }
+        )
+    return rows, meta_rows
+
+
+def _load_enemies_rows_and_meta(path):
+    try:
+        with open(path, "r") as fp:
+            text = fp.read()
+    except Exception:
+        return [], []
+    try:
+        return _parse_enemies_csv(text)
+    except Exception:
+        return [], []
+
+
+def _clone_enemy_rows(rows):
+    if not rows:
+        return []
+    return [list(row) for row in rows]
+
+
+def _reset_enemy_state(state, meta=None):
+    facing = -1
+    if meta is not None:
+        facing = int(meta.get("facing", -1) or -1)
+    if facing >= 0:
+        facing = 1
+    else:
+        facing = -1
+    state["facing"] = facing
+    state["state"] = _ENEMY_STATE_IDLE
+    state["anim_counter"] = 0
+    state["shoot_cooldown"] = 0
+    state["shot_fired"] = 0
+    state["vel_y"] = 0
+
+
+def _build_enemy_states(meta_rows):
+    out = []
+    if not meta_rows:
+        return out
+    i = 0
+    while i < len(meta_rows):
+        state = {}
+        _reset_enemy_state(state, meta_rows[i])
+        out.append(state)
+        i += 1
+    return out
+
+
+def _restore_enemy_rows(rows, saved_rows, enemy_states=None, enemy_meta=None):
+    if not rows or not saved_rows:
+        return
+    limit = len(rows)
+    if len(saved_rows) < limit:
+        limit = len(saved_rows)
+    i = 0
+    while i < limit:
+        saved = saved_rows[i]
+        row = rows[i]
+        row[0] = int(saved[0])
+        row[1] = int(saved[1])
+        row[2] = int(saved[2])
+        row[3] = int(saved[3])
+        row[4] = int(saved[4])
+        row[5] = int(saved[5])
+        if enemy_states is not None and i < len(enemy_states):
+            meta = enemy_meta[i] if (enemy_meta is not None and i < len(enemy_meta)) else None
+            _reset_enemy_state(enemy_states[i], meta)
+        i += 1
+
+
+def _pick_animation_frame(anim_spec, anim_counter=0):
+    if not anim_spec:
+        return None, 0, 0
+    frames = anim_spec.get("frames") or []
+    frame_count = len(frames)
+    if frame_count <= 0:
+        return None, 0, 0
+    frame_hold = int(anim_spec.get("frame_hold", 4) or 4)
+    if frame_hold < 1:
+        frame_hold = 1
+    if anim_counter < 0:
+        anim_counter = 0
+    frame_index = int(anim_counter) // frame_hold
+    if bool(anim_spec.get("loop", True)):
+        frame_index %= frame_count
+    elif frame_index >= frame_count:
+        frame_index = frame_count - 1
+    return frames[frame_index], int(anim_spec.get("frame_w", 0) or 0), int(anim_spec.get("frame_h", 0) or 0)
+
+
+def _target_distance2(wx, wy, ow, oh, player_x, player_y, player_w, player_h):
+    px = player_x + (player_w // 2)
+    py = player_y + (player_h // 2)
+    ox = int(wx) + (int(ow) // 2)
+    oy = int(wy) + (int(oh) // 2)
+    dx = ox - px
+    dy = oy - py
+    return dx * dx + dy * dy
+
+
+def _pick_swappable_enemy_index(enemy_rows, player_x, player_y, player_w, player_h, pick_far, camera_x, band_top, view_w, view_h):
+    if not enemy_rows:
+        return -1
+    best_i = -1
+    best_d2 = -1
+    ei = 0
+    while ei < len(enemy_rows):
+        wx, wy, ow, oh, visible, swappable = enemy_rows[ei]
+        if visible and swappable:
+            sx0 = int(wx) - int(camera_x)
+            sy0 = int(wy) - int(band_top)
+            sx1 = sx0 + int(ow)
+            sy1 = sy0 + int(oh)
+            in_view = (sx0 < view_w and sx1 > 0 and sy0 < view_h and sy1 > 0)
+            if in_view:
+                d2 = _target_distance2(wx, wy, ow, oh, player_x, player_y, player_w, player_h)
+                if best_i < 0:
+                    best_i = ei
+                    best_d2 = d2
+                else:
+                    if pick_far:
+                        if d2 > best_d2:
+                            best_i = ei
+                            best_d2 = d2
+                    else:
+                        if d2 < best_d2:
+                            best_i = ei
+                            best_d2 = d2
+        ei += 1
+    return best_i
+
+
+def _enemy_has_support_ahead(tilemap_idx, tilemap_w, tilemap_h, tile_size, object_solids, wx, wy, ow, oh, direction, step_px):
+    step = int(step_px)
+    if step < 1:
+        step = 1
+    if direction >= 0:
+        probe_x = int(wx) + int(ow) + step - 2
+    else:
+        probe_x = int(wx) - step
+    probe_y = int(wy) + int(oh) + 1
+    return _aabb_collides_world(probe_x, probe_y, 2, 2, tilemap_idx, tilemap_w, tilemap_h, tile_size, object_solids)
+
+
+def _pick_enemy_frame_rect(enemy_state, anim_counter, facing, frame_w, frame_h, frame_hold):
+    hold = int(frame_hold)
+    if hold < 1:
+        hold = 1
+    frame_idx = int(anim_counter) // hold
+    face_right = 1 if int(facing) >= 0 else 0
+    state_code = int(enemy_state)
+    if state_code == _ENEMY_STATE_SHOOT:
+        if frame_idx > 9:
+            frame_idx = 9
+        src_y = 0 if face_right else frame_h
+        src_x = frame_idx * frame_w
+        return src_x, src_y, frame_w, frame_h
+    walk_idx = frame_idx % 5
+    src_y = frame_h * 2
+    if face_right:
+        src_x = walk_idx * frame_w
+    else:
+        src_x = (5 + walk_idx) * frame_w
+    return src_x, src_y, frame_w, frame_h
+
+
+def _pack_enemy_render_descriptors(enemy_rows, enemy_states):
+    if not enemy_rows or not enemy_states:
+        return bytearray(), 8, 0
+    out = bytearray()
+    count = 0
+    ei = 0
+    while ei < len(enemy_rows):
+        row = enemy_rows[ei]
+        state = enemy_states[ei] if ei < len(enemy_states) else None
+        if state is not None:
+            wx, wy, _ow, _oh, visible, _swappable = row
+            if visible:
+                _append_i16_le(out, wx)
+                _append_i16_le(out, wy)
+                _append_u16_le(out, int(state.get("anim_counter", 0) or 0))
+                out.append(int(state.get("state", _ENEMY_STATE_IDLE)) & 0xFF)
+                out.append(1 if int(state.get("facing", 1)) >= 0 else 0)
+                count += 1
+        ei += 1
+    return out, 8, count
+
+
+def _make_solid_sprite_rgb565(sprite_w, sprite_h, color565, wire_order=False):
+    if sprite_w <= 0 or sprite_h <= 0:
+        return None
+    raw = int(color565) & 0xFFFF
+    if wire_order:
+        raw = _swap16(raw)
+    b0 = raw & 0xFF
+    b1 = (raw >> 8) & 0xFF
+    out = bytearray(sprite_w * sprite_h * 2)
+    i = 0
+    while i < len(out):
+        out[i] = b0
+        out[i + 1] = b1
+        i += 2
+    return out
+
+
+def _spawn_enemy_bullet(enemy_bullets, max_bullets, bullet_x, bullet_y, vel_x, vel_y, bullet_w, bullet_h):
+    if enemy_bullets is None or max_bullets <= 0 or bullet_w <= 0 or bullet_h <= 0:
+        return False
+    i = 0
+    while i < len(enemy_bullets):
+        row = enemy_bullets[i]
+        if not row[6]:
+            row[0] = int(bullet_x)
+            row[1] = int(bullet_y)
+            row[2] = int(vel_x)
+            row[3] = int(vel_y)
+            row[4] = int(bullet_w)
+            row[5] = int(bullet_h)
+            row[6] = 1
+            return True
+        i += 1
+    if len(enemy_bullets) >= max_bullets:
+        return False
+    enemy_bullets.append([int(bullet_x), int(bullet_y), int(vel_x), int(vel_y), int(bullet_w), int(bullet_h), 1])
+    return True
+
+
+def _clear_enemy_bullets(enemy_bullets):
+    if enemy_bullets is None:
+        return
+    enemy_bullets[:] = []
+
+
+def _render_enemies_into_scene(
+    scene_buf,
+    scene_w,
+    scene_h,
+    camera_x,
+    band_top,
+    enemy_rows,
+    enemy_states,
+    enemy_sheet,
+    enemy_sheet_w,
+    enemy_sheet_h,
+    enemy_frame_w,
+    enemy_frame_h,
+    enemy_frame_hold,
+    submit_wire_order,
+    submit_wire_runtime_swap,
+):
+    if (not enemy_rows) or (not enemy_states) or enemy_sheet is None:
+        return
+    colorkey = int(getattr(config, "CAMERA_OBJECT_COLORKEY_RGB565", 0xF81F)) & 0xFFFF
+    if submit_wire_order and not submit_wire_runtime_swap:
+        colorkey = _swap16(colorkey)
+    key_b0 = colorkey & 0xFF
+    key_b1 = (colorkey >> 8) & 0xFF
+    ei = 0
+    while ei < len(enemy_rows):
+        row = enemy_rows[ei]
+        state = enemy_states[ei] if ei < len(enemy_states) else None
+        if state is not None:
+            wx, wy, _ow, _oh, visible, _swappable = row
+            if visible:
+                src_x, src_y, src_w, src_h = _pick_enemy_frame_rect(
+                    int(state.get("state", _ENEMY_STATE_IDLE)),
+                    int(state.get("anim_counter", 0)),
+                    int(state.get("facing", 1)),
+                    enemy_frame_w,
+                    enemy_frame_h,
+                    enemy_frame_hold,
+                )
+                _blit_atlas_region_colorkey_into_scene(
+                    scene_buf,
+                    scene_w,
+                    scene_h,
+                    int(wx) - int(camera_x),
+                    int(wy) - int(band_top),
+                    enemy_sheet,
+                    enemy_sheet_w,
+                    enemy_sheet_h,
+                    src_x,
+                    src_y,
+                    src_w,
+                    src_h,
+                    key_b0,
+                    key_b1,
+                )
+        ei += 1
+
+
+def _render_enemy_bullets_into_scene(scene_buf, scene_w, scene_h, camera_x, band_top, enemy_bullets, bullet_color):
+    if not enemy_bullets:
+        return
+    bi = 0
+    while bi < len(enemy_bullets):
+        bx, by, _vx, _vy, bw, bh, active = enemy_bullets[bi]
+        if active:
+            clip = _clip_rect_screen_xywh(int(bx) - int(camera_x), int(by) - int(band_top), int(bw), int(bh), scene_w, scene_h)
+            if clip is not None:
+                _fill_buffer_rect565(scene_buf, scene_w, clip[0], clip[1], clip[2], clip[3], bullet_color)
+        bi += 1
+
+
+def _update_enemies_and_bullets(
+    enemy_rows,
+    enemy_meta,
+    enemy_states,
+    enemy_bullets,
+    player_x,
+    player_y,
+    player_w,
+    player_h,
+    vel_y,
+    tilemap_idx,
+    tilemap_w,
+    tilemap_h,
+    tile_size,
+    object_solids,
+    death_margin,
+    enemy_detect_x,
+    enemy_flee_x,
+    enemy_detect_y,
+    enemy_move_speed,
+    enemy_gravity_step,
+    enemy_frame_hold,
+    enemy_shoot_fire_frame,
+    enemy_bullet_speed,
+    enemy_bullet_w,
+    enemy_bullet_h,
+    enemy_max_bullets,
+    enemy_shoot_interval,
+    fall_speed_max,
+    map_w_px,
+    map_h_px,
+):
+    if (not enemy_rows) or (not enemy_states) or tilemap_idx is None or tilemap_w <= 0 or tilemap_h <= 0:
+        return player_y, vel_y
+
+    player_center_x_enemy = player_x + (player_w // 2)
+    player_center_y_enemy = player_y + (player_h // 2)
+    shoot_anim_total = 10 * enemy_frame_hold
+    shoot_fire_tick = enemy_shoot_fire_frame * enemy_frame_hold
+    if shoot_fire_tick < 1:
+        shoot_fire_tick = enemy_frame_hold
+
+    ei = 0
+    while ei < len(enemy_rows):
+        row = enemy_rows[ei]
+        state = enemy_states[ei] if ei < len(enemy_states) else None
+        if state is not None:
+            wx, wy, ew, eh, visible, _swappable = row
+            if visible and ew > 0 and eh > 0:
+                state_code = int(state.get("state", _ENEMY_STATE_IDLE))
+                facing_enemy = 1 if int(state.get("facing", 1)) >= 0 else -1
+                vel_enemy_y = int(state.get("vel_y", 0))
+                shoot_cooldown = int(state.get("shoot_cooldown", 0))
+                if shoot_cooldown > 0:
+                    shoot_cooldown -= 1
+                enemy_center_x = int(wx) + (int(ew) // 2)
+                enemy_center_y = int(wy) + (int(eh) // 2)
+                dx_to_player = player_center_x_enemy - enemy_center_x
+                dy_to_player = player_center_y_enemy - enemy_center_y
+                detect_player = False
+                if dx_to_player < 0:
+                    detect_player = (-dx_to_player) <= enemy_detect_x
+                else:
+                    detect_player = dx_to_player <= enemy_detect_x
+                if detect_player:
+                    if dy_to_player < 0:
+                        detect_player = (-dy_to_player) <= enemy_detect_y
+                    else:
+                        detect_player = dy_to_player <= enemy_detect_y
+                flee_player = False
+                if detect_player:
+                    if dx_to_player < 0:
+                        flee_player = (-dx_to_player) <= enemy_flee_x
+                    else:
+                        flee_player = dx_to_player <= enemy_flee_x
+                aim_dir = 1 if dx_to_player >= 0 else -1
+                move_enemy_x = 0
+                if state_code == _ENEMY_STATE_SHOOT:
+                    facing_enemy = aim_dir
+                elif flee_player:
+                    flee_dir = -1 if dx_to_player >= 0 else 1
+                    if _enemy_has_support_ahead(
+                        tilemap_idx,
+                        tilemap_w,
+                        tilemap_h,
+                        tile_size,
+                        object_solids,
+                        wx,
+                        wy,
+                        ew,
+                        eh,
+                        flee_dir,
+                        enemy_move_speed,
+                    ):
+                        if state_code != _ENEMY_STATE_WALK or int(state.get("facing", facing_enemy)) != flee_dir:
+                            state["anim_counter"] = 0
+                        facing_enemy = flee_dir
+                        state_code = _ENEMY_STATE_WALK
+                        move_enemy_x = flee_dir * enemy_move_speed
+                    elif shoot_cooldown <= 0:
+                        if state_code != _ENEMY_STATE_SHOOT or facing_enemy != aim_dir:
+                            state["anim_counter"] = 0
+                            state["shot_fired"] = 0
+                        facing_enemy = aim_dir
+                        state_code = _ENEMY_STATE_SHOOT
+                    else:
+                        facing_enemy = aim_dir
+                        state_code = _ENEMY_STATE_IDLE
+                elif detect_player:
+                    facing_enemy = aim_dir
+                    if shoot_cooldown <= 0:
+                        if state_code != _ENEMY_STATE_SHOOT:
+                            if facing_enemy != int(state.get("facing", facing_enemy)):
+                                state["anim_counter"] = 0
+                            state["shot_fired"] = 0
+                        state_code = _ENEMY_STATE_SHOOT
+                    else:
+                        if facing_enemy != int(state.get("facing", facing_enemy)):
+                            state["anim_counter"] = 0
+                        state_code = _ENEMY_STATE_IDLE
+                else:
+                    state_code = _ENEMY_STATE_IDLE
+
+                grounded_enemy = _aabb_collides_world(
+                    int(wx),
+                    int(wy) + 1,
+                    int(ew),
+                    int(eh),
+                    tilemap_idx,
+                    tilemap_w,
+                    tilemap_h,
+                    tile_size,
+                    object_solids,
+                )
+                if not grounded_enemy:
+                    vel_enemy_y += enemy_gravity_step
+                    if vel_enemy_y > fall_speed_max:
+                        vel_enemy_y = fall_speed_max
+                elif vel_enemy_y > 0:
+                    vel_enemy_y = 0
+
+                wx, wy, _enemy_hit_x, enemy_hit_y = _move_axis_world(
+                    tilemap_idx,
+                    tilemap_w,
+                    tilemap_h,
+                    tile_size,
+                    object_solids,
+                    int(wx),
+                    int(wy),
+                    int(ew),
+                    int(eh),
+                    int(move_enemy_x),
+                    int(vel_enemy_y),
+                )
+                max_enemy_x = map_w_px - int(ew)
+                if max_enemy_x < 0:
+                    max_enemy_x = 0
+                wx = _clamp(int(wx), 0, max_enemy_x)
+                if enemy_hit_y:
+                    vel_enemy_y = 0
+                if int(wy) < 0:
+                    wy = 0
+                    vel_enemy_y = 0
+                if int(wy) > (map_h_px + death_margin):
+                    row[1] = int(wy)
+                    row[4] = 0
+                    _reset_enemy_state(state, enemy_meta[ei] if ei < len(enemy_meta) else None)
+                else:
+                    row[0] = int(wx)
+                    row[1] = int(wy)
+                    state["facing"] = facing_enemy
+                    state["state"] = state_code
+                    state["shoot_cooldown"] = shoot_cooldown
+                    state["vel_y"] = vel_enemy_y
+                    if state_code == _ENEMY_STATE_WALK:
+                        state["anim_counter"] = int(state.get("anim_counter", 0)) + 1
+                        state["shot_fired"] = 0
+                    elif state_code == _ENEMY_STATE_SHOOT:
+                        state["anim_counter"] = int(state.get("anim_counter", 0)) + 1
+                        if (not int(state.get("shot_fired", 0))) and int(state.get("anim_counter", 0)) >= shoot_fire_tick:
+                            bullet_vx = enemy_bullet_speed * facing_enemy
+                            bullet_x = int(row[0]) + ((int(ew) - enemy_bullet_w) // 2)
+                            if facing_enemy >= 0:
+                                bullet_x = int(row[0]) + int(ew)
+                            else:
+                                bullet_x = int(row[0]) - enemy_bullet_w
+                            bullet_y = int(row[1]) + (int(eh) // 2) - (enemy_bullet_h // 2)
+                            _spawn_enemy_bullet(
+                                enemy_bullets,
+                                enemy_max_bullets,
+                                bullet_x,
+                                bullet_y,
+                                bullet_vx,
+                                0,
+                                enemy_bullet_w,
+                                enemy_bullet_h,
+                            )
+                            state["shot_fired"] = 1
+                        if int(state.get("anim_counter", 0)) >= shoot_anim_total:
+                            state["anim_counter"] = 0
+                            state["shot_fired"] = 0
+                            state["state"] = _ENEMY_STATE_IDLE
+                            state["shoot_cooldown"] = enemy_shoot_interval
+                    else:
+                        state["anim_counter"] = 0
+                        state["shot_fired"] = 0
+        ei += 1
+
+    bi = 0
+    while bi < len(enemy_bullets):
+        bullet = enemy_bullets[bi]
+        if bullet[6]:
+            bx = int(bullet[0]) + int(bullet[2])
+            by = int(bullet[1]) + int(bullet[3])
+            bw = int(bullet[4])
+            bh = int(bullet[5])
+            active = 1
+            if (bx + bw) < 0 or bx > map_w_px or by > (map_h_px + death_margin):
+                active = 0
+            elif _aabb_collides_world(bx, by, bw, bh, tilemap_idx, tilemap_w, tilemap_h, tile_size, object_solids):
+                active = 0
+            elif player_x < (bx + bw) and (player_x + player_w) > bx and player_y < (by + bh) and (player_y + player_h) > by:
+                active = 0
+                player_y = map_h_px + death_margin + 1
+                vel_y = 0
+            if active:
+                bullet[0] = bx
+                bullet[1] = by
+            else:
+                bullet[6] = 0
+        bi += 1
+    return player_y, vel_y
+
+
+def _perform_world_swap(
+    swap_triggered,
+    swap_pick_far,
+    objects_rows,
+    objects_meta,
+    enemy_rows,
+    enemy_states,
+    player_x,
+    player_y,
+    player_w,
+    player_h,
+    camera_x,
+    band_top,
+    view_w,
+    view_h,
+    max_player_x,
+    map_h_px,
+    vel_y,
+    objects_c_buf,
+    objects_c_stride,
+):
+    if not swap_triggered or (not objects_rows and not enemy_rows):
+        return player_x, player_y, vel_y, _rebuild_object_solids(objects_rows)
+
+    object_ti = -1
+    enemy_ti = -1
+    if objects_rows:
+        object_ti = _pick_swappable_object_index(
+            objects_rows,
+            player_x,
+            player_y,
+            player_w,
+            player_h,
+            swap_pick_far,
+            camera_x,
+            band_top,
+            view_w,
+            view_h,
+        )
+    if enemy_rows:
+        enemy_ti = _pick_swappable_enemy_index(
+            enemy_rows,
+            player_x,
+            player_y,
+            player_w,
+            player_h,
+            swap_pick_far,
+            camera_x,
+            band_top,
+            view_w,
+            view_h,
+        )
+
+    target_kind = None
+    ti = -1
+    if object_ti >= 0 and enemy_ti >= 0:
+        object_row = objects_rows[object_ti]
+        enemy_row = enemy_rows[enemy_ti]
+        object_d2 = _target_distance2(object_row[0], object_row[1], object_row[2], object_row[3], player_x, player_y, player_w, player_h)
+        enemy_d2 = _target_distance2(enemy_row[0], enemy_row[1], enemy_row[2], enemy_row[3], player_x, player_y, player_w, player_h)
+        if swap_pick_far:
+            if enemy_d2 > object_d2:
+                target_kind = "enemy"
+                ti = enemy_ti
+            else:
+                target_kind = "object"
+                ti = object_ti
+        else:
+            if enemy_d2 < object_d2:
+                target_kind = "enemy"
+                ti = enemy_ti
+            else:
+                target_kind = "object"
+                ti = object_ti
+    elif object_ti >= 0:
+        target_kind = "object"
+        ti = object_ti
+    elif enemy_ti >= 0:
+        target_kind = "enemy"
+        ti = enemy_ti
+
+    object_solids = _rebuild_object_solids(objects_rows)
+    if target_kind == "object" and ti >= 0:
+        row = objects_rows[ti]
+        meta = objects_meta[ti] if ti < len(objects_meta) else None
+        old_px = player_x
+        old_py = player_y
+        old_ox = int(row[0])
+        old_oy = int(row[1])
+        obj_w = int(row[2])
+        obj_h = int(row[3])
+        player_x = old_ox + ((obj_w - player_w) // 2)
+        player_y = old_oy + (obj_h - player_h)
+        row[0] = int(old_px + ((player_w - obj_w) // 2))
+        row[1] = int(old_py + (player_h - obj_h))
+        object_solids = _rebuild_object_solids(objects_rows)
+        max_player_y_swap = map_h_px - player_h
+        if max_player_y_swap < 0:
+            max_player_y_swap = 0
+        player_x = _clamp(player_x, 0, max_player_x)
+        player_y = _clamp(player_y, 0, max_player_y_swap)
+        _repack_single_object_entry(objects_c_buf, objects_c_stride, ti, row[0], row[1], row[8], row[9], row[10], row[11], meta)
+        object_solids = _rebuild_object_solids(objects_rows)
+        vel_y = 0
+        if swap_pick_far:
+            print("SWAP_FAR_OK_V2 idx=%d px=%d py=%d" % (ti, player_x, player_y))
+        else:
+            print("SWAP_NEAR_OK_V2 idx=%d px=%d py=%d" % (ti, player_x, player_y))
+    elif target_kind == "enemy" and ti >= 0:
+        row = enemy_rows[ti]
+        state = enemy_states[ti] if ti < len(enemy_states) else None
+        old_px = player_x
+        old_py = player_y
+        old_ex = int(row[0])
+        old_ey = int(row[1])
+        enemy_w = int(row[2])
+        enemy_h = int(row[3])
+        player_x = old_ex + ((enemy_w - player_w) // 2)
+        player_y = old_ey + (enemy_h - player_h)
+        row[0] = int(old_px + ((player_w - enemy_w) // 2))
+        row[1] = int(old_py + (player_h - enemy_h))
+        max_player_y_swap = map_h_px - player_h
+        if max_player_y_swap < 0:
+            max_player_y_swap = 0
+        player_x = _clamp(player_x, 0, max_player_x)
+        player_y = _clamp(player_y, 0, max_player_y_swap)
+        vel_y = 0
+        if state is not None:
+            state["vel_y"] = 0
+        if swap_pick_far:
+            print("SWAP_FAR_OK_ENEMY idx=%d px=%d py=%d" % (ti, player_x, player_y))
+        else:
+            print("SWAP_NEAR_OK_ENEMY idx=%d px=%d py=%d" % (ti, player_x, player_y))
+    else:
+        print("SWAP_FAIL_NO_TARGET_V2")
+    return player_x, player_y, vel_y, object_solids
+
+
+def _is_special_render_object(meta):
+    return bool(meta and meta.get("special_render"))
+
+def _pack_objects_for_c(rows, meta_rows=None):
     if not rows:
         return bytearray(), 12, 0
     out = bytearray(len(rows) * 12)
@@ -792,6 +1649,12 @@ def _pack_objects_for_c(rows):
     bi = 0
     while oi < len(rows):
         wx, wy, _ow, _oh, _solid, _layer, visible, _swappable, sx, sy, sw, sh = rows[oi]
+        meta = meta_rows[oi] if (meta_rows is not None and oi < len(meta_rows)) else None
+        if _is_special_render_object(meta):
+            sx = 0
+            sy = 0
+            sw = 0
+            sh = 0
         if visible:
             for v in (wx, wy, sx, sy, sw, sh):
                 iv = int(v)
@@ -847,12 +1710,67 @@ def _pick_swappable_object_index(objects_rows, player_x, player_y, player_w, pla
     return best_i
 
 
-def _repack_single_object_entry(objects_c_buf, obj_stride, row_index, wx, wy, sx, sy, sw, sh):
+def _clone_object_rows(rows):
+    if not rows:
+        return []
+    return [list(row) for row in rows]
+
+
+def _restore_objects_rows(rows, saved_rows, objects_c_buf, objects_c_stride, meta_rows=None):
+    if not rows or not saved_rows:
+        return
+    limit = len(rows)
+    if len(saved_rows) < limit:
+        limit = len(saved_rows)
+    oi = 0
+    while oi < limit:
+        meta = meta_rows[oi] if (meta_rows is not None and oi < len(meta_rows)) else None
+        if meta and meta.get("checkpoint"):
+            oi += 1
+            continue
+        saved = saved_rows[oi]
+        row = rows[oi]
+        row[0] = int(saved[0])
+        row[1] = int(saved[1])
+        row[2] = int(saved[2])
+        row[3] = int(saved[3])
+        row[4] = int(saved[4])
+        row[5] = int(saved[5])
+        row[6] = int(saved[6])
+        row[7] = int(saved[7])
+        row[8] = int(saved[8])
+        row[9] = int(saved[9])
+        row[10] = int(saved[10])
+        row[11] = int(saved[11])
+        if row[6]:
+            _repack_single_object_entry(
+                objects_c_buf,
+                objects_c_stride,
+                oi,
+                row[0],
+                row[1],
+                row[8],
+                row[9],
+                row[10],
+                row[11],
+                meta,
+            )
+        else:
+            _repack_single_object_entry(objects_c_buf, objects_c_stride, oi, row[0], row[1], 0, 0, 0, 0, meta)
+        oi += 1
+
+
+def _repack_single_object_entry(objects_c_buf, obj_stride, row_index, wx, wy, sx, sy, sw, sh, meta=None):
     if objects_c_buf is None or obj_stride < 12 or row_index < 0:
         return
     base = row_index * obj_stride
     if base + 12 > len(objects_c_buf):
         return
+    if _is_special_render_object(meta):
+        sx = 0
+        sy = 0
+        sw = 0
+        sh = 0
     vals = (wx, wy, sx, sy, sw, sh)
     bi = base
     for v in vals:
@@ -966,6 +1884,175 @@ def _blit_atlas_region_colorkey_into_scene(
             dst_off += 2
             x += 1
         r += 1
+
+
+def _render_special_objects_into_scene(
+    scene_buf,
+    scene_w,
+    scene_h,
+    camera_x,
+    band_top,
+    objects_rows,
+    object_meta_rows,
+    object_animations,
+    anim_counter,
+    submit_wire_order,
+    submit_wire_runtime_swap,
+):
+    if (not objects_rows) or (not object_meta_rows) or (not object_animations):
+        return
+    colorkey = int(getattr(config, "CAMERA_OBJECT_COLORKEY_RGB565", 0xF81F)) & 0xFFFF
+    if submit_wire_order and not submit_wire_runtime_swap:
+        colorkey = _swap16(colorkey)
+    key_b0 = colorkey & 0xFF
+    key_b1 = (colorkey >> 8) & 0xFF
+    oi = 0
+    while oi < len(objects_rows):
+        meta = object_meta_rows[oi] if oi < len(object_meta_rows) else None
+        if _is_special_render_object(meta):
+            anim_spec = object_animations.get(meta.get("anim_id", ""))
+            frame_rgb565, frame_w, frame_h = _pick_animation_frame(anim_spec, anim_counter)
+            if frame_rgb565 is not None and frame_w > 0 and frame_h > 0:
+                wx, wy, _ow, _oh, _solid, _layer, visible, _swappable, _sx, _sy, _sw, _sh = objects_rows[oi]
+                if visible:
+                    _blit_sprite_colorkey_into_scene(
+                        scene_buf,
+                        scene_w,
+                        scene_h,
+                        int(wx) - int(camera_x),
+                        int(wy) - int(band_top),
+                        frame_rgb565,
+                        key_b0,
+                        key_b1,
+                        frame_w,
+                        frame_h,
+                    )
+        oi += 1
+
+
+def _render_anchor_into_scene(
+    scene_buf,
+    scene_w,
+    scene_h,
+    camera_x,
+    band_top,
+    anchor_active,
+    anchor_x,
+    anchor_y,
+    anchor_anim_spec,
+    anim_counter,
+    submit_wire_order,
+    submit_wire_runtime_swap,
+):
+    if not anchor_active or not anchor_anim_spec:
+        return
+    frame_rgb565, frame_w, frame_h = _pick_animation_frame(anchor_anim_spec, anim_counter)
+    if frame_rgb565 is None or frame_w <= 0 or frame_h <= 0:
+        return
+    colorkey = int(getattr(config, "CAMERA_OBJECT_COLORKEY_RGB565", 0xF81F)) & 0xFFFF
+    if submit_wire_order and not submit_wire_runtime_swap:
+        colorkey = _swap16(colorkey)
+    key_b0 = colorkey & 0xFF
+    key_b1 = (colorkey >> 8) & 0xFF
+    _blit_sprite_colorkey_into_scene(
+        scene_buf,
+        scene_w,
+        scene_h,
+        int(anchor_x) - int(camera_x),
+        int(anchor_y) - int(band_top),
+        frame_rgb565,
+        key_b0,
+        key_b1,
+        frame_w,
+        frame_h,
+    )
+
+
+def _append_u16_le(buf, value):
+    iv = int(value)
+    if iv < 0:
+        iv = 0
+    if iv > 65535:
+        iv = 65535
+    buf.append(iv & 0xFF)
+    buf.append((iv >> 8) & 0xFF)
+
+
+def _append_i16_le(buf, value):
+    iv = int(value)
+    if iv < -32768:
+        iv = -32768
+    if iv > 32767:
+        iv = 32767
+    uv = iv & 0xFFFF
+    buf.append(uv & 0xFF)
+    buf.append((uv >> 8) & 0xFF)
+
+
+def _pack_special_render_overlays(
+    objects_rows,
+    object_meta_rows,
+    object_animations,
+    object_anim_counter,
+    anchor_active,
+    anchor_x,
+    anchor_y,
+    anchor_anim_spec,
+    anchor_anim_counter,
+    enemy_bullets=None,
+    bullet_frame=None,
+    bullet_w=0,
+    bullet_h=0,
+):
+    overlay_desc = bytearray()
+    overlay_frames = []
+    overlay_stride = 10
+    overlay_count = 0
+    if objects_rows and object_meta_rows and object_animations:
+        oi = 0
+        while oi < len(objects_rows):
+            meta = object_meta_rows[oi] if oi < len(object_meta_rows) else None
+            if _is_special_render_object(meta):
+                anim_spec = object_animations.get(meta.get("anim_id", ""))
+                frame_rgb565, frame_w, frame_h = _pick_animation_frame(anim_spec, object_anim_counter)
+                if frame_rgb565 is not None and frame_w > 0 and frame_h > 0:
+                    wx, wy, _ow, _oh, _solid, _layer, visible, _swappable, _sx, _sy, _sw, _sh = objects_rows[oi]
+                    if visible:
+                        frame_index = len(overlay_frames)
+                        overlay_frames.append(frame_rgb565)
+                        _append_i16_le(overlay_desc, wx)
+                        _append_i16_le(overlay_desc, wy)
+                        _append_u16_le(overlay_desc, frame_w)
+                        _append_u16_le(overlay_desc, frame_h)
+                        _append_u16_le(overlay_desc, frame_index)
+                        overlay_count += 1
+            oi += 1
+    if anchor_active and anchor_anim_spec:
+        frame_rgb565, frame_w, frame_h = _pick_animation_frame(anchor_anim_spec, anchor_anim_counter)
+        if frame_rgb565 is not None and frame_w > 0 and frame_h > 0:
+            frame_index = len(overlay_frames)
+            overlay_frames.append(frame_rgb565)
+            _append_i16_le(overlay_desc, anchor_x)
+            _append_i16_le(overlay_desc, anchor_y)
+            _append_u16_le(overlay_desc, frame_w)
+            _append_u16_le(overlay_desc, frame_h)
+            _append_u16_le(overlay_desc, frame_index)
+            overlay_count += 1
+    if enemy_bullets and bullet_frame is not None and bullet_w > 0 and bullet_h > 0:
+        bullet_frame_index = len(overlay_frames)
+        overlay_frames.append(bullet_frame)
+        bi = 0
+        while bi < len(enemy_bullets):
+            bx, by, _vx, _vy, _bw, _bh, active = enemy_bullets[bi]
+            if active:
+                _append_i16_le(overlay_desc, bx)
+                _append_i16_le(overlay_desc, by)
+                _append_u16_le(overlay_desc, bullet_w)
+                _append_u16_le(overlay_desc, bullet_h)
+                _append_u16_le(overlay_desc, bullet_frame_index)
+                overlay_count += 1
+            bi += 1
+    return overlay_desc, overlay_stride, overlay_count, tuple(overlay_frames)
 
 
 def _aabb_collides_objects(px, py, pw, ph, object_solids):
@@ -1779,7 +2866,8 @@ def run(max_frames=None):
 
     _ensure_prerequisites(mode, png_single_stage)
 
-    print("APP_RUN_START_PHASE_CAMERA_TEST")
+    print("RUNTIME_APP_CAMERA_TEST_DEBUG_V2")
+    print("APP_RUN_START_PHASE_CAMERA_TEST_V2")
     print("CAMERA_TEST_START")
     print("CAMERA_TEST_BOOT_SOURCE=%s" % _boot_source_tag)
     print("CAMERA_TEST_MODE=%s" % mode)
@@ -2853,6 +3941,13 @@ def run(max_frames=None):
             if tilemap_enabled:
                 tilemap_idx, tilemap_w, tilemap_h = _flatten_tilemap_rows(tilemap_rows)
                 if tilemap_idx is not None and tilemap_w > 0 and tilemap_h > 0:
+                    map_w = tilemap_w * tile_size
+                    max_player_x = map_w - player_w
+                    if max_player_x < 0:
+                        max_player_x = 0
+                    camera_max = map_w - sw
+                    if camera_max < 0:
+                        camera_max = 0
                     player_y = _snap_spawn_to_ground(tilemap_idx, tilemap_w, tilemap_h, tile_size, player_x, player_y, player_w, player_h)
                 tileset_path = _resolve_asset_path(getattr(config, "TILESET_RGB565_PATH", "game/Tilemap/tilemap_all.rgb565"))
                 tileset_raw = _load_tileset_raw_rgb565(tileset_path, tileset_w, tileset_h)
@@ -2877,15 +3972,21 @@ def run(max_frames=None):
             objects_compose_impl_cfg = str(getattr(config, "OBJECTS_COMPOSE_IMPL", "C_API")).upper()
             if objects_compose_impl_cfg not in ("C_API", "PYTHON"):
                 objects_compose_impl_cfg = "C_API"
-            objects_rows = _load_objects_rows(objects_csv_path)
+            objects_rows, objects_meta = _load_objects_rows_and_meta(objects_csv_path)
+            objects_rows_initial = _clone_object_rows(objects_rows)
             objects_atlas = _load_rgb565_blob(objects_atlas_path, objects_atlas_w * objects_atlas_h * 2)
+            object_animations_path = _resolve_asset_path(
+                getattr(config, "OBJECT_ANIMATIONS_JSON_PATH", "game/picture/object/object_animations.json")
+            )
+            object_animations = _load_object_animations(object_animations_path)
+            special_object_render_enabled = True if object_animations else False
             objects_c_buf = bytearray()
             objects_c_stride = 12
             objects_c_count = 0
             object_solids = []
             if objects_rows and objects_atlas is not None:
                 object_solids = _rebuild_object_solids(objects_rows)
-                objects_c_buf, objects_c_stride, objects_c_count = _pack_objects_for_c(objects_rows)
+                objects_c_buf, objects_c_stride, objects_c_count = _pack_objects_for_c(objects_rows, objects_meta)
                 print("OBJECT_MODE_ON")
                 print("OBJECT_COUNT=%d" % len(objects_rows))
                 print("OBJECT_C_COUNT=%d" % objects_c_count)
@@ -2893,8 +3994,77 @@ def run(max_frames=None):
                 print("OBJECT_SOLID_COUNT=%d" % len(object_solids))
             else:
                 objects_rows = []
+                objects_meta = []
                 objects_atlas = None
                 print("OBJECT_MODE_OFF")
+            enemy_csv_path = _resolve_asset_path(getattr(config, "ENEMY_CSV_PATH", "game/picture/enemy/enemies.csv"))
+            enemy_sheet_path = _resolve_asset_path(
+                getattr(config, "ENEMY_SHEET_RGB565_PATH", "game/picture/enemy/enemy_bow_animation_wire.rgb565")
+            )
+            enemy_sheet_w = int(getattr(config, "ENEMY_SHEET_W", 320))
+            enemy_sheet_h = int(getattr(config, "ENEMY_SHEET_H", 96))
+            enemy_frame_w = int(getattr(config, "ENEMY_FRAME_W", 32))
+            enemy_frame_h = int(getattr(config, "ENEMY_FRAME_H", 32))
+            enemy_frame_hold = int(getattr(config, "ENEMY_FRAME_HOLD", 4))
+            if enemy_frame_hold < 1:
+                enemy_frame_hold = 4
+            enemy_detect_x = int(getattr(config, "ENEMY_DETECT_RANGE_X", 160))
+            enemy_flee_x = int(getattr(config, "ENEMY_FLEE_RANGE_X", 80))
+            enemy_detect_y = int(getattr(config, "ENEMY_DETECT_RANGE_Y", 24))
+            enemy_move_speed = int(getattr(config, "ENEMY_MOVE_SPEED", 1))
+            if enemy_move_speed < 1:
+                enemy_move_speed = 1
+            enemy_gravity_step = int(getattr(config, "ENEMY_GRAVITY_STEP", 2))
+            if enemy_gravity_step < 1:
+                enemy_gravity_step = 1
+            enemy_shoot_interval = int(getattr(config, "ENEMY_SHOOT_INTERVAL", 45))
+            if enemy_shoot_interval < 1:
+                enemy_shoot_interval = 45
+            enemy_shoot_fire_frame = int(getattr(config, "ENEMY_SHOOT_FIRE_FRAME", 4))
+            if enemy_shoot_fire_frame < 0:
+                enemy_shoot_fire_frame = 4
+            enemy_bullet_w = int(getattr(config, "ENEMY_BULLET_W", 6))
+            enemy_bullet_h = int(getattr(config, "ENEMY_BULLET_H", 6))
+            enemy_bullet_speed = int(getattr(config, "ENEMY_BULLET_SPEED", 3))
+            if enemy_bullet_speed < 1:
+                enemy_bullet_speed = 1
+            enemy_max_bullets = int(getattr(config, "ENEMY_MAX_BULLETS", 8))
+            if enemy_max_bullets < 1:
+                enemy_max_bullets = 8
+            enemy_bullet_color = int(getattr(config, "COLOR_BULLET", 0xFFFF)) & 0xFFFF
+            enemy_rows, enemy_meta = _load_enemies_rows_and_meta(enemy_csv_path)
+            enemy_rows_initial = _clone_enemy_rows(enemy_rows)
+            enemy_states = _build_enemy_states(enemy_meta)
+            enemy_sheet = None
+            if enemy_sheet_w > 0 and enemy_sheet_h > 0:
+                enemy_sheet = _load_rgb565_blob(enemy_sheet_path, enemy_sheet_w * enemy_sheet_h * 2)
+            enemy_bullets = []
+            enemy_render_enabled = bool(
+                enemy_rows and enemy_states and enemy_sheet is not None and enemy_frame_w > 0 and enemy_frame_h > 0
+            )
+            if enemy_rows:
+                print("ENEMY_MODE_ON")
+                print("ENEMY_COUNT=%d" % len(enemy_rows))
+                print("ENEMY_RENDER_READY=%d" % (1 if enemy_render_enabled else 0))
+            else:
+                print("ENEMY_MODE_OFF")
+            checkpoint_index = -1
+            anchor_active = False
+            anchor_x = 0
+            anchor_y = 0
+            object_anim_counter = 0
+            anchor_anim_counter = 0
+            death_state = 0
+            death_camera_target_x = 0
+            death_margin = int(getattr(config, "RESPAWN_DEATH_MARGIN", 48))
+            if death_margin < 0:
+                death_margin = 48
+            camera_pan_step = int(getattr(config, "RESPAWN_CAMERA_PAN_STEP", 12))
+            if camera_pan_step < 1:
+                camera_pan_step = 12
+            anchor_offset_y = int(getattr(config, "RESPAWN_ANCHOR_OFFSET_Y", 32))
+            anchor_anim_id = str(getattr(config, "RESPAWN_ANCHOR_ANIM_ID", "resurrection_anchor"))
+            anchor_anim_spec = object_animations.get(anchor_anim_id)
             floor_rgb_fp = None
             floor_mask_fp = None
             floor_rgb_data = None
@@ -3053,6 +4223,15 @@ def run(max_frames=None):
                 elif not submit_async_cfg:
                     print("SUBMIT_FALLBACK_REASON=CFG_OFF")
 
+            enemy_bullet_sprite = None
+            if enemy_bullet_w > 0 and enemy_bullet_h > 0:
+                enemy_bullet_sprite = _make_solid_sprite_rgb565(
+                    enemy_bullet_w,
+                    enemy_bullet_h,
+                    enemy_bullet_color,
+                    submit_wire_order and (not submit_wire_runtime_swap),
+                )
+
             native_band_h = int(getattr(config, "CAMERA_BAND_PIPELINE_H", 60))
             if native_band_h < 1:
                 native_band_h = 60
@@ -3089,6 +4268,9 @@ def run(max_frames=None):
                     continue
                 last_tick = now
                 frame_start_us = ticks_us()
+                object_anim_counter += 1
+                if anchor_active:
+                    anchor_anim_counter += 1
 
                 if submit_async_enabled and submit_async_inflight:
                     wait_t0 = ticks_us()
@@ -3116,14 +4298,26 @@ def run(max_frames=None):
                     move_x = -speed
                     facing = -1
 
-                # User-mapped keys: X=far swap, Y=near swap.
+                # User-mapped keys: B=far swap, Y=near swap.
                 # Stable trigger: edge only + minimum interval.
-                x_now = bool(getattr(input_system, "btn_x_pressed", False)) or bool(getattr(input_system, "btn_b_pressed", False))
-                y_now = bool(getattr(input_system, "btn_y_pressed", False))
+                b_pressed = bool(getattr(input_system, "btn_b_pressed", False))
+                x_pressed = bool(getattr(input_system, "btn_x_pressed", False))
+                y_pressed = bool(getattr(input_system, "btn_y_pressed", False))
+                x_now = b_pressed
+                y_now = y_pressed
                 x_edge = x_now and (not last_x_down)
                 y_edge = y_now and (not last_y_down)
                 last_x_down = x_now
                 last_y_down = y_now
+
+                if b_pressed or x_pressed or y_pressed:
+                    print("SWAP_BTN_DBG b=%d x=%d y=%d x_edge=%d y_edge=%d" % (
+                        1 if b_pressed else 0,
+                        1 if x_pressed else 0,
+                        1 if y_pressed else 0,
+                        1 if x_edge else 0,
+                        1 if y_edge else 0,
+                    ))
 
                 swap_pick_far = False
                 swap_triggered = False
@@ -3135,168 +4329,279 @@ def run(max_frames=None):
                     swap_triggered = True
 
                 if swap_triggered:
+                    print("SWAP_TRIGGER_DBG far=%d" % (1 if swap_pick_far else 0))
                     if ticks_diff(now, last_swap_ms) < swap_min_interval_ms:
                         swap_triggered = False
                     else:
                         last_swap_ms = now
 
-                if swap_triggered and objects_rows:
-                    ti = _pick_swappable_object_index(
-                        objects_rows,
-                        player_x,
-                        player_y,
-                        player_w,
-                        player_h,
-                        swap_pick_far,
-                        camera_x,
-                        band_top,
-                        sw,
-                        scene_h,
-                    )
-                    if ti >= 0:
-                        row = objects_rows[ti]
-                        old_px = player_x
-                        old_py = player_y
-                        old_ox = int(row[0])
-                        old_oy = int(row[1])
-                        obj_w = int(row[2])
-                        obj_h = int(row[3])
-
-                        # Exchange using foot-aligned + horizontal-center correction.
-                        # player_new = object_anchor adjusted by (obj size vs player size)
-                        # object_new = player_anchor adjusted by (player size vs obj size)
-                        player_x = old_ox + ((obj_w - player_w) // 2)
-                        player_y = old_oy + (obj_h - player_h)
-                        row[0] = int(old_px + ((player_w - obj_w) // 2))
-                        row[1] = int(old_py + (player_h - obj_h))
-                        object_solids = _rebuild_object_solids(objects_rows)
-                        map_h_px_swap = tilemap_h * tile_size if (tilemap_enabled and tilemap_h > 0) else sh
-                        if map_h_px_swap < sh:
-                            map_h_px_swap = sh
-                        max_player_y_swap = map_h_px_swap - player_h
-                        if max_player_y_swap < 0:
-                            max_player_y_swap = 0
-                        player_x = _clamp(player_x, 0, max_player_x)
-                        player_y = _clamp(player_y, 0, max_player_y_swap)
-                        _repack_single_object_entry(objects_c_buf, objects_c_stride, ti, row[0], row[1], row[8], row[9], row[10], row[11])
-                        object_solids = _rebuild_object_solids(objects_rows)
-                        vel_y = 0
-                        if swap_pick_far:
-                            print("SWAP_FAR_OK idx=%d px=%d py=%d" % (ti, player_x, player_y))
-                        else:
-                            print("SWAP_NEAR_OK idx=%d px=%d py=%d" % (ti, player_x, player_y))
-                    else:
-                        print("SWAP_FAIL_NO_TARGET")
-
                 map_h_px = tilemap_h * tile_size if (tilemap_enabled and tilemap_h > 0) else sh
                 if map_h_px < sh:
                     map_h_px = sh
+                map_w_px = tilemap_w * tile_size if (tilemap_enabled and tilemap_w > 0) else sw
+                if map_w_px < sw:
+                    map_w_px = sw
 
                 if object_gravity_enabled and object_gravity_step > 0 and objects_rows and tilemap_enabled and tilemap_idx is not None and tilemap_w > 0 and tilemap_h > 0:
                     obj_moved = False
                     oi = 0
                     while oi < len(objects_rows):
                         row = objects_rows[oi]
+                        meta = objects_meta[oi] if oi < len(objects_meta) else None
                         wx, wy, ow, oh, _solid, _layer, visible, _swappable, sx, sy, sw0, sh0 = row
                         if visible and ow > 0 and oh > 0:
                             steps = object_gravity_step
                             moved_y = 0
+                            object_removed = False
                             while steps > 0:
                                 ny = int(wy) + 1
-                                if ny + int(oh) > map_h_px:
-                                    break
                                 if _aabb_collides_tilemap(tilemap_idx, tilemap_w, tilemap_h, tile_size, int(wx), ny, int(ow), int(oh)):
                                     break
                                 wy = ny
                                 moved_y += 1
+                                if int(wy) > (map_h_px + death_margin):
+                                    object_removed = True
+                                    break
                                 steps -= 1
-                            if moved_y > 0:
+                            if object_removed:
                                 row[1] = int(wy)
-                                _repack_single_object_entry(objects_c_buf, objects_c_stride, oi, row[0], row[1], row[8], row[9], row[10], row[11])
+                                row[6] = 0
+                                _repack_single_object_entry(objects_c_buf, objects_c_stride, oi, row[0], row[1], 0, 0, 0, 0, meta)
+                                obj_moved = True
+                            elif moved_y > 0:
+                                row[1] = int(wy)
+                                _repack_single_object_entry(objects_c_buf, objects_c_stride, oi, row[0], row[1], row[8], row[9], row[10], row[11], meta)
                                 obj_moved = True
                         oi += 1
                     if obj_moved:
                         object_solids = _rebuild_object_solids(objects_rows)
-
-                if tilemap_enabled or object_solids:
-                    # If swap/collision correction leaves player inside solids, push upward first.
-                    unembed_guard = tile_size * 4
-                    if unembed_guard < 16:
-                        unembed_guard = 16
-                    while unembed_guard > 0 and _aabb_collides_world(player_x, player_y, player_w, player_h, tilemap_idx, tilemap_w, tilemap_h, tile_size, object_solids):
-                        player_y -= 1
-                        if player_y < 0:
-                            player_y = 0
-                            break
-                        unembed_guard -= 1
-
-                    grounded = _aabb_collides_world(player_x, player_y + 1, player_w, player_h, tilemap_idx, tilemap_w, tilemap_h, tile_size, object_solids)
-                    if not grounded:
-                        vel_y += gravity
-                        if vel_y > fall_speed_max:
-                            vel_y = fall_speed_max
-                    elif vel_y > 0:
-                        vel_y = 0
-
-                    player_x, player_y, _hit_x, hit_y = _move_axis_world(
+                if death_state == 0:
+                    player_y, vel_y = _update_enemies_and_bullets(
+                        enemy_rows,
+                        enemy_meta,
+                        enemy_states,
+                        enemy_bullets,
+                        player_x,
+                        player_y,
+                        player_w,
+                        player_h,
+                        vel_y,
                         tilemap_idx,
                         tilemap_w,
                         tilemap_h,
                         tile_size,
                         object_solids,
+                        death_margin,
+                        enemy_detect_x,
+                        enemy_flee_x,
+                        enemy_detect_y,
+                        enemy_move_speed,
+                        enemy_gravity_step,
+                        enemy_frame_hold,
+                        enemy_shoot_fire_frame,
+                        enemy_bullet_speed,
+                        enemy_bullet_w,
+                        enemy_bullet_h,
+                        enemy_max_bullets,
+                        enemy_shoot_interval,
+                        fall_speed_max,
+                        map_w_px,
+                        map_h_px,
+                    )
+
+                    player_x, player_y, vel_y, object_solids = _perform_world_swap(
+                        swap_triggered,
+                        swap_pick_far,
+                        objects_rows,
+                        objects_meta,
+                        enemy_rows,
+                        enemy_states,
                         player_x,
                         player_y,
                         player_w,
                         player_h,
-                        move_x,
+                        camera_x,
+                        band_top,
+                        sw,
+                        scene_h,
+                        max_player_x,
+                        map_h_px,
                         vel_y,
+                        objects_c_buf,
+                        objects_c_stride,
                     )
-                    if hit_y:
-                        vel_y = 0
-                    if player_x < 0:
-                        player_x = 0
-                    if player_x > max_player_x:
-                        player_x = max_player_x
-                    max_player_y = map_h_px - player_h
-                    if max_player_y < 0:
-                        max_player_y = 0
-                    if player_y < 0:
-                        player_y = 0
-                        vel_y = 0
-                    elif player_y > max_player_y:
-                        player_y = max_player_y
-                        vel_y = 0
-                else:
-                    player_x += move_x
-                    player_x = _clamp(player_x, 0, max_player_x)
 
-                player_center_x = player_x + (player_w // 2)
-                target_camera_x = player_center_x - screen_half
-                camera_x = _clamp(target_camera_x, 0, camera_max)
-                player_screen_x = player_x - camera_x
-                if use_sprite_player and sprite_draw_mode == "COMPOSE":
-                    min_screen_x = 0
-                    if draw_off_x < 0:
-                        min_screen_x = -draw_off_x
-                    max_screen_x = sw - sprite_w - draw_off_x
-                    if max_screen_x < min_screen_x:
-                        max_screen_x = min_screen_x
-                    clamped_screen_x = _clamp(player_screen_x, min_screen_x, max_screen_x)
-                    clamp_applied = 1 if clamped_screen_x != player_screen_x else 0
-                    if clamp_applied:
-                        player_screen_x = clamped_screen_x
-                        player_x = player_screen_x + camera_x
-                        player_x = _clamp(player_x, 0, max_player_x)
-                        player_screen_x = player_x - camera_x
-                    boundary_clamp_last = clamp_applied
-                moving = 1 if (input_lr > 20 or input_lr < -20) else 0
-                if use_sprite_player:
-                    if moving:
-                        anim_counter += 1
-                        anim_idx = (anim_counter // 4) & 0x03
+                    if tilemap_enabled or object_solids:
+                        unembed_guard = tile_size * 4
+                        if unembed_guard < 16:
+                            unembed_guard = 16
+                        while unembed_guard > 0 and _aabb_collides_world(player_x, player_y, player_w, player_h, tilemap_idx, tilemap_w, tilemap_h, tile_size, object_solids):
+                            player_y -= 1
+                            if player_y < 0:
+                                player_y = 0
+                                break
+                            unembed_guard -= 1
+
+                        grounded = _aabb_collides_world(player_x, player_y + 1, player_w, player_h, tilemap_idx, tilemap_w, tilemap_h, tile_size, object_solids)
+                        if not grounded:
+                            vel_y += gravity
+                            if vel_y > fall_speed_max:
+                                vel_y = fall_speed_max
+                        elif vel_y > 0:
+                            vel_y = 0
+
+                        player_x, player_y, _hit_x, hit_y = _move_axis_world(
+                            tilemap_idx,
+                            tilemap_w,
+                            tilemap_h,
+                            tile_size,
+                            object_solids,
+                            player_x,
+                            player_y,
+                            player_w,
+                            player_h,
+                            move_x,
+                            vel_y,
+                        )
+                        if hit_y:
+                            vel_y = 0
+                        if player_x < 0:
+                            player_x = 0
+                        if player_x > max_player_x:
+                            player_x = max_player_x
+                        if player_y < 0:
+                            player_y = 0
+                            vel_y = 0
                     else:
+                        player_x += move_x
+                        player_x = _clamp(player_x, 0, max_player_x)
+
+                    oi = 0
+                    while oi < len(objects_rows):
+                        meta = objects_meta[oi] if oi < len(objects_meta) else None
+                        if meta and meta.get("checkpoint"):
+                            row = objects_rows[oi]
+                            wx, wy, ow, oh, _solid, _layer, visible, _swappable, _sx, _sy, _sw, _sh = row
+                            if visible and player_x < (wx + ow) and (player_x + player_w) > wx and player_y < (wy + oh) and (player_y + player_h) > wy:
+                                if checkpoint_index != oi:
+                                    checkpoint_index = oi
+                                    print("CHECKPOINT_TOUCH idx=%d id=%s x=%d y=%d" % (oi, meta.get("id", ""), wx, wy))
+                                break
+                        oi += 1
+
+                    if player_y > (map_h_px + death_margin):
+                        if checkpoint_index < 0:
+                            oi = 0
+                            while oi < len(objects_rows):
+                                meta = objects_meta[oi] if oi < len(objects_meta) else None
+                                row = objects_rows[oi]
+                                if meta and meta.get("checkpoint") and row[6]:
+                                    checkpoint_index = oi
+                                    break
+                                oi += 1
+                        death_state = 1
+                        anchor_active = False
+                        vel_y = 0
+                        if checkpoint_index >= 0 and checkpoint_index < len(objects_rows):
+                            row = objects_rows[checkpoint_index]
+                            death_camera_target_x = _clamp(int(row[0]) + (int(row[2]) // 2) - screen_half, 0, camera_max)
+                        else:
+                            death_camera_target_x = 0
+                        print("PLAYER_DEAD_WAIT_RESPAWN checkpoint=%d camera_target=%d" % (checkpoint_index, death_camera_target_x))
+
+                    if death_state == 0:
+                        player_center_x = player_x + (player_w // 2)
+                        target_camera_x = player_center_x - screen_half
+                        camera_x = _clamp(target_camera_x, 0, camera_max)
+                        player_screen_x = player_x - camera_x
+                        if use_sprite_player and sprite_draw_mode == "COMPOSE":
+                            min_screen_x = 0
+                            if draw_off_x < 0:
+                                min_screen_x = -draw_off_x
+                            max_screen_x = sw - sprite_w - draw_off_x
+                            if max_screen_x < min_screen_x:
+                                max_screen_x = min_screen_x
+                            clamped_screen_x = _clamp(player_screen_x, min_screen_x, max_screen_x)
+                            clamp_applied = 1 if clamped_screen_x != player_screen_x else 0
+                            if clamp_applied:
+                                player_screen_x = clamped_screen_x
+                                player_x = player_screen_x + camera_x
+                                player_x = _clamp(player_x, 0, max_player_x)
+                                player_screen_x = player_x - camera_x
+                            boundary_clamp_last = clamp_applied
+                        moving = 1 if (input_lr > 20 or input_lr < -20) else 0
+                        if use_sprite_player:
+                            if moving:
+                                anim_counter += 1
+                                anim_idx = (anim_counter // 4) & 0x03
+                            else:
+                                anim_counter = 0
+                                anim_idx = 0
+                    else:
+                        moving = 0
                         anim_counter = 0
                         anim_idx = 0
+                else:
+                    moving = 0
+                    anim_counter = 0
+                    anim_idx = 0
+                    if death_state == 1:
+                        if camera_x < death_camera_target_x:
+                            camera_x += camera_pan_step
+                            if camera_x > death_camera_target_x:
+                                camera_x = death_camera_target_x
+                        elif camera_x > death_camera_target_x:
+                            camera_x -= camera_pan_step
+                            if camera_x < death_camera_target_x:
+                                camera_x = death_camera_target_x
+                        if camera_x == death_camera_target_x:
+                            death_state = 2
+                            if checkpoint_index >= 0 and checkpoint_index < len(objects_rows):
+                                row = objects_rows[checkpoint_index]
+                                anchor_w = 32
+                                anchor_h = 32
+                                if anchor_anim_spec is not None:
+                                    anchor_w = int(anchor_anim_spec.get("frame_w", 32) or 32)
+                                    anchor_h = int(anchor_anim_spec.get("frame_h", 32) or 32)
+                                anchor_x = int(row[0]) + ((int(row[2]) - anchor_w) // 2)
+                                anchor_y = int(row[1]) - anchor_offset_y
+                                if anchor_y < 0:
+                                    anchor_y = 0
+                                anchor_active = True
+                                anchor_anim_counter = 0
+                                print("RESPAWN_ANCHOR_READY idx=%d x=%d y=%d" % (checkpoint_index, anchor_x, anchor_y))
+                    elif death_state == 2:
+                        camera_x = death_camera_target_x
+                        if anchor_active and (x_edge or y_edge):
+                            anchor_w = 32
+                            anchor_h = 32
+                            if anchor_anim_spec is not None:
+                                anchor_w = int(anchor_anim_spec.get("frame_w", 32) or 32)
+                                anchor_h = int(anchor_anim_spec.get("frame_h", 32) or 32)
+                            player_x = anchor_x + ((anchor_w - player_w) // 2)
+                            player_y = anchor_y + (anchor_h - player_h)
+                            player_x = _clamp(player_x, 0, max_player_x)
+                            vel_y = 0
+                            anchor_active = False
+                            anchor_anim_counter = 0
+                            _restore_objects_rows(
+                                objects_rows,
+                                objects_rows_initial,
+                                objects_c_buf,
+                                objects_c_stride,
+                                objects_meta,
+                            )
+                            _restore_enemy_rows(enemy_rows, enemy_rows_initial, enemy_states, enemy_meta)
+                            _clear_enemy_bullets(enemy_bullets)
+                            object_solids = _rebuild_object_solids(objects_rows)
+                            death_state = 0
+                            player_center_x = player_x + (player_w // 2)
+                            target_camera_x = player_center_x - screen_half
+                            camera_x = _clamp(target_camera_x, 0, camera_max)
+                            player_screen_x = player_x - camera_x
+                            print("PLAYER_RESPAWN_OK x=%d y=%d" % (player_x, player_y))
+                    player_screen_x = -4096
+
                 prof_update_us += ticks_diff(ticks_us(), seg_t0)
 
                 if native_band_pipeline_enabled:
@@ -3314,37 +4619,103 @@ def run(max_frames=None):
                     object_colorkey = -1
                     if bool(getattr(config, "CAMERA_OBJECT_COLORKEY_ENABLE", True)):
                         object_colorkey = _swap16(int(getattr(config, "CAMERA_OBJECT_COLORKEY_RGB565", 0xF81F)) & 0xFFFF)
+                    overlay_desc_buf, overlay_stride, overlay_count, overlay_frames = _pack_special_render_overlays(
+                        objects_rows,
+                        objects_meta,
+                        object_animations,
+                        object_anim_counter,
+                        anchor_active,
+                        anchor_x,
+                        anchor_y,
+                        anchor_anim_spec,
+                        anchor_anim_counter,
+                        enemy_bullets,
+                        enemy_bullet_sprite,
+                        enemy_bullet_w,
+                        enemy_bullet_h,
+                    )
+                    enemy_desc_buf, enemy_desc_stride, enemy_desc_count = _pack_enemy_render_descriptors(enemy_rows, enemy_states)
                     try:
-                        band_res = _lgfx.render_scene_bands_rgb565(
-                            scene_buf,
-                            scene_buf_back,
-                            sw,
-                            sh,
-                            native_band_h,
-                            far_band_buf,
-                            camera_x,
-                            tilemap_idx,
-                            tilemap_w,
-                            tilemap_h,
-                            tileset_raw,
-                            tile_size,
-                            tileset_w,
-                            transparent_key,
-                            objects_c_buf,
-                            objects_c_stride,
-                            objects_atlas,
-                            objects_atlas_w,
-                            objects_atlas_h,
-                            object_colorkey,
-                            objects_c_count,
-                            spr_rgb,
-                            sprite_w,
-                            sprite_h,
-                            spr_x,
-                            sprite_y,
-                            player_colorkey_raw,
-                            False,
-                        )
+                        if enemy_render_enabled:
+                            band_res = _lgfx.render_scene_bands_rgb565(
+                                scene_buf,
+                                scene_buf_back,
+                                sw,
+                                sh,
+                                native_band_h,
+                                far_band_buf,
+                                camera_x,
+                                tilemap_idx,
+                                tilemap_w,
+                                tilemap_h,
+                                tileset_raw,
+                                tile_size,
+                                tileset_w,
+                                transparent_key,
+                                objects_c_buf,
+                                objects_c_stride,
+                                objects_atlas,
+                                objects_atlas_w,
+                                objects_atlas_h,
+                                object_colorkey,
+                                objects_c_count,
+                                spr_rgb,
+                                sprite_w,
+                                sprite_h,
+                                spr_x,
+                                sprite_y,
+                                player_colorkey_raw,
+                                overlay_desc_buf,
+                                overlay_stride,
+                                overlay_count,
+                                overlay_frames,
+                                object_colorkey,
+                                enemy_desc_buf,
+                                enemy_desc_stride,
+                                enemy_desc_count,
+                                enemy_sheet,
+                                enemy_sheet_w,
+                                enemy_sheet_h,
+                                object_colorkey,
+                                enemy_frame_hold,
+                                False,
+                            )
+                        else:
+                            band_res = _lgfx.render_scene_bands_rgb565(
+                                scene_buf,
+                                scene_buf_back,
+                                sw,
+                                sh,
+                                native_band_h,
+                                far_band_buf,
+                                camera_x,
+                                tilemap_idx,
+                                tilemap_w,
+                                tilemap_h,
+                                tileset_raw,
+                                tile_size,
+                                tileset_w,
+                                transparent_key,
+                                objects_c_buf,
+                                objects_c_stride,
+                                objects_atlas,
+                                objects_atlas_w,
+                                objects_atlas_h,
+                                object_colorkey,
+                                objects_c_count,
+                                spr_rgb,
+                                sprite_w,
+                                sprite_h,
+                                spr_x,
+                                sprite_y,
+                                player_colorkey_raw,
+                                overlay_desc_buf,
+                                overlay_stride,
+                                overlay_count,
+                                overlay_frames,
+                                object_colorkey,
+                                False,
+                            )
                     except Exception as exc:
                         native_band_pipeline_enabled = False
                         print("BAND_PIPELINE_NATIVE_FAIL")
@@ -3633,12 +5004,69 @@ def run(max_frames=None):
                                     )
                                 oi += 1
 
+                    if special_object_render_enabled:
+                        _render_special_objects_into_scene(
+                            scene_buf,
+                            sw,
+                            scene_h,
+                            camera_x,
+                            band_top,
+                            objects_rows,
+                            objects_meta,
+                            object_animations,
+                            object_anim_counter,
+                            submit_wire_order,
+                            submit_wire_runtime_swap,
+                        )
+                        _render_anchor_into_scene(
+                            scene_buf,
+                            sw,
+                            scene_h,
+                            camera_x,
+                            band_top,
+                            anchor_active,
+                            anchor_x,
+                            anchor_y,
+                            anchor_anim_spec,
+                            anchor_anim_counter,
+                            submit_wire_order,
+                            submit_wire_runtime_swap,
+                        )
+                    if enemy_render_enabled:
+                        _render_enemies_into_scene(
+                            scene_buf,
+                            sw,
+                            scene_h,
+                            camera_x,
+                            band_top,
+                            enemy_rows,
+                            enemy_states,
+                            enemy_sheet,
+                            enemy_sheet_w,
+                            enemy_sheet_h,
+                            enemy_frame_w,
+                            enemy_frame_h,
+                            enemy_frame_hold,
+                            submit_wire_order,
+                            submit_wire_runtime_swap,
+                        )
+                    if enemy_bullets:
+                        _render_enemy_bullets_into_scene(
+                            scene_buf,
+                            sw,
+                            scene_h,
+                            camera_x,
+                            band_top,
+                            enemy_bullets,
+                            enemy_bullet_color,
+                        )
+
                     prof_world_us += ticks_diff(ticks_us(), seg_t0)
 
                     seg_t0 = ticks_us()
                     spr_x = 0
                     spr_y = 0
-                    if use_sprite_player:
+                    if use_sprite_player and death_state == 0:
                         sprite_x = player_screen_x + draw_off_x
                         sprite_y = player_y + draw_off_y
                         spr_x = sprite_x
@@ -3681,7 +5109,7 @@ def run(max_frames=None):
                                 sprite_w,
                                 sprite_h,
                             )
-                    else:
+                    elif death_state == 0:
                         px0 = player_screen_x
                         py0 = player_y - band_top
                         px1 = px0 + player_w

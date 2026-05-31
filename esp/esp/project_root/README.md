@@ -1,43 +1,17 @@
 # 目前架構說明書（Camera Test 主線）
 
-本文件描述目前 Camera Test 主線的實際架構（以目前程式碼與板上行為為準）。
+本文件描述目前 Camera Test 主線的實際架構。以目前程式碼與板上驗證結果為準：內部 flash 只放 launcher，遊戲程式與資產由 SD 卡 `/sd/game` 載入；每幀狀態由 Python 更新，重型畫面合成與 TFT submit 交給 C++ native renderer。
 
 ---
 
 ## 1. 啟動與入口
 
-- 韌體啟動後由內部 flash 的 `main.py` 掛載 SD 卡。
-- 內部 flash 只作為 launcher；遊戲程式與資產都放在 `/sd/game`。
-- `main.py` 會把 `/sd/game` 放到 `sys.path` 最前面，直接載入 SD 上的 `app.py`。
-- 沒有 SD 卡、或 `/sd/game/app.py` 不存在時，launcher 進入 safe mode，不會執行內部舊遊戲。
+- 內部 flash 只需要 `/boot.py` 與 `/main.py`。
+- `main.py` 會掛載外接 SD 卡，將 `/sd/game` 放到 `sys.path` 前面，然後執行 `/sd/game/app.py`。
+- 沒有 SD 卡、或 SD 上沒有 `/sd/game/app.py` 時，launcher 進入 safe mode，不跑內部舊遊戲。
+- 目前標準啟動 log 應看到 `Launcher source: sd`。
 
----
-
-## 2. 畫面渲染主線（Step 4）
-
-### 2.1 每幀流程
-
-1. 讀輸入（搖桿 + 按鍵）
-2. 玩家移動與重力更新
-3. 物件交換（X: far / Y: near）
-4. object 重力更新（每幀）
-5. 相機 `camera_x` 更新
-6. 以 `scene_buf` 做整屏合成（320x240）
-7. 全屏提交到 TFT（full-screen bulk）
-
-### 2.2 full-screen submit
-
-- 目前是整屏提交，不走 dirty rect 主線。
-- log 會看到 `FULLSCREEN_BULK_SUBMIT_OK`。
-- `submit_us` 是主要成本之一。
-
----
-
-## 3. 資產與路徑
-
-### 3.1 SD-only 部署
-
-SD 卡根目錄需要有：
+SD 遊戲根目錄至少需要：
 
 ```text
 /sd/game/
@@ -53,134 +27,167 @@ SD 卡根目錄需要有：
   picture/
 ```
 
-內部 flash 只需要同步 `boot.py` 與 `main.py`。更新遊戲時，主要更新 SD 卡的 `/sd/game` 內容。
+---
 
-### 3.2 背景 / Tilemap
+## 2. 渲染主線
 
-- far 背景：`/sd/game/picture/backgound/bg_far_wire.rgb565`，先載入 RAM 快取（減少每幀讀檔）。
-- Tilemap CSV：
-  - `game/Tilemap/map1_tilemap.csv`
-- Tileset RGB565：
-  - `game/Tilemap/tilemap_all_wire.rgb565`
+目前 Step 4 主線是 **native 4-band pipeline**：
 
-### 3.3 Objects
+- `CAMERA_TEST_MODE = "ROWS_SAFE_PROGRESSIVE"`
+- `CAMERA_BAND_PIPELINE_NATIVE = True`
+- `CAMERA_BAND_PIPELINE_H = 60`
+- `CAMERA_FULL_BULK_WIRE_ORDER = True`
+- `CAMERA_FULL_BULK_WIRE_RUNTIME_SWAP = False`
 
-- 物件表：
-  - `game/picture/object/objects.csv`
-- 物件圖集：
-  - `game/picture/object/objects_atlas_wire.rgb565`
+螢幕 `320x240` 拆成 4 條 `320x60` band。Python 每幀更新遊戲狀態後，把 far background、tilemap、object atlas、player sprite、special overlay、enemy 描述子傳給：
 
-> 注意：`objects.csv` 路徑之前有切到 `game/picture/player/object/...`，會導致 `OBJECT_MODE_OFF`。目前主線已回到 `game/picture/object/objects.csv`。
+```python
+lgfx.render_scene_bands_rgb565(...)
+```
+
+C++ 在每個 band 內完成：
+
+1. far background copy
+2. tilemap compose
+3. object atlas compose
+4. special object / respawn anchor / bullet overlay compose
+5. enemy compose
+6. player colorkey sprite compose
+7. wire-order DMA submit
+
+板上主線標記：
+
+- `SUBMIT_MODE=NATIVE_BAND_PIPELINE`
+- `BAND_PIPELINE_NATIVE_ON h=60`
+- `SUBMIT_BYTE_ORDER=WIRE_NOSWAP`
+- `SUBMIT_WIRE_RUNTIME_SWAP=0`
+
+目前實測大約：
+
+- `PROFILE total_us ~= 35.7ms`
+- `PROFILE fps ~= 28.0`
+- native 模式下 `PROFILE submit_us` 包含 C++ compose + band submit，不是舊版單純 full-screen submit。
 
 ---
 
-## 4. C++ / MicroPython 分工
+## 3. 資產格式與路徑
 
-### 4.1 C++（LGFX 擴充）
+主線 `.rgb565` 圖像資產都使用 **panel wire-order**，也就是每個 RGB565 pixel 以 `hi, lo` 存放。不要在每幀做 runtime byte swap。
 
-目前主線使用 C API 進行重負載合成：
+目前主線資產：
 
-- `compose_tilemap_rgb565(...)`
-- `compose_objects_atlas_rgb565(...)`
-- `compose_colorkey_rgb565(...)`（玩家 sprite colorkey）
+- far bg：`/sd/game/picture/backgound/bg_far_wire.rgb565`
+- tilemap CSV：`/sd/game/Tilemap/map1_tilemap.csv`
+- tileset：`/sd/game/Tilemap/tilemap_all_wire.rgb565`
+- object CSV：`/sd/game/picture/object/objects.csv`
+- object animations：`/sd/game/picture/object/object_animations.json`
+- object atlas：`/sd/game/picture/object/objects_atlas_wire.rgb565`
+- player sheet：`/sd/game/picture/player/player_wire.rgb565`
+- enemy CSV：`/sd/game/picture/enemy/enemies.csv`
+- enemy sheet：`/sd/game/picture/enemy/enemy_bow_animation_wire.rgb565`
 
-透明處理使用 colorkey（粉紅 `#FF00FF`），wire-order 主線下會用對應 key 值。
+透明色規則：
 
-### 4.2 MicroPython
-
-- 遊戲邏輯（輸入、交換、重力、相機）在 Python。
-- 交換、重力、物件座標更新後，會回寫 object C 緩衝，讓 C++ 合成立即生效。
-
----
-
-## 5. 玩家與物件邏輯
-
-### 5.1 玩家重力
-
-- 每幀先判腳下是否有支撐（tilemap / solid object）。
-- 無支撐：`vel_y += gravity`（上限 `fall_speed_max`）。
-- 有支撐：落地時 `vel_y = 0`。
-- 使用 `_move_axis_world(...)` 做像素級碰撞移動。
-
-### 5.2 物件重力（目前已開）
-
-- 每幀對 `objects_rows` 做下落更新。
-- 條件：`OBJECT_GRAVITY_ENABLED=True` 且 `OBJECT_GRAVITY_STEP>0`。
-- 規則：每幀最多下落 `OBJECT_GRAVITY_STEP` 像素，遇到 tilemap 實體停止。
-- 更新後同步 `_repack_single_object_entry(...)` 到 C 緩衝。
-
-### 5.3 Swap（X/Y）
-
-- X：最遠可交換目標（鏡頭內）
-- Y：最近可交換目標（鏡頭內）
-- 目前採「直接交換」：
-  - 不做碰撞檢查
-  - 不做回滾
-- 交換公式是 foot-align + 水平中心修正：
-  - 玩家與物件交換後可維持較合理落點。
-
-### 5.4 Swap 輸入穩定化（已加）
-
-為了解決連點失效：
-
-- 邊緣觸發：只在按下瞬間觸發
-- 最小間隔：`SWAP_MIN_INTERVAL_MS`（預設 90ms）
-- 目前 X 鍵接受：`btn_x_pressed` 或 `btn_b_pressed`（避免板子映射差異）
+- 語意色：magenta `#FF00FF`
+- RGB565 語意值：`0xF81F`
+- wire-order raw compare value：`0x1FF8`
+- Python 傳入 C++ compose 前會用 `_swap16(...)` 轉成 raw compare value。
 
 ---
 
-## 6. 目前效能狀態（方向）
+## 4. Python / C++ 分工
 
-大致瓶頸順序：
+Python (`app_camera_test.py`) 負責：
 
-1. 全屏提交 `submit_us`
-2. 背景合成 `bg_us`
-3. world/tilemap/object 合成 `world_us`
+- input update
+- player movement / gravity
+- object gravity
+- swap skill
+- camera tracking
+- enemy state / bullet state
+- respawn state
+- player animation frame selection
+- object/enemy/overlay descriptor packing
 
-玩家 sprite 合成已由 C API 接手，`sprite_us` 已顯著下降（相較 Python 逐像素）。
+C++ (`lgfx` user module) 負責：
+
+- `render_scene_bands_rgb565(...)` native band compose + submit
+- `compose_tilemap_rgb565(...)` fallback/測試用 tilemap compose
+- `compose_objects_atlas_rgb565(...)` fallback/測試用 object atlas compose
+- `compose_colorkey_rgb565(...)` fallback/測試用 player sprite compose
+- `blit_rect565_wire_async(...)` full-screen wire DMA fallback/測試路徑
+- DMA 前 `esp_cache_msync(..., DIR_C2M | UNALIGNED)`，避免 PSRAM/cache coherency 造成水平條碼花屏
 
 ---
 
-## 7. 目前可調參數（建議）
+## 5. 玩家、物件與技能
 
-在 `config.py` 可調：
+### 玩家與物件重力
 
-- `SWAP_MIN_INTERVAL_MS`：交換連點手感（建議 70~120）
-- `OBJECT_GRAVITY_ENABLED`：是否開啟物件重力
-- `OBJECT_GRAVITY_STEP`：物件下落每幀步進（建議 1~3）
-- `PLAYER_GRAVITY` / `PLAYER_FALL_SPEED_MAX`：玩家重力手感
-- `OBJECTS_COMPOSE_IMPL`：`"C_API"` / `"PYTHON"`
+- 玩家重力由 `PLAYER_GRAVITY` / `PLAYER_FALL_SPEED_MAX` 控制。
+- object 重力由 `OBJECT_GRAVITY_ENABLED` / `OBJECT_GRAVITY_STEP` 控制。
+- object 每幀下落後會回寫 `objects_c_buf`，C++ renderer 立即使用新座標。
+
+### Swap
+
+目前按鍵映射：
+
+- `B`：far swap
+- `Y`：near swap
+- `X`：目前不觸發 swap
+
+swap 使用：
+
+- 邊緣觸發
+- `SWAP_MIN_INTERVAL_MS` 最小間隔
+- 直接交換
+- 不做碰撞回滾
+
+交換成功 log：
+
+- `SWAP_FAR_OK_V2 ...`
+- `SWAP_NEAR_OK_V2 ...`
 
 ---
 
-## 8. 驗證指標（看 log）
+## 6. 驗證指標
 
-啟動確認：
+啟動與資源：
 
 - `OBJECT_MODE_ON`
 - `OBJECT_COUNT=...`
-- `OBJECT_COMPOSE_IMPL_CFG=C_API`
 - `TILEMAP_MODE_ON`
+- `CAMERA_PLAYER_SPRITE_READY=1`
 
-交換確認：
+渲染主線：
 
-- `SWAP_FAR_OK ...`
-- `SWAP_NEAR_OK ...`
-
-效能確認：
-
-- `PROFILE fps=...`
+- `SUBMIT_MODE=NATIVE_BAND_PIPELINE`
+- `BAND_PIPELINE_NATIVE_ON h=60`
 - `PROFILE submit_us=...`
-- `PROFILE bg_us=...`
-- `PROFILE world_us=...`
+- `PROFILE submit_kick_us=...`
+- `PROFILE submit_wait_us=...`
+- `PROFILE fps=...`
+
+若看到 `BAND_PIPELINE_NATIVE_FALLBACK`，先檢查 firmware 是否真的匯出：
+
+```python
+import lgfx
+print(hasattr(lgfx, 'render_scene_bands_rgb565'))
+```
 
 ---
 
-## 9. 現狀結論
+## 7. 目前結論
 
-- 目前主線是：
-  - tilemap + object + player 皆可渲染
-  - object 重力啟用
-  - X/Y 交換可用
-  - 測試不再自動 300 幀結束
-- 行為設計上，far/near 已統一為同一交換算法（只差目標選擇）。
+目前主線已不是舊 full-screen Python compose + full-screen submit。正式路徑是：
+
+```text
+SD launcher
+ -> app.py
+ -> app_camera_test.py
+ -> Python 更新遊戲狀態
+ -> C++ render_scene_bands_rgb565
+ -> 4-band wire-order DMA submit
+```
+
+下一步主要優化方向是減少每 band 重組成本，例如 static world band cache、camera static frame cache、camera moving strip cache，以及測試不同 `CAMERA_BAND_PIPELINE_H` 的 compose/DMA overlap。

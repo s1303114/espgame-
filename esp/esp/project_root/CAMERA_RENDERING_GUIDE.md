@@ -11,22 +11,26 @@
 - `CAMERA_FULL_BULK_WIRE_ORDER = True`
 - `CAMERA_FULL_BULK_WIRE_RUNTIME_SWAP = False`
 - `CAMERA_FULL_BULK_DOUBLE_BUFFER = True`
+- `CAMERA_BAND_PIPELINE_NATIVE = True`
+- `CAMERA_BAND_PIPELINE_H = 60`
 
 目前板上互動主線狀態：
 
-- X 鍵觸發 far swap，Y 鍵觸發 near swap。
+- B 鍵觸發 far swap，Y 鍵觸發 near swap，X 目前不觸發 swap。
 - swap 使用邊緣觸發與 `SWAP_MIN_INTERVAL_MS` 間隔，避免按鍵連點或長按造成重複觸發。
-- far/near swap 都走直接交換流程，不做碰撞回滾；找不到目標只輸出 `SWAP_FAIL_NO_TARGET`。
+- far/near swap 都走直接交換流程，不做碰撞回滾；找不到目標只輸出 `SWAP_FAIL_NO_TARGET_V2`。
 - 玩家重力由 `PLAYER_GRAVITY` 與 `PLAYER_FALL_SPEED_MAX` 控制。
 - object 重力由 `OBJECT_GRAVITY_ENABLED` 與 `OBJECT_GRAVITY_STEP` 控制，每幀把可見 object 往地面推進。
 - tilemap、object、player sprite 都優先走 C API compose，透明 colorkey 判斷在 C++ 端完成。
 - 內部 flash 的 `main.py` 是 SD-only launcher；遊戲程式與資產都由 `/sd/game` 載入。
 
-提交主線目前是 **wire-order full-screen async DMA submit + cache sync**：
+提交主線目前是 **native 4-band pipeline + wire-order DMA + cache sync**：
 
 - 主線標記：`SUBMIT_BYTE_ORDER=WIRE_NOSWAP`
 - 主線標記：`SUBMIT_WIRE_RUNTIME_SWAP=0`
-- 主線標記：`SUBMIT_MODE=ASYNC_DOUBLE_BUFFER_MAINLINE`
+- 初始化時仍會偵測 full-screen async 能力：`SUBMIT_MODE=ASYNC_DOUBLE_BUFFER_MAINLINE`
+- 正式主線會切到：`SUBMIT_MODE=NATIVE_BAND_PIPELINE`
+- band 啟動標記：`BAND_PIPELINE_NATIVE_ON h=60`
 
 `blit_rect565_wire_async` 在 `pushImageDMA` 前會先對 source buffer 做 CPU-to-memory cache sync：
 
@@ -81,19 +85,24 @@ esp_cache_msync(
 
 ## 2. 每幀流程
 
-1. 讀輸入、更新 `player_x / camera_x`。
-2. 在 RAM `scene_buf` 合成 far 背景。來源是 wire-order `bg_far_wire.rgb565`。
-3. tilemap 合成：
-   - 優先 `compose_tilemap_rgb565`（C API）
-   - 使用 wire-order `tilemap_all_wire.rgb565`
-   - transparent key 需依 wire-order 轉成 byte-swapped raw value
-4. 玩家 sprite 合成：`compose_masked_rgb565`（C API），來源是 wire-order sprite asset。
-5. 提交到 TFT：
-   - 主線：`blit_rect565_wire_async`（cache sync + `setSwapBytes(false)` + `pushImageDMA`）
-   - 下一幀開始前：若上一幀仍 in-flight，呼叫 `blit_wait_done()`
-   - 回退穩定路徑：`blit_rect565_wire_wait`（`setSwapBytes(false)` + `pushImage` + `waitDMA`）
+目前主線每幀流程是 native band pipeline，不再是 Python 先合成完整 `scene_buf` 再 full-screen submit。
 
-目前主線提交路徑的 C++ 形態：
+1. Python 讀輸入，更新 player / object / enemy / bullet / respawn 狀態。
+2. Python 更新 `camera_x`，選出本幀 player sprite frame。
+3. Python 將 object、special overlay、enemy descriptor 打包成緊湊 buffer。
+4. Python 呼叫 `lgfx.render_scene_bands_rgb565(...)`。
+5. C++ 依 `CAMERA_BAND_PIPELINE_H` 把 320x240 拆成多個水平 band，目前是 `320x60 * 4`。
+6. 每個 band 內由 C++ 依序 compose：
+   - far background band
+   - tilemap
+   - object atlas
+   - special object / respawn anchor / bullet overlay
+   - enemy
+   - player sprite
+7. 每個 band compose 後立即以 wire-order DMA submit。
+8. C++ 在下一個 band submit 前處理 DMA wait，使 CPU compose 與 DMA/SPI 傳輸交錯。
+
+目前主線提交路徑的 C++ 形態仍以 wire-order DMA 為核心：
 
 ```cpp
 esp_cache_msync(
@@ -106,25 +115,28 @@ lcd.setSwapBytes(false);
 lcd.pushImageDMA(x, y, w, h, pixels);
 ```
 
+`esp_cache_msync` 是保留 DMA 效能且避免水平條碼花屏的必要步驟。
+
 ## 3. 關鍵 API
 
-`micropython/user_cmodules/lgfx/lgfx_mp.cpp`：
+`micropython/user_cmodules/lgfx/`：
 
-- `compose_masked_rgb565(...)`
-- `compose_tilemap_rgb565(...)`
-- `blit_rect565_wait(...)`：舊 little-endian + swap path
-- `blit_rect565_async(...)`：舊 little-endian + swap path
-- `blit_rect565_wire_async(...)`：目前主線，wire-order + cache sync + DMA submit
-- `blit_rect565_wire_wait(...)`：穩定回退路徑，wire-order + non-DMA submit
+- `render_scene_bands_rgb565(...)`：目前主線，native 4-band compose + wire DMA submit。
+- `compose_tilemap_rgb565(...)`：fallback/測試用 tilemap compose。
+- `compose_objects_atlas_rgb565(...)`：fallback/測試用 object atlas compose。
+- `compose_colorkey_rgb565(...)`：fallback/測試用 player/sprite colorkey compose。
+- `blit_rect565_wire_async(...)`：full-screen wire-order async fallback/測試路徑，cache sync + DMA submit。
+- `blit_rect565_wire_wait(...)`：穩定回退路徑，wire-order + non-DMA submit。
 - `blit_wait_done()`
 - `async_probe_rgb565(...)`
 - `submit_probe_rgb565(...)`
-- `rgb565_swap_bytes_inplace(...)`：只保留給實驗，不作主線
+- `band_submit_probe_rgb565(...)`
+- `rgb565_swap_bytes_inplace(...)`：只保留給實驗，不作主線。
 
 `project_root/sd_game_template/game/tools/convert_png_to_rgb565.py`：
 
-- `--byte-order le`：舊格式，低 byte / 高 byte
-- `--byte-order wire`：目前主線資產格式，高 byte / 低 byte
+- `--byte-order le`：舊格式，低 byte / 高 byte。
+- `--byte-order wire`：目前主線資產格式，高 byte / 低 byte。
 
 ## 3.1 RGB565 資產轉檔規格
 
@@ -136,7 +148,7 @@ lcd.pushImageDMA(x, y, w, h, pixels);
 
 - 輸出是 raw RGB565，row-major，沒有 header。檔案大小必須等於 `width * height * 2`。
 - `--byte-order le`：每個 pixel 輸出 little-endian byte order，也就是 `lo, hi`。這是舊 `setSwapBytes(true)` 路徑使用的格式。
-- `--byte-order wire`：每個 pixel 輸出 panel wire-order，也就是 `hi, lo`。這是目前主線 `blit_rect565_wire_async` 使用的格式。
+- `--byte-order wire`：每個 pixel 輸出 panel wire-order，也就是 `hi, lo`。這是目前 native band pipeline 與 full-screen wire DMA 路徑使用的格式。
 - `--preview <png>` 只會額外輸出解碼預覽 PNG，不會改變 `.rgb565` 本體格式。
 
 透明規則：
@@ -163,7 +175,8 @@ metadata 與 layout：
 - `CAMERA_PLAYER_SPRITE_COMPOSE_IMPL=C_API`
 - `SUBMIT_BYTE_ORDER=WIRE_NOSWAP`
 - `SUBMIT_WIRE_RUNTIME_SWAP=0`
-- `SUBMIT_MODE=ASYNC_DOUBLE_BUFFER_MAINLINE`
+- `SUBMIT_MODE=NATIVE_BAND_PIPELINE`
+- `BAND_PIPELINE_NATIVE_ON h=60`
 - `PROFILE submit_us=...`
 - `PROFILE submit_kick_us=...`
 - `PROFILE submit_wait_us=...`
@@ -178,23 +191,33 @@ metadata 與 layout：
 | wire + runtime in-place swap + DMA | `kick ~= 24.3ms`, `swap ~= 13.2ms`, 總體約 `37.6ms` | 無收益，且曾造成花屏 |
 | wire asset + DMA，無 cache sync | `submit_us ~= 24.3ms` | 快，但出現水平條碼花屏，玩家也會被背景色覆蓋 |
 | wire asset + non-DMA `pushImage` | `submit_us ~= 34.3ms` | 穩定回退路徑 |
-| wire asset + DMA + `esp_cache_msync` | `submit_us ~= 24.5ms` | 目前主線，畫面正常 |
+| wire asset + DMA + `esp_cache_msync` | `submit_us ~= 24.5ms` | 前一版 full-screen 主線，畫面正常 |
 
-目前主線實測：
+目前 native band pipeline 主線實測（40MHz TFT 設定、4 bands x 60px）：
 
-- `submit_us` 約 `24.5~24.6ms`
-- `submit_kick_us` 約 `24.5~24.6ms`
-- `submit_wait_us` 約 `5.9~6.0ms`
+- `submit_us` 約 `33.9ms`
+  - 注意：native band 模式下這包含 C++ compose + band DMA pipeline，不是舊版純 submit。
+- `submit_kick_us` 約 `5.8ms`
+- `submit_wait_us` 約 `13.4ms`
 - `submit_swap_us = 0`
-- `fps` 約 `20.0~22.4`，依 world compose 成本而變
+- `total_us` 約 `35.7ms`
+- `fps` 約 `28.0`
+
+對照前一版 full-screen wire-order DMA 主線：
+
+- `submit_us` 約 `24.5ms`，但 Python compose 另需約 `15~25ms`
+- `total_us` 約 `51.6ms`
+- `fps` 約 `19.4`
+
+因此 band pipeline 的收益不是減少總傳輸量，而是把 C++ compose 與 DMA wait 重疊，降低整幀 total time。
 
 關鍵結論：
 
 1. wire-order asset 是有效方向，能避免 LGFX 內部 byte-swap/convert staging。
 2. runtime in-place swap 不可作主線，因為每幀多約 `13.2ms`，且容易污染雙緩衝 buffer 狀態。
 3. `pushImageDMA` 直接讀 Python/PSRAM scene buffer 若不做 cache sync，會造成水平條碼狀花屏；原因是 DMA/cache coherency 或 PSRAM DMA 路徑一致性問題。
-4. 目前正式方案是 wire-order asset + `esp_cache_msync` + DMA full-screen submit。
-5. non-DMA `pushImage` 保留為穩定回退路徑。
+4. 目前正式方案是 wire-order asset + `esp_cache_msync` + native band DMA pipeline。
+5. full-screen wire DMA 與 non-DMA `pushImage` 保留為回退與測試路徑。
 
 ## 4.1 已排除的畫面問題方向
 
@@ -206,6 +229,65 @@ metadata 與 layout：
 - 在 wire-order DMA submit 前加入 `esp_cache_msync(..., DIR_C2M | UNALIGNED)`：條碼消失，且保留 DMA submit 效能。
 
 因此該問題不是 tilemap transparent key，也不是 CSV 空洞；是 wire DMA submit 路徑的資料一致性問題。正式修法是 DMA 前做 cache sync。
+
+## 4.2 Native Band Pipeline 細節
+
+目前 band pipeline 入口在：
+
+- Python：`app_camera_test.py` 內偵測 `CAMERA_BAND_PIPELINE_NATIVE`
+- C++：`micropython/user_cmodules/lgfx/lgfx_band.cpp`
+- exported API：`lgfx.render_scene_bands_rgb565(...)`
+
+啟用條件：
+
+- `CAMERA_BAND_PIPELINE_NATIVE = True`
+- `CAMERA_BAND_PIPELINE_H = 60`
+- `CAMERA_FULL_BULK_WIRE_ORDER = True`
+- `CAMERA_FULL_BULK_WIRE_RUNTIME_SWAP = False`
+- firmware 內有 `render_scene_bands_rgb565`
+- far background 已 RAM cache
+- tilemap / tileset / object atlas / player sprite 都已載入
+
+目前特殊動畫物件與復活錨點也已走 native overlay 描述子路徑：
+
+- Python 會把每個 animated overlay 打包成 `x, y, w, h, frame_index` 描述子
+- frame buffer tuple 會一併傳給 `lgfx.render_scene_bands_rgb565(...)`
+- C++ band compose 會在 object atlas 後、player sprite 前套用這些 overlay
+- 因此 `special_object_render_enabled` 不再是 native band fallback 的理由
+
+若條件不滿足，會輸出：
+
+- `BAND_PIPELINE_NATIVE_FALLBACK`
+
+並回到原本 full-screen compose/submit 路徑。
+
+目前 C++ 回傳 profile tuple：
+
+```text
+(band_count, compose_us, kick_us, wait_us, total_us)
+```
+
+Python 主線會把整個 native call 記入 `PROFILE submit_us`，並把 `kick_us / wait_us` 拆到 `PROFILE submit_kick_us / PROFILE submit_wait_us`。
+
+實機驗證時，建議先做兩個檢查：
+
+- `import lgfx; hasattr(lgfx, 'render_scene_bands_rgb565')` 必須是 `True`
+- 開機 log 必須看到 `SUBMIT_MODE=NATIVE_BAND_PIPELINE` 與 `BAND_PIPELINE_NATIVE_ON h=...`
+
+如果 `lgfx` 缺少 `render_scene_bands_rgb565`，不要先懷疑 Python runtime。先檢查 `/tmp` 本地鏡像是否真的同步到所有改動過的 user_cmodule 檔案，尤其是：
+
+- `micropython/user_cmodules/lgfx/lgfx_mp.cpp`
+- `micropython/user_cmodules/lgfx/lgfx_band.cpp`
+- `micropython/user_cmodules/lgfx/lgfx_shared.hpp`
+
+這次已驗證過一個容易踩到的坑：只同步 `lgfx_band.cpp` 和 header 到 `/tmp/esp-mp-local` 並重編，firmware 可能會刷進新的 band renderer，但因為舊版 `lgfx_mp.cpp` module table 還留在 `/tmp`，板上 `lgfx` 仍然不會匯出 `render_scene_bands_rgb565`，結果開機會持續 fallback。
+
+最佳化方向：
+
+1. 測試 `CAMERA_BAND_PIPELINE_H = 40 / 48 / 80`，找 compose 與 DMA wait 最佳 overlap。
+2. 減少每幀 far background 153KB copy。
+3. 對 camera static frame 做 static world band cache，只重畫 player。
+4. camera 移動時做水平 strip cache，而不是每 band 重組 tilemap。
 
 ## 5. Build / Flash
 
@@ -219,6 +301,8 @@ cd /tmp/esp-mp-local/micropython/ports/esp32
 source /opt/esp/idf/export.sh
 idf.py -B build-ESP32_GENERIC_S3-SPIRAM_OCT_NOBT -p /dev/ttyACM0 flash
 ```
+
+若 `build_local_tmp.sh` 在 `/workspace -> /tmp` 複製階段卡在 9p I/O，且你改的是少數幾個 user_cmodule 檔案，可以直接把所有改過的檔案同步到既有 `/tmp/esp-mp-local` 後再重編；不要只同步其中一部分，否則很容易出現 qstr / module export 與實際實作版本不一致。
 
 ## 6. 只部署 Python 檔
 

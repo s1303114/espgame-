@@ -101,6 +101,65 @@ static void compose_tilemap_band(
     }
 }
 
+static void compose_atlas_region_band(
+    uint8_t *dst,
+    int32_t dst_w,
+    int32_t dst_h,
+    int32_t camera_x,
+    int32_t band_top,
+    int16_t wx,
+    int16_t wy,
+    const uint8_t *atlas,
+    int32_t atlas_w,
+    int32_t atlas_h,
+    int32_t src_x,
+    int32_t src_y,
+    int32_t src_w,
+    int32_t src_h,
+    int32_t transparent_key
+) {
+    if (!atlas || atlas_w <= 0 || atlas_h <= 0 || src_w <= 0 || src_h <= 0) {
+        return;
+    }
+    if (src_x < 0 || src_y < 0 || src_x + src_w > atlas_w || src_y + src_h > atlas_h) {
+        return;
+    }
+
+    int32_t dx = (int32_t)wx - camera_x;
+    int32_t dy = (int32_t)wy - band_top;
+    int32_t src_x0 = 0;
+    int32_t src_y0 = 0;
+    int32_t vis_w = src_w;
+    int32_t vis_h = src_h;
+    if (dx < 0) { src_x0 = -dx; vis_w -= src_x0; dx = 0; }
+    if (dy < 0) { src_y0 = -dy; vis_h -= src_y0; dy = 0; }
+    if (dx + vis_w > dst_w) vis_w = dst_w - dx;
+    if (dy + vis_h > dst_h) vis_h = dst_h - dy;
+    if (vis_w <= 0 || vis_h <= 0) {
+        return;
+    }
+
+    size_t atlas_row_bytes = (size_t)atlas_w * 2u;
+    size_t src_row_base = ((size_t)(src_y + src_y0) * (size_t)atlas_w + (size_t)(src_x + src_x0)) * 2u;
+    size_t copy_bytes = (size_t)vis_w * 2u;
+    for (int32_t y = 0; y < vis_h; ++y) {
+        const uint8_t *src_row = atlas + src_row_base + ((size_t)y * atlas_row_bytes);
+        uint8_t *dst_row = dst + ((((size_t)(dy + y) * (size_t)dst_w) + (size_t)dx) * 2u);
+        if (transparent_key < 0) {
+            memcpy(dst_row, src_row, copy_bytes);
+        } else {
+            for (int32_t x = 0; x < vis_w; ++x) {
+                size_t b = (size_t)x * 2u;
+                uint16_t px = (uint16_t)src_row[b] | ((uint16_t)src_row[b + 1] << 8);
+                if (px != (uint16_t)transparent_key) {
+                    dst_row[b] = src_row[b];
+                    dst_row[b + 1] = src_row[b + 1];
+                }
+            }
+        }
+    }
+}
+
 static void compose_objects_band(
     uint8_t *dst,
     int32_t dst_w,
@@ -161,6 +220,75 @@ static void compose_objects_band(
     }
 }
 
+static void compose_enemy_band(
+    uint8_t *dst,
+    int32_t dst_w,
+    int32_t dst_h,
+    int32_t camera_x,
+    int32_t band_top,
+    const uint8_t *enemy_desc,
+    int32_t enemy_stride,
+    int32_t enemy_count,
+    const uint8_t *enemy_sheet,
+    int32_t enemy_sheet_w,
+    int32_t enemy_sheet_h,
+    int32_t enemy_key,
+    int32_t enemy_frame_hold
+) {
+    if (!enemy_desc || !enemy_sheet || enemy_count <= 0 || enemy_stride < 8 || enemy_sheet_w <= 0 || enemy_sheet_h <= 0) {
+        return;
+    }
+    const int32_t frame_w = 32;
+    const int32_t frame_h = 32;
+    if (enemy_sheet_w < (10 * frame_w) || enemy_sheet_h < (3 * frame_h)) {
+        return;
+    }
+    if (enemy_frame_hold < 1) {
+        enemy_frame_hold = 1;
+    }
+
+    for (int32_t i = 0; i < enemy_count; ++i) {
+        const uint8_t *eb = enemy_desc + ((size_t)i * (size_t)enemy_stride);
+        int16_t wx = (int16_t)((uint16_t)eb[0] | ((uint16_t)eb[1] << 8));
+        int16_t wy = (int16_t)((uint16_t)eb[2] | ((uint16_t)eb[3] << 8));
+        int32_t anim_counter = (uint16_t)eb[4] | ((uint16_t)eb[5] << 8);
+        int32_t enemy_state = (int32_t)eb[6];
+        bool face_right = eb[7] != 0;
+
+        int32_t frame_idx = anim_counter / enemy_frame_hold;
+        int32_t src_x = 0;
+        int32_t src_y = frame_h * 2;
+        if (enemy_state == 2) {
+            if (frame_idx > 9) {
+                frame_idx = 9;
+            }
+            src_x = frame_idx * frame_w;
+            src_y = face_right ? 0 : frame_h;
+        } else {
+            frame_idx %= 5;
+            src_x = (face_right ? frame_idx : (5 + frame_idx)) * frame_w;
+        }
+
+        compose_atlas_region_band(
+            dst,
+            dst_w,
+            dst_h,
+            camera_x,
+            band_top,
+            wx,
+            wy,
+            enemy_sheet,
+            enemy_sheet_w,
+            enemy_sheet_h,
+            src_x,
+            src_y,
+            frame_w,
+            frame_h,
+            enemy_key
+        );
+    }
+}
+
 static void compose_sprite_band(
     uint8_t *dst,
     int32_t dst_w,
@@ -205,6 +333,60 @@ static void compose_sprite_band(
     }
 }
 
+static void compose_overlay_band(
+    uint8_t *dst,
+    int32_t dst_w,
+    int32_t dst_h,
+    int32_t camera_x,
+    int32_t band_top,
+    const uint8_t *overlay_desc,
+    int32_t overlay_stride,
+    int32_t overlay_count,
+    mp_obj_t overlay_frames_obj,
+    int32_t overlay_key
+) {
+    if (!overlay_desc || overlay_count <= 0 || overlay_stride < 10) {
+        return;
+    }
+
+    size_t frame_obj_count = 0;
+    mp_obj_t *frame_objs = nullptr;
+    mp_obj_get_array(overlay_frames_obj, &frame_obj_count, &frame_objs);
+    if (frame_obj_count == 0 || frame_objs == nullptr) {
+        return;
+    }
+
+    for (int32_t i = 0; i < overlay_count; ++i) {
+        const uint8_t *ob = overlay_desc + ((size_t)i * (size_t)overlay_stride);
+        int16_t wx = (int16_t)((uint16_t)ob[0] | ((uint16_t)ob[1] << 8));
+        int16_t wy = (int16_t)((uint16_t)ob[2] | ((uint16_t)ob[3] << 8));
+        int32_t frame_w = (uint16_t)ob[4] | ((uint16_t)ob[5] << 8);
+        int32_t frame_h = (uint16_t)ob[6] | ((uint16_t)ob[7] << 8);
+        int32_t frame_idx = (uint16_t)ob[8] | ((uint16_t)ob[9] << 8);
+        if (frame_w <= 0 || frame_h <= 0 || frame_idx < 0 || (size_t)frame_idx >= frame_obj_count) {
+            continue;
+        }
+
+        mp_buffer_info_t frame_info;
+        mp_get_buffer_raise(frame_objs[frame_idx], &frame_info, MP_BUFFER_READ);
+        size_t expected_len = (size_t)frame_w * (size_t)frame_h * 2u;
+        if (frame_info.len < expected_len) {
+            continue;
+        }
+        compose_sprite_band(
+            dst,
+            dst_w,
+            dst_h,
+            (int32_t)wx - camera_x,
+            (int32_t)wy - band_top,
+            (const uint8_t *)frame_info.buf,
+            frame_w,
+            frame_h,
+            overlay_key
+        );
+    }
+}
+
 static void compose_scene_band(
     uint8_t *dst,
     int32_t screen_w,
@@ -232,11 +414,26 @@ static void compose_scene_band(
     int32_t sprite_h,
     int32_t sprite_x,
     int32_t sprite_y,
-    int32_t sprite_key
+    int32_t sprite_key,
+    const uint8_t *overlay_desc,
+    int32_t overlay_stride,
+    int32_t overlay_count,
+    mp_obj_t overlay_frames_obj,
+    int32_t overlay_key,
+    const uint8_t *enemy_desc,
+    int32_t enemy_stride,
+    int32_t enemy_count,
+    const uint8_t *enemy_sheet,
+    int32_t enemy_sheet_w,
+    int32_t enemy_sheet_h,
+    int32_t enemy_key,
+    int32_t enemy_frame_hold
 ) {
     copy_far_band(dst, screen_w, band_y, band_h, far);
     compose_tilemap_band(dst, screen_w, band_h, camera_x, band_y, tilemap, map_w, map_h, tileset, tileset_len, tile_size, tileset_w, tile_key);
     compose_objects_band(dst, screen_w, band_h, camera_x, band_y, objbuf, obj_stride, object_count, obj_atlas, obj_atlas_w, obj_atlas_h, object_key);
+    compose_overlay_band(dst, screen_w, band_h, camera_x, band_y, overlay_desc, overlay_stride, overlay_count, overlay_frames_obj, overlay_key);
+    compose_enemy_band(dst, screen_w, band_h, camera_x, band_y, enemy_desc, enemy_stride, enemy_count, enemy_sheet, enemy_sheet_w, enemy_sheet_h, enemy_key, enemy_frame_hold);
     compose_sprite_band(dst, screen_w, band_h, sprite_x, sprite_y - band_y, sprite, sprite_w, sprite_h, sprite_key);
 }
 
@@ -360,8 +557,8 @@ MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lgfx_band_submit_probe_rgb565_obj, 4, 4, lgf
 
 
 static mp_obj_t lgfx_render_scene_bands_rgb565(size_t n_args, const mp_obj_t *args) {
-    if (n_args != 28) {
-        mp_raise_ValueError(MP_ERROR_TEXT("need 28 args"));
+    if (n_args != 28 && n_args != 33 && n_args != 41) {
+        mp_raise_ValueError(MP_ERROR_TEXT("need 28, 33 or 41 args"));
     }
 
     mp_buffer_info_t band_a_info, band_b_info, far_info, tilemap_info, tileset_info, obj_info, obj_atlas_info, sprite_info;
@@ -392,7 +589,51 @@ static mp_obj_t lgfx_render_scene_bands_rgb565(size_t n_args, const mp_obj_t *ar
     int32_t sprite_x = (int32_t)mp_obj_get_int(args[24]);
     int32_t sprite_y = (int32_t)mp_obj_get_int(args[25]);
     int32_t sprite_key = (int32_t)mp_obj_get_int(args[26]);
-    bool verbose = mp_obj_is_true(args[27]);
+    mp_buffer_info_t overlay_info;
+    overlay_info.buf = nullptr;
+    overlay_info.len = 0;
+    int32_t overlay_stride = 0;
+    int32_t overlay_count = 0;
+    mp_obj_t overlay_frames_obj = mp_const_empty_tuple;
+    int32_t overlay_key = -1;
+    mp_buffer_info_t enemy_desc_info;
+    enemy_desc_info.buf = nullptr;
+    enemy_desc_info.len = 0;
+    int32_t enemy_stride = 0;
+    int32_t enemy_count = 0;
+    mp_buffer_info_t enemy_sheet_info;
+    enemy_sheet_info.buf = nullptr;
+    enemy_sheet_info.len = 0;
+    int32_t enemy_sheet_w = 0;
+    int32_t enemy_sheet_h = 0;
+    int32_t enemy_key = -1;
+    int32_t enemy_frame_hold = 4;
+    bool verbose = false;
+    if (n_args == 41) {
+        mp_get_buffer_raise(args[27], &overlay_info, MP_BUFFER_READ);
+        overlay_stride = (int32_t)mp_obj_get_int(args[28]);
+        overlay_count = (int32_t)mp_obj_get_int(args[29]);
+        overlay_frames_obj = args[30];
+        overlay_key = (int32_t)mp_obj_get_int(args[31]);
+        mp_get_buffer_raise(args[32], &enemy_desc_info, MP_BUFFER_READ);
+        enemy_stride = (int32_t)mp_obj_get_int(args[33]);
+        enemy_count = (int32_t)mp_obj_get_int(args[34]);
+        mp_get_buffer_raise(args[35], &enemy_sheet_info, MP_BUFFER_READ);
+        enemy_sheet_w = (int32_t)mp_obj_get_int(args[36]);
+        enemy_sheet_h = (int32_t)mp_obj_get_int(args[37]);
+        enemy_key = (int32_t)mp_obj_get_int(args[38]);
+        enemy_frame_hold = (int32_t)mp_obj_get_int(args[39]);
+        verbose = mp_obj_is_true(args[40]);
+    } else if (n_args == 33) {
+        mp_get_buffer_raise(args[27], &overlay_info, MP_BUFFER_READ);
+        overlay_stride = (int32_t)mp_obj_get_int(args[28]);
+        overlay_count = (int32_t)mp_obj_get_int(args[29]);
+        overlay_frames_obj = args[30];
+        overlay_key = (int32_t)mp_obj_get_int(args[31]);
+        verbose = mp_obj_is_true(args[32]);
+    } else {
+        verbose = mp_obj_is_true(args[27]);
+    }
 
     if (screen_w <= 0 || screen_h <= 0 || band_h_cfg <= 0 || band_h_cfg > screen_h) {
         mp_raise_ValueError(MP_ERROR_TEXT("invalid dims"));
@@ -411,6 +652,19 @@ static mp_obj_t lgfx_render_scene_bands_rgb565(size_t n_args, const mp_obj_t *ar
     if (sprite_info.len < (size_t)sprite_w * (size_t)sprite_h * 2u) {
         mp_raise_ValueError(MP_ERROR_TEXT("sprite buf too small"));
     }
+    if (overlay_count > 0) {
+        if (overlay_stride < 10 || overlay_info.len < (size_t)overlay_count * (size_t)overlay_stride) {
+            mp_raise_ValueError(MP_ERROR_TEXT("overlay buf too small"));
+        }
+    }
+    if (enemy_count > 0) {
+        if (enemy_stride < 8 || enemy_desc_info.len < (size_t)enemy_count * (size_t)enemy_stride) {
+            mp_raise_ValueError(MP_ERROR_TEXT("enemy desc too small"));
+        }
+        if (enemy_sheet_w <= 0 || enemy_sheet_h <= 0 || enemy_sheet_info.len < (size_t)enemy_sheet_w * (size_t)enemy_sheet_h * 2u) {
+            mp_raise_ValueError(MP_ERROR_TEXT("enemy sheet too small"));
+        }
+    }
     if (object_count > 0) {
         if (obj_stride < 12 || obj_info.len < (size_t)object_count * (size_t)obj_stride) {
             mp_raise_ValueError(MP_ERROR_TEXT("object buf too small"));
@@ -428,6 +682,9 @@ static mp_obj_t lgfx_render_scene_bands_rgb565(size_t n_args, const mp_obj_t *ar
     const uint8_t *objbuf = (const uint8_t *)obj_info.buf;
     const uint8_t *obj_atlas = (const uint8_t *)obj_atlas_info.buf;
     const uint8_t *sprite = (const uint8_t *)sprite_info.buf;
+    const uint8_t *overlay_desc = (const uint8_t *)overlay_info.buf;
+    const uint8_t *enemy_desc = (const uint8_t *)enemy_desc_info.buf;
+    const uint8_t *enemy_sheet = (const uint8_t *)enemy_sheet_info.buf;
 
     uint32_t compose_us = 0;
     uint32_t kick_us = 0;
@@ -439,7 +696,7 @@ static mp_obj_t lgfx_render_scene_bands_rgb565(size_t n_args, const mp_obj_t *ar
     int32_t bh = band_h_cfg;
     if (y + bh > screen_h) bh = screen_h - y;
     int64_t ct0 = esp_timer_get_time();
-    compose_scene_band(band_a, screen_w, y, bh, far, camera_x, tilemap, map_w, map_h, tileset, tileset_info.len, tile_size, tileset_w, tile_key, objbuf, obj_stride, object_count, obj_atlas, obj_atlas_w, obj_atlas_h, object_key, sprite, sprite_w, sprite_h, sprite_x, sprite_y, sprite_key);
+    compose_scene_band(band_a, screen_w, y, bh, far, camera_x, tilemap, map_w, map_h, tileset, tileset_info.len, tile_size, tileset_w, tile_key, objbuf, obj_stride, object_count, obj_atlas, obj_atlas_w, obj_atlas_h, object_key, sprite, sprite_w, sprite_h, sprite_x, sprite_y, sprite_key, overlay_desc, overlay_stride, overlay_count, overlay_frames_obj, overlay_key, enemy_desc, enemy_stride, enemy_count, enemy_sheet, enemy_sheet_w, enemy_sheet_h, enemy_key, enemy_frame_hold);
     compose_us += (uint32_t)(esp_timer_get_time() - ct0);
 
     bool prev_swap = false;
@@ -455,7 +712,7 @@ static mp_obj_t lgfx_render_scene_bands_rgb565(size_t n_args, const mp_obj_t *ar
         bh = band_h_cfg;
         if (y + bh > screen_h) bh = screen_h - y;
         ct0 = esp_timer_get_time();
-        compose_scene_band(next_buf, screen_w, y, bh, far, camera_x, tilemap, map_w, map_h, tileset, tileset_info.len, tile_size, tileset_w, tile_key, objbuf, obj_stride, object_count, obj_atlas, obj_atlas_w, obj_atlas_h, object_key, sprite, sprite_w, sprite_h, sprite_x, sprite_y, sprite_key);
+        compose_scene_band(next_buf, screen_w, y, bh, far, camera_x, tilemap, map_w, map_h, tileset, tileset_info.len, tile_size, tileset_w, tile_key, objbuf, obj_stride, object_count, obj_atlas, obj_atlas_w, obj_atlas_h, object_key, sprite, sprite_w, sprite_h, sprite_x, sprite_y, sprite_key, overlay_desc, overlay_stride, overlay_count, overlay_frames_obj, overlay_key, enemy_desc, enemy_stride, enemy_count, enemy_sheet, enemy_sheet_w, enemy_sheet_h, enemy_key, enemy_frame_hold);
         compose_us += (uint32_t)(esp_timer_get_time() - ct0);
         submit_band_wait(prev_swap, &wait_us);
         submit_band_start(next_buf, screen_w, y, bh, &prev_swap, &kick_us);
@@ -478,7 +735,7 @@ static mp_obj_t lgfx_render_scene_bands_rgb565(size_t n_args, const mp_obj_t *ar
     };
     return mp_obj_new_tuple(5, out);
 }
-MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lgfx_render_scene_bands_rgb565_obj, 28, 28, lgfx_render_scene_bands_rgb565);
+MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lgfx_render_scene_bands_rgb565_obj, 28, 41, lgfx_render_scene_bands_rgb565);
 
 } // extern "C"
 

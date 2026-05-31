@@ -64,17 +64,58 @@ def _reset_game_imports():
             del sys.modules[name]
 
 
+class _ModuleProxy:
+    def __init__(self, ns):
+        self._ns = ns
+
+    def __getattr__(self, name):
+        try:
+            return self._ns[name]
+        except KeyError:
+            raise AttributeError(name)
+
+    def __setattr__(self, name, value):
+        if name == "_ns":
+            object.__setattr__(self, name, value)
+        else:
+            self._ns[name] = value
+
+
+def _exec_module_from_path(name, path):
+    import sys
+
+    ns = {
+        "__name__": name,
+        "__file__": path,
+    }
+    with open(path, "r") as handle:
+        source = handle.read()
+    if name == "app_camera_test":
+        print("LOADER_SRC_PATH=%s" % path)
+        print("LOADER_SRC_HAS_V2_START=%d" % (1 if ("APP_RUN_START_PHASE_CAMERA_TEST_V2" in source) else 0))
+        print("LOADER_SRC_HAS_V2_FAR=%d" % (1 if ("SWAP_FAR_OK_V2" in source) else 0))
+    exec(source, ns)
+    module = _ModuleProxy(ns)
+    sys.modules[name] = module
+    return module
+
+
 def _load_sd_app():
     import os
     import sys
 
     os.stat(GAME_PATH + "/app.py")
+    os.stat(GAME_PATH + "/config.py")
+    os.stat(GAME_PATH + "/app_camera_test.py")
+    os.chdir(GAME_PATH)
     while GAME_PATH in sys.path:
         sys.path.remove(GAME_PATH)
+    while ".frozen" in sys.path:
+        sys.path.remove(".frozen")
     sys.path.insert(0, GAME_PATH)
     _reset_game_imports()
-    import app
-    return app
+    _exec_module_from_path("config", GAME_PATH + "/config.py")
+    return _exec_module_from_path("app_camera_test", GAME_PATH + "/app_camera_test.py")
 
 
 def main():
@@ -88,6 +129,18 @@ def main():
 
     try:
         app = _load_sd_app()
+        try:
+            print("LAUNCHER_APP_TYPE=%s" % type(app).__name__)
+        except Exception:
+            print("LAUNCHER_APP_TYPE=?")
+        try:
+            print("LAUNCHER_APP_FILE=%s" % app.__file__)
+        except Exception:
+            print("LAUNCHER_APP_FILE=?")
+        try:
+            print("LAUNCHER_APP_RUN=%r" % (app.run,))
+        except Exception:
+            print("LAUNCHER_APP_RUN=?")
         print("Launcher source: sd")
         try:
             app._boot_source_tag = "SD"

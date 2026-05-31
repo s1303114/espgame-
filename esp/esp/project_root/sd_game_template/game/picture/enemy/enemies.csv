@@ -1,0 +1,2 @@
+id,type,world_x,world_y,w,h,swappable,facing
+enemy_bow_01,bow,1024,192,32,32,1,-1
