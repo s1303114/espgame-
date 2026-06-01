@@ -1,5 +1,6 @@
 import config
 
+
 try:
     import lgfx as _lgfx
 except Exception:
@@ -76,6 +77,231 @@ _MODE_SPI_TFT_BULK_WAIT_TEST = "SPI_TFT_BULK_WAIT_TEST"
 _ENEMY_STATE_IDLE = 0
 _ENEMY_STATE_WALK = 1
 _ENEMY_STATE_SHOOT = 2
+_BULLET_DEBUG_LIMIT = 12
+_bullet_debug_count = 0
+_bullet_debug_last_active_ms = -1000000
+_enemy_native_update_disabled = False
+_ENEMY_STATE_KEYS = ("facing", "state", "anim_counter", "shoot_cooldown", "shot_fired", "vel_y")
+_ENEMY_ROW_STRIDE = 12
+_ENEMY_STATE_STRIDE = 8
+_BULLET_STATE_STRIDE = 16
+_OBJECT_SOLID_STRIDE = 8
+
+
+def _buf_get_i16_le(buf, off):
+    val = buf[off] | (buf[off + 1] << 8)
+    if val & 0x8000:
+        val -= 0x10000
+    return val
+
+
+def _buf_set_i16_le(buf, off, value):
+    iv = int(value)
+    if iv < -32768:
+        iv = -32768
+    if iv > 32767:
+        iv = 32767
+    uv = iv & 0xFFFF
+    buf[off] = uv & 0xFF
+    buf[off + 1] = (uv >> 8) & 0xFF
+
+
+class _PackedEnemyStateView:
+    def __init__(self, owner, index):
+        self._owner = owner
+        self._index = index
+
+    def _base(self):
+        return self._index * _ENEMY_STATE_STRIDE
+
+    def get(self, key, default=None):
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def __getitem__(self, key):
+        base = self._base()
+        buf = self._owner._buf
+        if key == "facing":
+            return 1 if buf[base] else -1
+        if key == "state":
+            return buf[base + 1]
+        if key == "anim_counter":
+            return _buf_get_i16_le(buf, base + 2)
+        if key == "shoot_cooldown":
+            return _buf_get_i16_le(buf, base + 4)
+        if key == "shot_fired":
+            return buf[base + 6]
+        if key == "vel_y":
+            raw = buf[base + 7]
+            return raw - 256 if raw >= 128 else raw
+        raise KeyError(key)
+
+    def __setitem__(self, key, value):
+        base = self._base()
+        buf = self._owner._buf
+        if key == "facing":
+            buf[base] = 1 if int(value) >= 0 else 0
+            return
+        if key == "state":
+            buf[base + 1] = int(value) & 0xFF
+            return
+        if key == "anim_counter":
+            _buf_set_i16_le(buf, base + 2, value)
+            return
+        if key == "shoot_cooldown":
+            _buf_set_i16_le(buf, base + 4, value)
+            return
+        if key == "shot_fired":
+            buf[base + 6] = int(value) & 0xFF
+            return
+        if key == "vel_y":
+            buf[base + 7] = int(value) & 0xFF
+            return
+        raise KeyError(key)
+
+
+class _PackedEnemyStates:
+    def __init__(self, count):
+        self._count = int(count)
+        self._buf = bytearray(self._count * _ENEMY_STATE_STRIDE)
+
+    def __len__(self):
+        return self._count
+
+    def __bool__(self):
+        return self._count > 0
+
+    def __getitem__(self, index):
+        ii = int(index)
+        if ii < 0 or ii >= self._count:
+            raise IndexError(index)
+        return _PackedEnemyStateView(self, ii)
+
+
+class _PackedBulletView:
+    def __init__(self, owner, index):
+        self._owner = owner
+        self._index = index
+
+    def __len__(self):
+        return 8
+
+    def _base(self):
+        return self._index * _BULLET_STATE_STRIDE
+
+    def _get_one(self, item):
+        base = self._base()
+        return _buf_get_i16_le(self._owner._buf, base + (item * 2))
+
+    def _set_one(self, item, value):
+        base = self._base()
+        _buf_set_i16_le(self._owner._buf, base + (item * 2), value)
+
+    def __getitem__(self, item):
+        if isinstance(item, slice):
+            start, stop, step = item.indices(8)
+            out = []
+            i = start
+            while i < stop:
+                out.append(self._get_one(i))
+                i += step
+            return out
+        ii = int(item)
+        if ii < 0 or ii >= 8:
+            raise IndexError(item)
+        return self._get_one(ii)
+
+    def __setitem__(self, item, value):
+        ii = int(item)
+        if ii < 0 or ii >= 8:
+            raise IndexError(item)
+        self._set_one(ii, value)
+
+
+class _PackedEnemyBullets:
+    def __init__(self):
+        self._count = 0
+        self._buf = bytearray()
+
+    def __len__(self):
+        return self._count
+
+    def __bool__(self):
+        return self._count > 0
+
+    def __getitem__(self, index):
+        ii = int(index)
+        if ii < 0 or ii >= self._count:
+            raise IndexError(index)
+        return _PackedBulletView(self, ii)
+
+    def ensure_capacity(self, count):
+        target = int(count)
+        if target <= self._count:
+            return
+        need = (target - self._count) * _BULLET_STATE_STRIDE
+        self._buf.extend(bytearray(need))
+        self._count = target
+
+    def append_row(self, values):
+        base = self._count * _BULLET_STATE_STRIDE
+        self._buf.extend(bytearray(_BULLET_STATE_STRIDE))
+        i = 0
+        while i < 8:
+            _buf_set_i16_le(self._buf, base + (i * 2), values[i] if i < len(values) else 0)
+            i += 1
+        self._count += 1
+
+    def clear(self):
+        self._buf = bytearray()
+        self._count = 0
+
+
+def _bullet_debug(tag, text):
+    global _bullet_debug_count
+    if _bullet_debug_count >= _BULLET_DEBUG_LIMIT:
+        return
+    print("%s %s" % (tag, text))
+    _bullet_debug_count += 1
+
+
+def _bullet_debug_active(enemy_bullets, camera_x, screen_w, screen_h):
+    global _bullet_debug_last_active_ms
+    if not enemy_bullets:
+        return
+    now = ticks_ms()
+    if ticks_diff(now, _bullet_debug_last_active_ms) < 500:
+        return
+    bi = 0
+    while bi < len(enemy_bullets):
+        bullet = enemy_bullets[bi]
+        if bullet[6]:
+            bx = int(bullet[0])
+            by = int(bullet[1])
+            vx = int(bullet[2])
+            bw = int(bullet[4])
+            bh = int(bullet[5])
+            _bullet_debug_last_active_ms = now
+            print(
+                "BULLET_ACTIVE idx=%d wx=%d wy=%d sx=%d sy=%d vx=%d wh=%d,%d cam=%d screen=%d,%d"
+                % (
+                    bi,
+                    bx,
+                    by,
+                    bx - int(camera_x),
+                    by,
+                    vx,
+                    bw,
+                    bh,
+                    int(camera_x),
+                    int(screen_w),
+                    int(screen_h),
+                )
+            )
+            return
+        bi += 1
 
 
 def _resolve_asset_path(path):
@@ -998,14 +1224,12 @@ def _reset_enemy_state(state, meta=None):
 
 
 def _build_enemy_states(meta_rows):
-    out = []
     if not meta_rows:
-        return out
+        return _PackedEnemyStates(0)
+    out = _PackedEnemyStates(len(meta_rows))
     i = 0
     while i < len(meta_rows):
-        state = {}
-        _reset_enemy_state(state, meta_rows[i])
-        out.append(state)
+        _reset_enemy_state(out[i], meta_rows[i])
         i += 1
     return out
 
@@ -1094,6 +1318,51 @@ def _pick_swappable_enemy_index(enemy_rows, player_x, player_y, player_w, player
     return best_i
 
 
+def _pick_swappable_bullet_index(enemy_bullets, player_x, player_y, player_w, player_h, pick_far, camera_x, band_top, view_w, view_h):
+    if not enemy_bullets:
+        return -1
+    best_i = -1
+    best_d2 = -1
+    bi = 0
+    while bi < len(enemy_bullets):
+        bx, by, _vx, _vy, bw, bh, active = enemy_bullets[bi][0:7]
+        if active:
+            sx0 = int(bx) - int(camera_x)
+            sy0 = int(by) - int(band_top)
+            sx1 = sx0 + int(bw)
+            sy1 = sy0 + int(bh)
+            in_view = (sx0 < view_w and sx1 > 0 and sy0 < view_h and sy1 > 0)
+            if in_view:
+                d2 = _target_distance2(bx, by, bw, bh, player_x, player_y, player_w, player_h)
+                if best_i < 0:
+                    best_i = bi
+                    best_d2 = d2
+                elif pick_far:
+                    if d2 > best_d2:
+                        best_i = bi
+                        best_d2 = d2
+                elif d2 < best_d2:
+                    best_i = bi
+                    best_d2 = d2
+        bi += 1
+    return best_i
+
+
+def _pick_enemy_hit_by_bullet(enemy_rows, enemy_states, bx, by, bw, bh, ignore_enemy_i=-1):
+    if not enemy_rows:
+        return -1
+    ei = 0
+    while ei < len(enemy_rows):
+        row = enemy_rows[ei]
+        state = enemy_states[ei] if ei < len(enemy_states) else None
+        if state is not None and ei != int(ignore_enemy_i):
+            ex, ey, ew, eh, visible, _swappable = row
+            if visible and bx < (ex + ew) and (bx + bw) > ex and by < (ey + eh) and (by + bh) > ey:
+                return ei
+        ei += 1
+    return -1
+
+
 def _enemy_has_support_ahead(tilemap_idx, tilemap_w, tilemap_h, tile_size, object_solids, wx, wy, ow, oh, direction, step_px):
     step = int(step_px)
     if step < 1:
@@ -1128,7 +1397,21 @@ def _pick_enemy_frame_rect(enemy_state, anim_counter, facing, frame_w, frame_h, 
     return src_x, src_y, frame_w, frame_h
 
 
-def _pack_enemy_render_descriptors(enemy_rows, enemy_states):
+def _aabb_near_view(wx, wy, w, h, camera_x, view_w, view_h, margin_x=0, margin_y=0):
+    if w <= 0 or h <= 0 or view_w <= 0 or view_h <= 0:
+        return False
+    left = int(wx)
+    top = int(wy)
+    right = left + int(w)
+    bottom = top + int(h)
+    view_left = int(camera_x) - int(margin_x)
+    view_top = -int(margin_y)
+    view_right = int(camera_x) + int(view_w) + int(margin_x)
+    view_bottom = int(view_h) + int(margin_y)
+    return left < view_right and right > view_left and top < view_bottom and bottom > view_top
+
+
+def _pack_enemy_render_descriptors(enemy_rows, enemy_states, camera_x=0, view_w=320, view_h=240, margin_x=48, margin_y=32):
     if not enemy_rows or not enemy_states:
         return bytearray(), 8, 0
     out = bytearray()
@@ -1138,8 +1421,8 @@ def _pack_enemy_render_descriptors(enemy_rows, enemy_states):
         row = enemy_rows[ei]
         state = enemy_states[ei] if ei < len(enemy_states) else None
         if state is not None:
-            wx, wy, _ow, _oh, visible, _swappable = row
-            if visible:
+            wx, wy, ow, oh, visible, _swappable = row
+            if visible and _aabb_near_view(wx, wy, ow, oh, camera_x, view_w, view_h, margin_x, margin_y):
                 _append_i16_le(out, wx)
                 _append_i16_le(out, wy)
                 _append_u16_le(out, int(state.get("anim_counter", 0) or 0))
@@ -1167,9 +1450,45 @@ def _make_solid_sprite_rgb565(sprite_w, sprite_h, color565, wire_order=False):
     return out
 
 
-def _spawn_enemy_bullet(enemy_bullets, max_bullets, bullet_x, bullet_y, vel_x, vel_y, bullet_w, bullet_h):
+def _lift_black_pixels_rgb565(sprite_buf, transparent_key, replacement_color):
+    if sprite_buf is None:
+        return None
+    src = sprite_buf
+    if isinstance(src, bytearray):
+        out = bytearray(src)
+    else:
+        out = bytearray(bytes(src))
+    key = int(transparent_key) & 0xFFFF
+    repl = int(replacement_color) & 0xFFFF
+    i = 0
+    changed = 0
+    while i + 1 < len(out):
+        px = out[i] | (out[i + 1] << 8)
+        if px != key and px == 0x0000:
+            out[i] = repl & 0xFF
+            out[i + 1] = (repl >> 8) & 0xFF
+            changed += 1
+        i += 2
+    if changed <= 0:
+        return sprite_buf
+    return bytes(out)
+
+
+def _spawn_enemy_bullet(enemy_bullets, max_bullets, bullet_x, bullet_y, vel_x, vel_y, bullet_w, bullet_h, shooter_enemy_i=-1):
     if enemy_bullets is None or max_bullets <= 0 or bullet_w <= 0 or bullet_h <= 0:
         return False
+    _bullet_debug(
+        "BULLET_SPAWN",
+        "x=%d y=%d vx=%d vy=%d w=%d h=%d owner=%d" % (
+            int(bullet_x),
+            int(bullet_y),
+            int(vel_x),
+            int(vel_y),
+            int(bullet_w),
+            int(bullet_h),
+            int(shooter_enemy_i),
+        ),
+    )
     i = 0
     while i < len(enemy_bullets):
         row = enemy_bullets[i]
@@ -1181,18 +1500,67 @@ def _spawn_enemy_bullet(enemy_bullets, max_bullets, bullet_x, bullet_y, vel_x, v
             row[4] = int(bullet_w)
             row[5] = int(bullet_h)
             row[6] = 1
+            row[7] = int(shooter_enemy_i)
             return True
         i += 1
     if len(enemy_bullets) >= max_bullets:
         return False
-    enemy_bullets.append([int(bullet_x), int(bullet_y), int(vel_x), int(vel_y), int(bullet_w), int(bullet_h), 1])
+    if hasattr(enemy_bullets, "append_row"):
+        enemy_bullets.append_row([
+            int(bullet_x),
+            int(bullet_y),
+            int(vel_x),
+            int(vel_y),
+            int(bullet_w),
+            int(bullet_h),
+            1,
+            int(shooter_enemy_i),
+        ])
+    else:
+        enemy_bullets.append([int(bullet_x), int(bullet_y), int(vel_x), int(vel_y), int(bullet_w), int(bullet_h), 1, int(shooter_enemy_i)])
     return True
+
+
+def _find_enemy_bullet_spawn_y(
+    desired_y,
+    fallback_y,
+    bullet_x,
+    bullet_w,
+    bullet_h,
+    tilemap_idx,
+    tilemap_w,
+    tilemap_h,
+    tile_size,
+    object_solids,
+):
+    probe_y = int(desired_y)
+    floor_y = int(fallback_y)
+    if probe_y < floor_y:
+        floor_y = probe_y
+    while probe_y >= floor_y:
+        if not _aabb_collides_world(
+            int(bullet_x),
+            probe_y,
+            int(bullet_w),
+            int(bullet_h),
+            tilemap_idx,
+            tilemap_w,
+            tilemap_h,
+            tile_size,
+            object_solids,
+        ):
+            return probe_y
+        probe_y -= 1
+    return int(fallback_y)
 
 
 def _clear_enemy_bullets(enemy_bullets):
     if enemy_bullets is None:
         return
-    enemy_bullets[:] = []
+    if hasattr(enemy_bullets, "clear"):
+        enemy_bullets.clear()
+    else:
+        enemy_bullets[:] = []
 
 
 def _render_enemies_into_scene(
@@ -1253,12 +1621,26 @@ def _render_enemies_into_scene(
         ei += 1
 
 
-def _render_enemy_bullets_into_scene(scene_buf, scene_w, scene_h, camera_x, band_top, enemy_bullets, bullet_color):
+def _render_enemy_bullets_into_scene(
+    scene_buf,
+    scene_w,
+    scene_h,
+    camera_x,
+    band_top,
+    enemy_bullets,
+    bullet_frame_right,
+    bullet_frame_left,
+    bullet_w,
+    bullet_h,
+    submit_wire_order,
+    submit_wire_runtime_swap,
+    bullet_color,
+):
     if not enemy_bullets:
         return
     bi = 0
     while bi < len(enemy_bullets):
-        bx, by, _vx, _vy, bw, bh, active = enemy_bullets[bi]
+        bx, by, _vx, _vy, bw, bh, active = enemy_bullets[bi][0:7]
         if active:
             clip = _clip_rect_screen_xywh(int(bx) - int(camera_x), int(by) - int(band_top), int(bw), int(bh), scene_w, scene_h)
             if clip is not None:
@@ -1297,6 +1679,12 @@ def _update_enemies_and_bullets(
     fall_speed_max,
     map_w_px,
     map_h_px,
+    camera_x=0,
+    screen_w=320,
+    screen_h=240,
+    enemy_update_margin_x=160,
+    enemy_update_margin_y=80,
+    enemy_bullet_cull_margin=32,
 ):
     if (not enemy_rows) or (not enemy_states) or tilemap_idx is None or tilemap_w <= 0 or tilemap_h <= 0:
         return player_y, vel_y
@@ -1319,12 +1707,17 @@ def _update_enemies_and_bullets(
                 facing_enemy = 1 if int(state.get("facing", 1)) >= 0 else -1
                 vel_enemy_y = int(state.get("vel_y", 0))
                 shoot_cooldown = int(state.get("shoot_cooldown", 0))
-                if shoot_cooldown > 0:
-                    shoot_cooldown -= 1
                 enemy_center_x = int(wx) + (int(ew) // 2)
                 enemy_center_y = int(wy) + (int(eh) // 2)
                 dx_to_player = player_center_x_enemy - enemy_center_x
                 dy_to_player = player_center_y_enemy - enemy_center_y
+                near_player_x = dx_to_player <= (enemy_detect_x + enemy_update_margin_x) if dx_to_player >= 0 else (-dx_to_player) <= (enemy_detect_x + enemy_update_margin_x)
+                near_player_y = dy_to_player <= (enemy_detect_y + enemy_update_margin_y) if dy_to_player >= 0 else (-dy_to_player) <= (enemy_detect_y + enemy_update_margin_y)
+                if not (_aabb_near_view(wx, wy, ew, eh, camera_x, screen_w, screen_h, enemy_update_margin_x, enemy_update_margin_y) or (near_player_x and near_player_y)):
+                    ei += 1
+                    continue
+                if shoot_cooldown > 0:
+                    shoot_cooldown -= 1
                 detect_player = False
                 if dx_to_player < 0:
                     detect_player = (-dx_to_player) <= enemy_detect_x
@@ -1452,7 +1845,19 @@ def _update_enemies_and_bullets(
                                 bullet_x = int(row[0]) + int(ew)
                             else:
                                 bullet_x = int(row[0]) - enemy_bullet_w
-                            bullet_y = int(row[1]) + (int(eh) // 2) - (enemy_bullet_h // 2)
+                            bullet_base_y = int(row[1]) + (int(eh) // 2) - (enemy_bullet_h // 2)
+                            bullet_y = _find_enemy_bullet_spawn_y(
+                                bullet_base_y + 16,
+                                bullet_base_y,
+                                bullet_x,
+                                enemy_bullet_w,
+                                enemy_bullet_h,
+                                tilemap_idx,
+                                tilemap_w,
+                                tilemap_h,
+                                tile_size,
+                                object_solids,
+                            )
                             _spawn_enemy_bullet(
                                 enemy_bullets,
                                 enemy_max_bullets,
@@ -1462,6 +1867,7 @@ def _update_enemies_and_bullets(
                                 0,
                                 enemy_bullet_w,
                                 enemy_bullet_h,
+                                ei,
                             )
                             state["shot_fired"] = 1
                         if int(state.get("anim_counter", 0)) >= shoot_anim_total:
@@ -1482,13 +1888,30 @@ def _update_enemies_and_bullets(
             by = int(bullet[1]) + int(bullet[3])
             bw = int(bullet[4])
             bh = int(bullet[5])
+            shooter_enemy_i = int(bullet[7]) if len(bullet) > 7 else -1
             active = 1
             if (bx + bw) < 0 or bx > map_w_px or by > (map_h_px + death_margin):
                 active = 0
+                _bullet_debug("BULLET_CULL", "oob x=%d y=%d w=%d h=%d" % (bx, by, bw, bh))
+            elif not _aabb_near_view(bx, by, bw, bh, camera_x, screen_w, screen_h, enemy_bullet_cull_margin, enemy_bullet_cull_margin):
+                active = 0
+                _bullet_debug("BULLET_CULL", "view x=%d y=%d cam=%d screen=%d,%d" % (bx, by, int(camera_x), int(screen_w), int(screen_h)))
             elif _aabb_collides_world(bx, by, bw, bh, tilemap_idx, tilemap_w, tilemap_h, tile_size, object_solids):
                 active = 0
-            elif player_x < (bx + bw) and (player_x + player_w) > bx and player_y < (by + bh) and (player_y + player_h) > by:
+                _bullet_debug("BULLET_CULL", "world x=%d y=%d" % (bx, by))
+            else:
+                hit_enemy_i = _pick_enemy_hit_by_bullet(enemy_rows, enemy_states, bx, by, bw, bh, shooter_enemy_i)
+                if hit_enemy_i >= 0:
+                    active = 0
+                    _bullet_debug("BULLET_HIT", "enemy idx=%d x=%d y=%d" % (int(hit_enemy_i), bx, by))
+                    enemy_row = enemy_rows[hit_enemy_i]
+                    enemy_row[4] = 0
+                    hit_state = enemy_states[hit_enemy_i] if hit_enemy_i < len(enemy_states) else None
+                    if hit_state is not None:
+                        _reset_enemy_state(hit_state, enemy_meta[hit_enemy_i] if hit_enemy_i < len(enemy_meta) else None)
+            if active and player_x < (bx + bw) and (player_x + player_w) > bx and player_y < (by + bh) and (player_y + player_h) > by:
                 active = 0
+                _bullet_debug("BULLET_HIT", "player x=%d y=%d" % (bx, by))
                 player_y = map_h_px + death_margin + 1
                 vel_y = 0
             if active:
@@ -1497,7 +1920,113 @@ def _update_enemies_and_bullets(
             else:
                 bullet[6] = 0
         bi += 1
+    _bullet_debug_active(enemy_bullets, camera_x, screen_w, screen_h)
     return player_y, vel_y
+
+
+def _update_enemies_and_bullets_native(
+    enemy_rows,
+    enemy_meta,
+    enemy_states,
+    enemy_bullets,
+    enemy_rows_c_buf,
+    enemy_rows_c_stride,
+    enemy_rows_c_count,
+    object_solids_c_buf,
+    object_solids_c_stride,
+    object_solids_c_count,
+    player_x,
+    player_y,
+    player_w,
+    player_h,
+    vel_y,
+    tilemap_idx,
+    tilemap_w,
+    tilemap_h,
+    tile_size,
+    death_margin,
+    enemy_detect_x,
+    enemy_flee_x,
+    enemy_detect_y,
+    enemy_move_speed,
+    enemy_gravity_step,
+    enemy_frame_hold,
+    enemy_shoot_fire_frame,
+    enemy_bullet_speed,
+    enemy_bullet_w,
+    enemy_bullet_h,
+    enemy_shoot_interval,
+    fall_speed_max,
+    map_w_px,
+    map_h_px,
+    camera_x=0,
+    screen_w=320,
+    screen_h=240,
+    enemy_update_margin_x=160,
+    enemy_update_margin_y=80,
+    enemy_bullet_cull_margin=32,
+):
+    global _enemy_native_update_disabled
+    if _enemy_native_update_disabled:
+        return None
+    if _lgfx is None or not hasattr(_lgfx, 'update_enemies_native'):
+        return None
+    if (not enemy_rows) or (not enemy_states) or tilemap_idx is None or tilemap_w <= 0 or tilemap_h <= 0:
+        return None
+    if enemy_rows_c_buf is None or enemy_rows_c_count <= 0:
+        return None
+    if not hasattr(enemy_states, '_buf') or not hasattr(enemy_bullets, '_buf'):
+        return None
+    try:
+        out = _lgfx.update_enemies_native(
+            enemy_rows_c_buf,
+            enemy_rows_c_stride,
+            enemy_states._buf,
+            _ENEMY_STATE_STRIDE,
+            enemy_rows_c_count,
+            enemy_bullets._buf,
+            _BULLET_STATE_STRIDE,
+            len(enemy_bullets),
+            player_x,
+            player_y,
+            player_w,
+            player_h,
+            vel_y,
+            tilemap_idx,
+            tilemap_w,
+            tilemap_h,
+            tile_size,
+            object_solids_c_buf,
+            object_solids_c_stride,
+            object_solids_c_count,
+            death_margin,
+            enemy_detect_x,
+            enemy_flee_x,
+            enemy_detect_y,
+            enemy_move_speed,
+            enemy_gravity_step,
+            enemy_frame_hold,
+            enemy_shoot_fire_frame,
+            enemy_bullet_speed,
+            enemy_bullet_w,
+            enemy_bullet_h,
+            enemy_shoot_interval,
+            fall_speed_max,
+            map_w_px,
+            map_h_px,
+            camera_x,
+            screen_w,
+            screen_h,
+            enemy_update_margin_x,
+            enemy_update_margin_y,
+            enemy_bullet_cull_margin,
+        )
+        _sync_enemy_rows_from_c(enemy_rows, enemy_rows_c_buf, enemy_rows_c_stride)
+        return int(out[0]), int(out[1])
+    except Exception as e:
+        _enemy_native_update_disabled = True
+        print('ENEMY_UPDATE_NATIVE_FALLBACK %s' % e)
+        return None
 
 
 def _perform_world_swap(
@@ -1507,6 +2036,7 @@ def _perform_world_swap(
     objects_meta,
     enemy_rows,
     enemy_states,
+    enemy_bullets,
     player_x,
     player_y,
     player_w,
@@ -1521,11 +2051,12 @@ def _perform_world_swap(
     objects_c_buf,
     objects_c_stride,
 ):
-    if not swap_triggered or (not objects_rows and not enemy_rows):
+    if not swap_triggered or (not objects_rows and not enemy_rows and not enemy_bullets):
         return player_x, player_y, vel_y, _rebuild_object_solids(objects_rows)
 
     object_ti = -1
     enemy_ti = -1
+    bullet_ti = -1
     if objects_rows:
         object_ti = _pick_swappable_object_index(
             objects_rows,
@@ -1552,34 +2083,43 @@ def _perform_world_swap(
             view_w,
             view_h,
         )
+    if enemy_bullets:
+        bullet_ti = _pick_swappable_bullet_index(
+            enemy_bullets,
+            player_x,
+            player_y,
+            player_w,
+            player_h,
+            swap_pick_far,
+            camera_x,
+            band_top,
+            view_w,
+            view_h,
+        )
 
     target_kind = None
     ti = -1
-    if object_ti >= 0 and enemy_ti >= 0:
-        object_row = objects_rows[object_ti]
-        enemy_row = enemy_rows[enemy_ti]
-        object_d2 = _target_distance2(object_row[0], object_row[1], object_row[2], object_row[3], player_x, player_y, player_w, player_h)
-        enemy_d2 = _target_distance2(enemy_row[0], enemy_row[1], enemy_row[2], enemy_row[3], player_x, player_y, player_w, player_h)
-        if swap_pick_far:
-            if enemy_d2 > object_d2:
-                target_kind = "enemy"
-                ti = enemy_ti
-            else:
-                target_kind = "object"
-                ti = object_ti
-        else:
-            if enemy_d2 < object_d2:
-                target_kind = "enemy"
-                ti = enemy_ti
-            else:
-                target_kind = "object"
-                ti = object_ti
-    elif object_ti >= 0:
+    if object_ti >= 0:
+        row = objects_rows[object_ti]
         target_kind = "object"
         ti = object_ti
-    elif enemy_ti >= 0:
-        target_kind = "enemy"
-        ti = enemy_ti
+        best_d2 = _target_distance2(row[0], row[1], row[2], row[3], player_x, player_y, player_w, player_h)
+    else:
+        best_d2 = -1
+    if enemy_ti >= 0:
+        row = enemy_rows[enemy_ti]
+        d2 = _target_distance2(row[0], row[1], row[2], row[3], player_x, player_y, player_w, player_h)
+        if ti < 0 or (swap_pick_far and d2 > best_d2) or ((not swap_pick_far) and d2 < best_d2):
+            target_kind = "enemy"
+            ti = enemy_ti
+            best_d2 = d2
+    if bullet_ti >= 0:
+        row = enemy_bullets[bullet_ti]
+        d2 = _target_distance2(row[0], row[1], row[4], row[5], player_x, player_y, player_w, player_h)
+        if ti < 0 or (swap_pick_far and d2 > best_d2) or ((not swap_pick_far) and d2 < best_d2):
+            target_kind = "bullet"
+            ti = bullet_ti
+            best_d2 = d2
 
     object_solids = _rebuild_object_solids(objects_rows)
     if target_kind == "object" and ti >= 0:
@@ -1629,10 +2169,41 @@ def _perform_world_swap(
         vel_y = 0
         if state is not None:
             state["vel_y"] = 0
+        if enemy_bullets:
+            bi = 0
+            while bi < len(enemy_bullets):
+                bullet = enemy_bullets[bi]
+                if len(bullet) > 7 and int(bullet[7]) == int(ti):
+                    bullet[7] = -1
+                bi += 1
         if swap_pick_far:
             print("SWAP_FAR_OK_ENEMY idx=%d px=%d py=%d" % (ti, player_x, player_y))
         else:
             print("SWAP_NEAR_OK_ENEMY idx=%d px=%d py=%d" % (ti, player_x, player_y))
+    elif target_kind == "bullet" and ti >= 0:
+        row = enemy_bullets[ti]
+        old_px = player_x
+        old_py = player_y
+        old_bx = int(row[0])
+        old_by = int(row[1])
+        bullet_w = int(row[4])
+        bullet_h = int(row[5])
+        player_x = old_bx + ((bullet_w - player_w) // 2)
+        player_y = old_by + (bullet_h - player_h)
+        row[0] = int(old_px + ((player_w - bullet_w) // 2))
+        row[1] = int(old_py + (player_h - bullet_h))
+        max_player_y_swap = map_h_px - player_h
+        if max_player_y_swap < 0:
+            max_player_y_swap = 0
+        player_x = _clamp(player_x, 0, max_player_x)
+        player_y = _clamp(player_y, 0, max_player_y_swap)
+        vel_y = 0
+        if len(row) > 7:
+            row[7] = -1
+        if swap_pick_far:
+            print("SWAP_FAR_OK_BULLET idx=%d px=%d py=%d" % (ti, player_x, player_y))
+        else:
+            print("SWAP_NEAR_OK_BULLET idx=%d px=%d py=%d" % (ti, player_x, player_y))
     else:
         print("SWAP_FAIL_NO_TARGET_V2")
     return player_x, player_y, vel_y, object_solids
@@ -1640,6 +2211,121 @@ def _perform_world_swap(
 
 def _is_special_render_object(meta):
     return bool(meta and meta.get("special_render"))
+
+def _pack_enemy_rows_for_c(rows, meta_rows=None):
+    if not rows:
+        return bytearray(), _ENEMY_ROW_STRIDE, 0
+    out = bytearray(len(rows) * _ENEMY_ROW_STRIDE)
+    oi = 0
+    bi = 0
+    while oi < len(rows):
+        wx, wy, ow, oh, visible, swappable = rows[oi]
+        meta = meta_rows[oi] if (meta_rows is not None and oi < len(meta_rows)) else None
+        default_facing = 1
+        if meta is not None:
+            mf = str(meta.get("facing", "R") or "R").upper()
+            default_facing = 1 if mf != "L" else -1
+        _buf_set_i16_le(out, bi + 0, wx)
+        _buf_set_i16_le(out, bi + 2, wy)
+        _buf_set_i16_le(out, bi + 4, ow)
+        _buf_set_i16_le(out, bi + 6, oh)
+        out[bi + 8] = 1 if int(visible) else 0
+        out[bi + 9] = 1 if int(swappable) else 0
+        out[bi + 10] = 1 if default_facing >= 0 else 0
+        out[bi + 11] = 0
+        bi += _ENEMY_ROW_STRIDE
+        oi += 1
+    return out, _ENEMY_ROW_STRIDE, len(rows)
+
+
+def _sync_enemy_rows_from_c(rows, enemy_rows_c_buf, enemy_rows_c_stride):
+    if not rows or enemy_rows_c_buf is None or enemy_rows_c_stride < _ENEMY_ROW_STRIDE:
+        return
+    limit = len(enemy_rows_c_buf) // int(enemy_rows_c_stride)
+    if len(rows) < limit:
+        limit = len(rows)
+    i = 0
+    while i < limit:
+        base = i * int(enemy_rows_c_stride)
+        row = rows[i]
+        row[0] = _buf_get_i16_le(enemy_rows_c_buf, base + 0)
+        row[1] = _buf_get_i16_le(enemy_rows_c_buf, base + 2)
+        row[2] = _buf_get_i16_le(enemy_rows_c_buf, base + 4)
+        row[3] = _buf_get_i16_le(enemy_rows_c_buf, base + 6)
+        row[4] = 1 if enemy_rows_c_buf[base + 8] else 0
+        row[5] = 1 if enemy_rows_c_buf[base + 9] else 0
+        i += 1
+
+
+def _sync_enemy_rows_c_from_rows(enemy_rows_c_buf, enemy_rows_c_stride, rows, meta_rows=None):
+    if enemy_rows_c_buf is None or enemy_rows_c_stride < _ENEMY_ROW_STRIDE or not rows:
+        return 0
+    limit = len(enemy_rows_c_buf) // int(enemy_rows_c_stride)
+    if len(rows) < limit:
+        limit = len(rows)
+    oi = 0
+    while oi < limit:
+        base = oi * int(enemy_rows_c_stride)
+        wx, wy, ow, oh, visible, swappable = rows[oi]
+        meta = meta_rows[oi] if (meta_rows is not None and oi < len(meta_rows)) else None
+        default_facing = 1
+        if meta is not None:
+            mf = str(meta.get("facing", "R") or "R").upper()
+            default_facing = 1 if mf != "L" else -1
+        _buf_set_i16_le(enemy_rows_c_buf, base + 0, wx)
+        _buf_set_i16_le(enemy_rows_c_buf, base + 2, wy)
+        _buf_set_i16_le(enemy_rows_c_buf, base + 4, ow)
+        _buf_set_i16_le(enemy_rows_c_buf, base + 6, oh)
+        enemy_rows_c_buf[base + 8] = 1 if int(visible) else 0
+        enemy_rows_c_buf[base + 9] = 1 if int(swappable) else 0
+        enemy_rows_c_buf[base + 10] = 1 if default_facing >= 0 else 0
+        enemy_rows_c_buf[base + 11] = 0
+        oi += 1
+    return limit
+
+
+def _pack_object_solids_for_c(object_solids):
+    if not object_solids:
+        return bytearray(), _OBJECT_SOLID_STRIDE, 0
+    out = bytearray(len(object_solids) * _OBJECT_SOLID_STRIDE)
+    i = 0
+    bi = 0
+    while i < len(object_solids):
+        ox, oy, ow, oh = object_solids[i]
+        _buf_set_i16_le(out, bi + 0, ox)
+        _buf_set_i16_le(out, bi + 2, oy)
+        _buf_set_i16_le(out, bi + 4, ow)
+        _buf_set_i16_le(out, bi + 6, oh)
+        bi += _OBJECT_SOLID_STRIDE
+        i += 1
+    return out, _OBJECT_SOLID_STRIDE, len(object_solids)
+
+
+def _sync_object_solids_c_from_list(object_solids_c_buf, object_solids_c_stride, object_solids):
+    if object_solids_c_buf is None or object_solids_c_stride < _OBJECT_SOLID_STRIDE:
+        return 0
+    limit = len(object_solids_c_buf) // int(object_solids_c_stride)
+    src_count = 0 if not object_solids else len(object_solids)
+    if src_count < limit:
+        limit = src_count
+    i = 0
+    while i < limit:
+        base = i * int(object_solids_c_stride)
+        ox, oy, ow, oh = object_solids[i]
+        _buf_set_i16_le(object_solids_c_buf, base + 0, ox)
+        _buf_set_i16_le(object_solids_c_buf, base + 2, oy)
+        _buf_set_i16_le(object_solids_c_buf, base + 4, ow)
+        _buf_set_i16_le(object_solids_c_buf, base + 6, oh)
+        i += 1
+    while i < (len(object_solids_c_buf) // int(object_solids_c_stride)):
+        base = i * int(object_solids_c_stride)
+        _buf_set_i16_le(object_solids_c_buf, base + 0, 0)
+        _buf_set_i16_le(object_solids_c_buf, base + 2, 0)
+        _buf_set_i16_le(object_solids_c_buf, base + 4, 0)
+        _buf_set_i16_le(object_solids_c_buf, base + 6, 0)
+        i += 1
+    return src_count
+
 
 def _pack_objects_for_c(rows, meta_rows=None):
     if not rows:
@@ -2000,9 +2686,14 @@ def _pack_special_render_overlays(
     anchor_anim_spec,
     anchor_anim_counter,
     enemy_bullets=None,
-    bullet_frame=None,
+    bullet_frame_right=None,
+    bullet_frame_left=None,
     bullet_w=0,
     bullet_h=0,
+    camera_x=0,
+    view_w=320,
+    view_h=240,
+    bullet_margin=32,
 ):
     overlay_desc = bytearray()
     overlay_frames = []
@@ -2038,19 +2729,50 @@ def _pack_special_render_overlays(
             _append_u16_le(overlay_desc, frame_h)
             _append_u16_le(overlay_desc, frame_index)
             overlay_count += 1
-    if enemy_bullets and bullet_frame is not None and bullet_w > 0 and bullet_h > 0:
-        bullet_frame_index = len(overlay_frames)
-        overlay_frames.append(bullet_frame)
+    bullet_frame_right_index = -1
+    bullet_frame_left_index = -1
+    if enemy_bullets and bullet_w > 0 and bullet_h > 0:
+        if bullet_frame_right is not None:
+            bullet_frame_right_index = len(overlay_frames)
+            overlay_frames.append(bullet_frame_right)
+        if bullet_frame_left is not None:
+            bullet_frame_left_index = len(overlay_frames)
+            overlay_frames.append(bullet_frame_left)
         bi = 0
         while bi < len(enemy_bullets):
-            bx, by, _vx, _vy, _bw, _bh, active = enemy_bullets[bi]
-            if active:
+            bx, by, vx, _vy, bw, bh, active = enemy_bullets[bi][0:7]
+            if active and _aabb_near_view(bx, by, bw, bh, camera_x, view_w, view_h, bullet_margin, bullet_margin):
+                frame_index = bullet_frame_right_index
+                if int(vx) < 0 and bullet_frame_left_index >= 0:
+                    frame_index = bullet_frame_left_index
+                elif int(vx) >= 0 and bullet_frame_right_index < 0:
+                    frame_index = bullet_frame_left_index
+                elif int(vx) < 0 and bullet_frame_left_index < 0:
+                    frame_index = bullet_frame_right_index
+                if frame_index < 0:
+                    bi += 1
+                    continue
                 _append_i16_le(overlay_desc, bx)
                 _append_i16_le(overlay_desc, by)
                 _append_u16_le(overlay_desc, bullet_w)
                 _append_u16_le(overlay_desc, bullet_h)
-                _append_u16_le(overlay_desc, bullet_frame_index)
+                _append_u16_le(overlay_desc, frame_index)
                 overlay_count += 1
+                if overlay_count <= 3:
+                    _bullet_debug(
+                        "BULLET_OVERLAY",
+                        "wx=%d wy=%d sx=%d sy=%d vx=%d frame=%d cam=%d view=%d,%d" % (
+                            int(bx),
+                            int(by),
+                            int(bx) - int(camera_x),
+                            int(by),
+                            int(vx),
+                            int(frame_index),
+                            int(camera_x),
+                            int(view_w),
+                            int(view_h),
+                        ),
+                    )
             bi += 1
     return overlay_desc, overlay_stride, overlay_count, tuple(overlay_frames)
 
@@ -2147,6 +2869,26 @@ def _load_tileset_rgb565(path, tile_size=16, atlas_w=64, atlas_h=64):
                 di += tile_size * 2
             tiles.append(bytes(buf))
     return tiles
+
+
+def _extract_rgb565_region(atlas_buf, atlas_w, atlas_h, src_x, src_y, src_w, src_h):
+    if atlas_buf is None:
+        return None
+    if src_x < 0 or src_y < 0 or src_w <= 0 or src_h <= 0:
+        return None
+    if (src_x + src_w) > atlas_w or (src_y + src_h) > atlas_h:
+        return None
+    out = bytearray(src_w * src_h * 2)
+    di = 0
+    row_bytes = atlas_w * 2
+    copy_bytes = src_w * 2
+    y = 0
+    while y < src_h:
+        so = ((src_y + y) * row_bytes) + (src_x * 2)
+        out[di:di + copy_bytes] = atlas_buf[so:so + copy_bytes]
+        di += copy_bytes
+        y += 1
+    return bytes(out)
 
 def _blit_tile_to_scene(scene_buf, scene_w, scene_h, dx, dy, tile_buf, tile_size=16):
     if tile_buf is None:
@@ -3951,8 +4693,12 @@ def run(max_frames=None):
             objects_c_stride = 12
             objects_c_count = 0
             object_solids = []
+            object_solids_c_buf = bytearray()
+            object_solids_c_stride = _OBJECT_SOLID_STRIDE
+            object_solids_c_count = 0
             if objects_rows and objects_atlas is not None:
                 object_solids = _rebuild_object_solids(objects_rows)
+                object_solids_c_buf, object_solids_c_stride, object_solids_c_count = _pack_object_solids_for_c(object_solids)
                 objects_c_buf, objects_c_stride, objects_c_count = _pack_objects_for_c(objects_rows, objects_meta)
                 print("OBJECT_MODE_ON")
                 print("OBJECT_COUNT=%d" % len(objects_rows))
@@ -3963,6 +4709,9 @@ def run(max_frames=None):
                 objects_rows = []
                 objects_meta = []
                 objects_atlas = None
+                object_solids_c_buf = bytearray()
+                object_solids_c_stride = _OBJECT_SOLID_STRIDE
+                object_solids_c_count = 0
                 print("OBJECT_MODE_OFF")
             enemy_csv_path = _resolve_asset_path(getattr(config, "ENEMY_CSV_PATH", "game/picture/enemy/enemies.csv"))
             enemy_sheet_path = _resolve_asset_path(
@@ -3995,17 +4744,35 @@ def run(max_frames=None):
             enemy_bullet_speed = int(getattr(config, "ENEMY_BULLET_SPEED", 3))
             if enemy_bullet_speed < 1:
                 enemy_bullet_speed = 1
-            enemy_max_bullets = int(getattr(config, "ENEMY_MAX_BULLETS", 8))
+            enemy_max_bullets = int(getattr(config, "ENEMY_MAX_BULLETS", 4))
             if enemy_max_bullets < 1:
-                enemy_max_bullets = 8
+                enemy_max_bullets = 4
+            enemy_update_margin_x = int(getattr(config, "ENEMY_UPDATE_MARGIN_X", 160))
+            if enemy_update_margin_x < 0:
+                enemy_update_margin_x = 0
+            enemy_update_margin_y = int(getattr(config, "ENEMY_UPDATE_MARGIN_Y", 80))
+            if enemy_update_margin_y < 0:
+                enemy_update_margin_y = 0
+            enemy_render_margin_x = int(getattr(config, "ENEMY_RENDER_MARGIN_X", 48))
+            if enemy_render_margin_x < 0:
+                enemy_render_margin_x = 0
+            enemy_render_margin_y = int(getattr(config, "ENEMY_RENDER_MARGIN_Y", 32))
+            if enemy_render_margin_y < 0:
+                enemy_render_margin_y = 0
+            enemy_bullet_cull_margin = int(getattr(config, "ENEMY_BULLET_CULL_MARGIN", 32))
+            if enemy_bullet_cull_margin < 0:
+                enemy_bullet_cull_margin = 0
             enemy_bullet_color = int(getattr(config, "COLOR_BULLET", 0xFFFF)) & 0xFFFF
             enemy_rows, enemy_meta = _load_enemies_rows_and_meta(enemy_csv_path)
             enemy_rows_initial = _clone_enemy_rows(enemy_rows)
+            enemy_rows_c_buf, enemy_rows_c_stride, enemy_rows_c_count = _pack_enemy_rows_for_c(enemy_rows, enemy_meta)
             enemy_states = _build_enemy_states(enemy_meta)
             enemy_sheet = None
             if enemy_sheet_w > 0 and enemy_sheet_h > 0:
                 enemy_sheet = _load_rgb565_blob(enemy_sheet_path, enemy_sheet_w * enemy_sheet_h * 2)
-            enemy_bullets = []
+            enemy_bullets = _PackedEnemyBullets()
+            enemy_bullets.ensure_capacity(enemy_max_bullets)
+            enemy_update_native_ready = bool(_lgfx is not None and hasattr(_lgfx, 'update_enemies_native'))
             enemy_render_enabled = bool(
                 enemy_rows and enemy_states and enemy_sheet is not None and enemy_frame_w > 0 and enemy_frame_h > 0
             )
@@ -4013,6 +4780,7 @@ def run(max_frames=None):
                 print("ENEMY_MODE_ON")
                 print("ENEMY_COUNT=%d" % len(enemy_rows))
                 print("ENEMY_RENDER_READY=%d" % (1 if enemy_render_enabled else 0))
+                print("ENEMY_UPDATE_IMPL=%s" % ("C_API" if enemy_update_native_ready else "PYTHON"))
             else:
                 print("ENEMY_MODE_OFF")
             checkpoint_index = -1
@@ -4188,14 +4956,67 @@ def run(max_frames=None):
                 elif not submit_async_cfg:
                     print("SUBMIT_FALLBACK_REASON=CFG_OFF")
 
-            enemy_bullet_sprite = None
-            if enemy_bullet_w > 0 and enemy_bullet_h > 0:
-                enemy_bullet_sprite = _make_solid_sprite_rgb565(
+            enemy_bullet_src_x = int(getattr(config, "ENEMY_BULLET_SRC_X", 240))
+            enemy_bullet_src_y_right = int(getattr(config, "ENEMY_BULLET_SRC_Y_RIGHT", 0))
+            enemy_bullet_src_y_left = int(getattr(config, "ENEMY_BULLET_SRC_Y_LEFT", enemy_bullet_h))
+            enemy_bullet_sprite_right = None
+            enemy_bullet_sprite_left = None
+            enemy_bullet_native_sprite_right = None
+            enemy_bullet_native_sprite_left = None
+            if enemy_bullet_w > 0 and enemy_bullet_h > 0 and objects_atlas is not None:
+                enemy_bullet_sprite_right = _extract_rgb565_region(
+                    objects_atlas,
+                    objects_atlas_w,
+                    objects_atlas_h,
+                    enemy_bullet_src_x,
+                    enemy_bullet_src_y_right,
+                    enemy_bullet_w,
+                    enemy_bullet_h,
+                )
+                enemy_bullet_sprite_left = _extract_rgb565_region(
+                    objects_atlas,
+                    objects_atlas_w,
+                    objects_atlas_h,
+                    enemy_bullet_src_x,
+                    enemy_bullet_src_y_left,
+                    enemy_bullet_w,
+                    enemy_bullet_h,
+                )
+            if enemy_bullet_sprite_right is None and enemy_bullet_w > 0 and enemy_bullet_h > 0:
+                enemy_bullet_sprite_right = _make_solid_sprite_rgb565(
                     enemy_bullet_w,
                     enemy_bullet_h,
                     enemy_bullet_color,
                     submit_wire_order and (not submit_wire_runtime_swap),
                 )
+            if enemy_bullet_sprite_left is None:
+                enemy_bullet_sprite_left = enemy_bullet_sprite_right
+            if enemy_bullet_w > 0 and enemy_bullet_h > 0:
+                enemy_bullet_native_sprite_right = enemy_bullet_sprite_right
+                enemy_bullet_native_sprite_left = enemy_bullet_sprite_left
+                native_bullet_key = _swap16(int(getattr(config, "CAMERA_OBJECT_COLORKEY_RGB565", 0xF81F)) & 0xFFFF)
+                native_bullet_fill = int(enemy_bullet_color) & 0xFFFF
+                if submit_wire_order and (not submit_wire_runtime_swap):
+                    native_bullet_fill = _swap16(native_bullet_fill)
+                enemy_bullet_native_sprite_right = _lift_black_pixels_rgb565(
+                    enemy_bullet_native_sprite_right,
+                    native_bullet_key,
+                    native_bullet_fill,
+                )
+                enemy_bullet_native_sprite_left = _lift_black_pixels_rgb565(
+                    enemy_bullet_native_sprite_left,
+                    native_bullet_key,
+                    native_bullet_fill,
+                )
+                if enemy_bullet_native_sprite_right is None:
+                    enemy_bullet_native_sprite_right = _make_solid_sprite_rgb565(
+                        enemy_bullet_w,
+                        enemy_bullet_h,
+                        enemy_bullet_color,
+                        submit_wire_order and (not submit_wire_runtime_swap),
+                    )
+                if enemy_bullet_native_sprite_left is None:
+                    enemy_bullet_native_sprite_left = enemy_bullet_native_sprite_right
 
             native_band_h = int(getattr(config, "CAMERA_BAND_PIPELINE_H", 60))
             if native_band_h < 1:
@@ -4340,12 +5161,19 @@ def run(max_frames=None):
                         oi += 1
                     if obj_moved:
                         object_solids = _rebuild_object_solids(objects_rows)
+                        object_solids_c_count = _sync_object_solids_c_from_list(object_solids_c_buf, object_solids_c_stride, object_solids)
                 if death_state == 0:
-                    player_y, vel_y = _update_enemies_and_bullets(
+                    enemy_update_out = _update_enemies_and_bullets_native(
                         enemy_rows,
                         enemy_meta,
                         enemy_states,
                         enemy_bullets,
+                        enemy_rows_c_buf,
+                        enemy_rows_c_stride,
+                        enemy_rows_c_count,
+                        object_solids_c_buf,
+                        object_solids_c_stride,
+                        object_solids_c_count,
                         player_x,
                         player_y,
                         player_w,
@@ -4355,7 +5183,6 @@ def run(max_frames=None):
                         tilemap_w,
                         tilemap_h,
                         tile_size,
-                        object_solids,
                         death_margin,
                         enemy_detect_x,
                         enemy_flee_x,
@@ -4367,12 +5194,59 @@ def run(max_frames=None):
                         enemy_bullet_speed,
                         enemy_bullet_w,
                         enemy_bullet_h,
-                        enemy_max_bullets,
                         enemy_shoot_interval,
                         fall_speed_max,
                         map_w_px,
                         map_h_px,
+                        camera_x,
+                        sw,
+                        sh,
+                        enemy_update_margin_x,
+                        enemy_update_margin_y,
+                        enemy_bullet_cull_margin,
                     )
+                    if enemy_update_out is None:
+                        player_y, vel_y = _update_enemies_and_bullets(
+                            enemy_rows,
+                            enemy_meta,
+                            enemy_states,
+                            enemy_bullets,
+                            player_x,
+                            player_y,
+                            player_w,
+                            player_h,
+                            vel_y,
+                            tilemap_idx,
+                            tilemap_w,
+                            tilemap_h,
+                            tile_size,
+                            object_solids,
+                            death_margin,
+                            enemy_detect_x,
+                            enemy_flee_x,
+                            enemy_detect_y,
+                            enemy_move_speed,
+                            enemy_gravity_step,
+                            enemy_frame_hold,
+                            enemy_shoot_fire_frame,
+                            enemy_bullet_speed,
+                            enemy_bullet_w,
+                            enemy_bullet_h,
+                            enemy_max_bullets,
+                            enemy_shoot_interval,
+                            fall_speed_max,
+                            map_w_px,
+                            map_h_px,
+                            camera_x,
+                            sw,
+                            sh,
+                            enemy_update_margin_x,
+                            enemy_update_margin_y,
+                            enemy_bullet_cull_margin,
+                        )
+                        _sync_enemy_rows_c_from_rows(enemy_rows_c_buf, enemy_rows_c_stride, enemy_rows, enemy_meta)
+                    else:
+                        player_y, vel_y = enemy_update_out
 
                     player_x, player_y, vel_y, object_solids = _perform_world_swap(
                         swap_triggered,
@@ -4381,6 +5255,7 @@ def run(max_frames=None):
                         objects_meta,
                         enemy_rows,
                         enemy_states,
+                        enemy_bullets,
                         player_x,
                         player_y,
                         player_w,
@@ -4395,6 +5270,9 @@ def run(max_frames=None):
                         objects_c_buf,
                         objects_c_stride,
                     )
+                    if swap_triggered:
+                        _sync_enemy_rows_c_from_rows(enemy_rows_c_buf, enemy_rows_c_stride, enemy_rows, enemy_meta)
+                        object_solids_c_count = _sync_object_solids_c_from_list(object_solids_c_buf, object_solids_c_stride, object_solids)
 
                     if tilemap_enabled or object_solids:
                         unembed_guard = tile_size * 4
@@ -4557,8 +5435,12 @@ def run(max_frames=None):
                                 objects_meta,
                             )
                             _restore_enemy_rows(enemy_rows, enemy_rows_initial, enemy_states, enemy_meta)
+                            _sync_enemy_rows_c_from_rows(enemy_rows_c_buf, enemy_rows_c_stride, enemy_rows, enemy_meta)
                             _clear_enemy_bullets(enemy_bullets)
+                            if hasattr(enemy_bullets, "ensure_capacity"):
+                                enemy_bullets.ensure_capacity(enemy_max_bullets)
                             object_solids = _rebuild_object_solids(objects_rows)
+                            object_solids_c_count = _sync_object_solids_c_from_list(object_solids_c_buf, object_solids_c_stride, object_solids)
                             death_state = 0
                             player_center_x = player_x + (player_w // 2)
                             target_camera_x = player_center_x - screen_half
@@ -4569,7 +5451,9 @@ def run(max_frames=None):
 
                 prof_update_us += ticks_diff(ticks_us(), seg_t0)
 
-                if native_band_pipeline_enabled:
+                frame_native_band_enabled = native_band_pipeline_enabled
+
+                if frame_native_band_enabled:
                     submit_t0 = ticks_us()
                     sprite_x = player_screen_x + draw_off_x
                     sprite_y = player_y + draw_off_y
@@ -4595,11 +5479,24 @@ def run(max_frames=None):
                         anchor_anim_spec,
                         anchor_anim_counter,
                         enemy_bullets,
-                        enemy_bullet_sprite,
+                        enemy_bullet_native_sprite_right,
+                        enemy_bullet_native_sprite_left,
                         enemy_bullet_w,
                         enemy_bullet_h,
+                        camera_x,
+                        sw,
+                        sh,
+                        enemy_bullet_cull_margin,
                     )
-                    enemy_desc_buf, enemy_desc_stride, enemy_desc_count = _pack_enemy_render_descriptors(enemy_rows, enemy_states)
+                    enemy_desc_buf, enemy_desc_stride, enemy_desc_count = _pack_enemy_render_descriptors(
+                        enemy_rows,
+                        enemy_states,
+                        camera_x,
+                        sw,
+                        sh,
+                        enemy_render_margin_x,
+                        enemy_render_margin_y,
+                    )
                     try:
                         if enemy_render_enabled:
                             band_res = _lgfx.render_scene_bands_rgb565(
@@ -5023,6 +5920,12 @@ def run(max_frames=None):
                             camera_x,
                             band_top,
                             enemy_bullets,
+                            enemy_bullet_sprite_right,
+                            enemy_bullet_sprite_left,
+                            enemy_bullet_w,
+                            enemy_bullet_h,
+                            submit_wire_order,
+                            submit_wire_runtime_swap,
                             enemy_bullet_color,
                         )
 

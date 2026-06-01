@@ -251,6 +251,12 @@ static void compose_enemy_band(
         const uint8_t *eb = enemy_desc + ((size_t)i * (size_t)enemy_stride);
         int16_t wx = (int16_t)((uint16_t)eb[0] | ((uint16_t)eb[1] << 8));
         int16_t wy = (int16_t)((uint16_t)eb[2] | ((uint16_t)eb[3] << 8));
+        int32_t dx = (int32_t)wx - camera_x;
+        int32_t dy = (int32_t)wy - band_top;
+        if (dx >= dst_w || (dx + frame_w) <= 0 || dy >= dst_h || (dy + frame_h) <= 0) {
+            continue;
+        }
+
         int32_t anim_counter = (uint16_t)eb[4] | ((uint16_t)eb[5] << 8);
         int32_t enemy_state = (int32_t)eb[6];
         bool face_right = eb[7] != 0;
@@ -366,6 +372,11 @@ static void compose_overlay_band(
         if (frame_w <= 0 || frame_h <= 0 || frame_idx < 0 || (size_t)frame_idx >= frame_obj_count) {
             continue;
         }
+        int32_t dx = (int32_t)wx - camera_x;
+        int32_t dy = (int32_t)wy - band_top;
+        if (dx >= dst_w || (dx + frame_w) <= 0 || dy >= dst_h || (dy + frame_h) <= 0) {
+            continue;
+        }
 
         mp_buffer_info_t frame_info;
         mp_get_buffer_raise(frame_objs[frame_idx], &frame_info, MP_BUFFER_READ);
@@ -432,8 +443,8 @@ static void compose_scene_band(
     copy_far_band(dst, screen_w, band_y, band_h, far);
     compose_tilemap_band(dst, screen_w, band_h, camera_x, band_y, tilemap, map_w, map_h, tileset, tileset_len, tile_size, tileset_w, tile_key);
     compose_objects_band(dst, screen_w, band_h, camera_x, band_y, objbuf, obj_stride, object_count, obj_atlas, obj_atlas_w, obj_atlas_h, object_key);
-    compose_overlay_band(dst, screen_w, band_h, camera_x, band_y, overlay_desc, overlay_stride, overlay_count, overlay_frames_obj, overlay_key);
     compose_enemy_band(dst, screen_w, band_h, camera_x, band_y, enemy_desc, enemy_stride, enemy_count, enemy_sheet, enemy_sheet_w, enemy_sheet_h, enemy_key, enemy_frame_hold);
+    compose_overlay_band(dst, screen_w, band_h, camera_x, band_y, overlay_desc, overlay_stride, overlay_count, overlay_frames_obj, overlay_key);
     compose_sprite_band(dst, screen_w, band_h, sprite_x, sprite_y - band_y, sprite, sprite_w, sprite_h, sprite_key);
 }
 
