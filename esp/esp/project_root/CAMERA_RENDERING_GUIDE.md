@@ -10,16 +10,24 @@
 - `CAMERA_PLAYER_SPRITE_COMPOSE_IMPL = "C_API"`
 - `CAMERA_FULL_BULK_WIRE_ORDER = True`
 - `CAMERA_BAND_PIPELINE_NATIVE = True`
-- `CAMERA_BAND_PIPELINE_H = 60`
+- `CAMERA_BAND_PIPELINE_H = 40`
 - `SUBMIT_MODE=NATIVE_BAND_PIPELINE`
-- `BAND_PIPELINE_NATIVE_ON h=60`
+- `BAND_PIPELINE_NATIVE_ON h=40`
+
+目前 firmware 主線的 panel bus baseline：
+
+- `micropython/user_cmodules/lgfx/lgfx_config.hpp` 的 `cfg.freq_write = 40000000`
+- `80MHz` 會讓 `waitDMA` 顯著下降、FPS 提升，但實機會出現撕裂
+- 因此目前正式主線固定回 `40MHz`，先以穩定顯示為優先
 
 主線啟動結構：
 
 - internal flash 只保留 `boot.py` / `main.py`
 - `main.py` 是 SD-only launcher
-- 遊戲程式與資產由 `/sd/game` 載入
-- 主要執行檔：`/sd/game/app.py` -> `/sd/game/app_camera_test.py`
+- `main.py` 先驗證 `/sd/game/app.py`、`/sd/game/config.py`、`/sd/game/app_camera_test.py` 存在
+- `main.py` 先 `exec /sd/game/config.py`，再 `exec /sd/game/app_camera_test.py`
+- `/sd/game/app.py` 目前只保留為 wrapper / 存在性檢查備用
+- 正式唯一 SD 掛載 wiring：`slot=2, width=1, sck=39, miso=40, mosi=38, cs=47, freq=1000000`
 
 ## 2. 互動與世界邏輯
 
@@ -48,7 +56,7 @@
    - 若 native path 失敗，印一次 `ENEMY_UPDATE_NATIVE_FALLBACK ...` 並回退 Python update
 3. Python 打包 object / overlay / enemy render descriptors
 4. Python 呼叫 `lgfx.render_scene_bands_rgb565(...)`
-5. C++ 以 `320 x 60` 的 band 逐條 compose 與 submit
+5. C++ 以 `320 x 40` 的 band 逐條 compose 與 submit
 
 目前 band 內 C++ compose 順序：
 
@@ -87,12 +95,19 @@ lcd.pushImageDMA(x, y, w, h, pixels);
 - `PROFILE submit_us`
 - `PROFILE submit_wait_us`
 - `PROFILE submit_kick_us`
+- `PROFILE submit_sync_us`
+- `PROFILE submit_start_us`
+- `PROFILE submit_push_us`
+- `PROFILE submit_dma_wait_us`
+- `PROFILE submit_end_us`
 - `PROFILE submit_swap_us`
 
 其中 native band 模式下：
 
 - `submit_us` 是整個 native band call 的總時間
 - `submit_wait_us` / `submit_kick_us` 是 C++ 回傳的 wait / kick 拆分
+- `submit_dma_wait_us` 幾乎就是 `lcd.waitDMA()` 本體時間
+- `submit_sync_us` 是 DMA 前 `esp_cache_msync(...)` 的成本
 
 ## 5. Enemy update 主線
 
@@ -166,8 +181,6 @@ enemy native update 目前使用常駐 packed buffer，不再每幀重建。
 - `12..13`: `active`
 - `14..15`: `shooter_enemy_i`
 
-目前 bullet pool 會先 `ensure_capacity(enemy_max_bullets)`，讓 native update 可直接原地重用。
-
 ### 6.4 Object solids
 
 `object_solids_c_buf` 也已改成常駐 buffer，不再每幀 `_pack_object_solids_for_c(...)`。
@@ -196,12 +209,20 @@ enemy native update 目前使用常駐 packed buffer，不再每幀重建。
 
 目前正式主線是 native band pipeline。
 
-一般區域大致觀察：
+目前 40MHz / `h=40` 正式主線大致觀察：
 
-- `submit_us` 約 `36~37ms`
-- `submit_kick_us` 約 `5.6ms`
-- `submit_wait_us` 約 `10~14ms`
-- `fps` 約 `22~24+`
+- `submit_us` 約 `36.4ms`
+- `submit_kick_us` 約 `1.75ms`
+- `submit_wait_us` 約 `14.46ms`
+- `submit_sync_us` 約 `1.50ms`
+- `submit_dma_wait_us` 約 `14.38ms`
+- `fps` 約 `23.9`
+
+額外 probe 結論：
+
+- 把 `cfg.freq_write` 從 `40MHz` 拉到 `80MHz` 後，`submit_us` 可降到約 `26.2ms`、`submit_dma_wait_us` 可降到約 `3.34ms`、`fps` 可到約 `31.6`
+- 但 `80MHz` 會出現實機撕裂，因此目前不採用為正式主線
+- 這證明目前主要瓶頸確實是 SPI bus / DMA transfer time，而不是 enemy logic 或單一圖層 compose
 
 ### 7.3 Enemy 區域
 
@@ -234,10 +255,13 @@ enemy update 搬到 C++ 並改成 persistent buffer 後，敵人區實測大致�
 
 - far 背景：`/sd/game/picture/backgound/bg_far_wire.rgb565`
 - tilemap atlas：`/sd/game/Tilemap/tilemap_all_wire.rgb565`
-- tilemap CSV：`/sd/game/Tilemap/map1_tilemap.csv`
+- tilemap CSV：`/sd/game/Tilemap/map_tilemap.csv`
 - object atlas：`/sd/game/picture/object/objects_atlas_wire.rgb565`
+- object animations：`/sd/game/picture/object/object_animations.json`
+- enemy CSV：`/sd/game/picture/enemy/enemies.csv`
 - enemy sheet：`/sd/game/picture/enemy/enemy_bow_animation_wire.rgb565`
 - player sheet：`/sd/game/picture/player/player_wire.rgb565`
+- spawn sheets：`/sd/game/picture/spawn/Resurrection_Anchor_wire.rgb565`、`/sd/game/picture/spawn/Spawnpoint_rock_wire.rgb565`
 
 ## 9. 關鍵 API
 
@@ -264,9 +288,14 @@ enemy update 搬到 C++ 並改成 persistent buffer 後，敵人區實測大致�
 
 建議優先看這些 log：
 
-- `SUBMIT_MODE=NATIVE_BAND_PIPELINE`
-- `BAND_PIPELINE_NATIVE_ON h=60`
+- `Launcher source: sd`
+- `LOADER_SRC_PATH=/sd/game/app_camera_test.py`
+- `LAUNCHER_APP_FILE=/sd/game/app_camera_test.py`
+- `OBJECT_COUNT=10`
+- `ENEMY_MODE_ON`
 - `ENEMY_UPDATE_IMPL=C_API`
+- `SUBMIT_MODE=NATIVE_BAND_PIPELINE`
+- `BAND_PIPELINE_NATIVE_ON h=40`
 - `BAND_PIPELINE_SUBMIT_OK`
 - `PROFILE update_us=...`
 - `PROFILE submit_us=...`
@@ -332,6 +361,7 @@ idf.py -B build-ESP32_GENERIC_S3-SPIRAM_OCT_NOBT -p /dev/ttyACM0 flash
 目前 enemy logic 這條線已經壓得差不多。下一步若要再拉 FPS，優先順序應放在 submit / render 路徑：
 
 1. 測 `CAMERA_BAND_PIPELINE_H = 40 / 48 / 80`
-2. 分析 enemy 區是否讓更多 band 被迫做完整 compose
-3. 減少不必要 band 更新量
-4. 若還要再壓 Python，才考慮把 enemy render descriptor 也做成常駐或直接由 C++ 輸出
+2. 若要再追 submit bottleneck，先優先檢查 panel bus / DMA 參數，而不是再關單一圖層
+3. 分析 enemy 區是否讓更多 band 被迫做完整 compose
+4. 減少不必要 band 更新量
+5. 若還要再壓 Python，才考慮把 enemy render descriptor 也做成常駐或直接由 C++ 輸出

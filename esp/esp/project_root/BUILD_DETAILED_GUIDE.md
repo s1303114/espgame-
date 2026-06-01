@@ -242,8 +242,10 @@ pgrep -af "makeqstrdefs|ninja all|idf.py|make -j|cc1"
 
 - 內部 flash 只需要 `boot.py` 與 `main.py`。
 - 遊戲程式與圖片資產都放在 SD 卡 `/sd/game`。
-- 開機時 `main.py` 掛載 SD，直接從 `/sd/game/app.py` 啟動。
-- 沒有 SD 卡、或 `/sd/game/app.py` 不存在時，會進入 safe mode，不會跑內部 flash 舊遊戲。
+- 開機時 `main.py` 掛載 SD，驗證 `/sd/game/app.py`、`/sd/game/config.py`、`/sd/game/app_camera_test.py` 都存在。
+- 驗證通過後，launcher 直接 `exec` `/sd/game/config.py` 與 `/sd/game/app_camera_test.py`。
+- `/sd/game/app.py` 目前只作為 wrapper / 存在性檢查備用，不是正式主執行檔。
+- 沒有 SD 卡、或上述必要檔案缺失時，會進入 safe mode，不會跑內部 flash 舊遊戲。
 
 ### 10.1 更新內部 flash launcher
 
@@ -276,16 +278,17 @@ try:
 except Exception as e:
     print('PRE_UMOUNT_SKIP', e)
 try:
-    os.mount(machine.SDCard(slot=2, sck=5, mosi=6, miso=7, cs=4), '/sd')
-    print('SD_MOUNTED_SLOT2')
+    os.mount(machine.SDCard(slot=2, width=1, sck=39, miso=40, mosi=38, cs=47, freq=1000000), '/sd')
+    print('SD_MOUNTED_SLOT2_ACTUAL')
 except Exception as e1:
     print('SD_MOUNT_SLOT2_ERR', e1)
-    os.mount(machine.SDCard(slot=3, sck=5, mosi=6, miso=7, cs=4), '/sd')
-    print('SD_MOUNTED_SLOT3')
+    raise
 "
 ```
 
-看到 `SD_MOUNTED_SLOT2` 或 `SD_MOUNTED_SLOT3` 才算真的把外接 SD 掛上去。
+看到 `SD_MOUNTED_SLOT2_ACTUAL` 才算真的把外接 SD 掛上去。這是目前板子實際使用的 pin mapping：`slot=2, width=1, sck=39, miso=40, mosi=38, cs=47, freq=1000000`。
+
+目前正式唯一 SD 路徑就是 internal flash launcher [main.py](/workspace/esp/esp/project_root/main.py) 這組 wiring：`slot=2, width=1, sck=39, miso=40, mosi=38, cs=47, freq=1000000`。文件、手動部署、boot 掛載都必須使用同一組設定；不要再保留或混用舊 pin 範例。
 
 ### 10.2.2 用同一個 session 逐檔同步
 
@@ -307,6 +310,18 @@ cd /workspace/esp/esp/project_root
 - `sd_game_template/game/config.py`
 - `sd_game_template/game/sd_config.py`（若使用 SD 專用入口且語法檢查通過）
 
+若只改 object 資產，最小同步集合是：
+
+- `sd_game_template/game/picture/object/objects.csv`
+- `sd_game_template/game/picture/object/objects_atlas_wire.rgb565`
+
+建議仍然使用同一個已掛載 session：
+
+```bash
+/tmp/mpvenv/bin/mpremote resume fs cp sd_game_template/game/picture/object/objects.csv :/sd/game/picture/object/objects.csv
+/tmp/mpvenv/bin/mpremote resume fs cp sd_game_template/game/picture/object/objects_atlas_wire.rgb565 :/sd/game/picture/object/objects_atlas_wire.rgb565
+```
+
 ### 10.2.3 重掛載驗證是否真的寫入外接 SD
 
 不要只看 `cp` 的輸出。請立刻做一次 `umount -> mount -> read back`：
@@ -317,10 +332,7 @@ try:
     os.umount('/sd')
 except Exception:
     pass
-try:
-    os.mount(machine.SDCard(slot=2, sck=5, mosi=6, miso=7, cs=4), '/sd')
-except Exception:
-    os.mount(machine.SDCard(slot=3, sck=5, mosi=6, miso=7, cs=4), '/sd')
+os.mount(machine.SDCard(slot=2, width=1, sck=39, miso=40, mosi=38, cs=47, freq=1000000), '/sd')
 with open('/sd/game/app_camera_test.py', 'r') as f:
     s = f.read()
 with open('/sd/game/config.py', 'r') as f:
@@ -333,6 +345,22 @@ print('REMOUNT_BTN_X_38', 'BTN_X_PIN = 38' in c)
 "
 ```
 
+若要驗證 object 資產是否真的上到外接 SD，可以改成：
+
+```bash
+/tmp/mpvenv/bin/mpremote connect /dev/ttyACM0 exec "import os, machine
+try:
+    os.umount('/sd')
+except Exception:
+    pass
+os.mount(machine.SDCard(slot=2, width=1, sck=39, miso=40, mosi=38, cs=47, freq=1000000), '/sd')
+s = open('/sd/game/picture/object/objects.csv', 'r').read()
+print('HAS_MUSHROOM', 'mushroom,decor,1168,160,16,16' in s)
+print('HAS_BOX', 'box,decor,1392,96,32,32' in s)
+print('HAS_MINECART', 'minecart,decor,1360,160,32,32' in s)
+print('ATLAS_SIZE', os.stat('/sd/game/picture/object/objects_atlas_wire.rgb565')[6])"
+```
+
 若要驗證 native overlay 版本是否真的上到外接 SD，可以把 readback 改成檢查：
 
 ```bash
@@ -341,10 +369,7 @@ try:
     os.umount('/sd')
 except Exception:
     pass
-try:
-    os.mount(machine.SDCard(slot=2, sck=5, mosi=6, miso=7, cs=4), '/sd')
-except Exception:
-    os.mount(machine.SDCard(slot=3, sck=5, mosi=6, miso=7, cs=4), '/sd')
+os.mount(machine.SDCard(slot=2, width=1, sck=39, miso=40, mosi=38, cs=47, freq=1000000), '/sd')
 app = open('/sd/game/app_camera_test.py', 'r').read()
 print('APP_HAS_NATIVE_OVERLAY_PACK', '_pack_special_render_overlays' in app)
 print('APP_CALLS_NATIVE_OVERLAY', 'overlay_desc_buf,' in app)"
@@ -362,7 +387,7 @@ print('APP_CALLS_NATIVE_OVERLAY', 'overlay_desc_buf,' in app)"
 正常啟動後 log 會看到遊戲主線輸出，例如：
 
 - `SUBMIT_MODE=NATIVE_BAND_PIPELINE`
-- `BAND_PIPELINE_NATIVE_ON h=60`
+- `BAND_PIPELINE_NATIVE_ON h=40`
 - `PROFILE fps=...`
 - `APP_RUN_START_PHASE_CAMERA_TEST`
 
@@ -373,20 +398,31 @@ print('APP_CALLS_NATIVE_OVERLAY', 'overlay_desc_buf,' in app)"
 
 如果 reset 後看不到這些 marker，就不要先懷疑邏輯沒改到，先回頭檢查第 10.2.3 節，確認外接 SD 上的檔案是否真的更新成功。
 
-若要確認目前載入來源，按 `Ctrl-C` 中斷後輸入：
+若要確認目前載入來源，優先看開機 log：
+
+```text
+LOADER_SRC_PATH=/sd/game/app_camera_test.py
+LAUNCHER_APP_FILE=/sd/game/app_camera_test.py
+```
+
+這兩行是目前主線最直接的來源證據，因為 launcher 直接 `exec` 的 module 是 `app_camera_test`。
+
+若要在 REPL 裡再次確認，按 `Ctrl-C` 中斷後輸入：
 
 ```python
-import app, config
-print('APP_FILE', app.__file__)
+import sys, config
+print('APP_CAMERA_TEST_FILE', sys.modules['app_camera_test'].__file__)
 print('BG_PATH', config.CAMERA_TEST_ROOT_BG_FAR_RGB565)
 ```
 
 成功條件：
 
 ```text
-APP_FILE /sd/game/app.py
+APP_CAMERA_TEST_FILE /sd/game/app_camera_test.py
 BG_PATH /sd/game/picture/backgound/bg_far_wire.rgb565
 ```
+
+注意：若你是用 `reset` 之後再晚一點才 attach REPL，最前面的 startup marker 可能已經滾過 UART。這種情況不要只因為「沒看到某一行」就判定沒載入新版；先回到第 10.2.3 節做 `umount -> mount -> read back`，再配合上面的 loader log/source 檢查。
 
 ### 10.4 SD 卡目錄結構
 
@@ -402,15 +438,20 @@ SD 卡根目錄應有：
   actors/
   engine/
   save/
-  Tilemap/map1_tilemap.csv
+  Tilemap/map_tilemap.csv
   Tilemap/tilemap_all_wire.rgb565
   picture/backgound/bg_far_wire.rgb565
   picture/object/objects.csv
+  picture/object/object_animations.json
   picture/object/objects_atlas_wire.rgb565
+  picture/enemy/enemies.csv
+  picture/enemy/enemy_bow_animation_wire.rgb565
   picture/player/player_wire.rgb565
+  picture/spawn/Resurrection_Anchor_wire.rgb565
+  picture/spawn/Spawnpoint_rock_wire.rgb565
 ```
 
-注意：內部 flash 目前可能仍殘留舊的 `app.py`、`app_camera_test.py`、舊圖片等檔案；SD-only `main.py` 不會載入它們。若要清理，可另行只保留內部 flash 的 `boot.py/main.py`。
+目前乾淨主線的 internal flash 應只保留 `boot.py` 與 `main.py`。`main.py` 不會載入 internal flash 舊遊戲檔；所有實際程式與資產都應以 `/sd/game` 為準。
 
 ## 11. 直接在原路徑編譯（備援，不建議用於 Windows 掛載）
 
@@ -455,11 +496,12 @@ rg -n "CAMERA_TEST_MODE|CAMERA_SPI_TEST_PATH" /workspace/esp/esp/project_root/sd
 
 序列埠確認關鍵字：
 
-- `APP_FILE /sd/game/app.py`（手動查來源時）
+- `LOADER_SRC_PATH=/sd/game/app_camera_test.py`
+- `LAUNCHER_APP_FILE=/sd/game/app_camera_test.py`
 - `APP_RUN_START_PHASE_CAMERA_TEST`
 - `CAMERA_TEST_MODE=...`
 - `SUBMIT_MODE=NATIVE_BAND_PIPELINE`
-- `BAND_PIPELINE_NATIVE_ON h=60`
+- `BAND_PIPELINE_NATIVE_ON h=40`
 - `PROFILE fps=...`
 
 ## 14. 一鍵流程（可直接貼上）
@@ -485,12 +527,11 @@ try:
 except Exception as e:
     print('PRE_UMOUNT_SKIP', e)
 try:
-    os.mount(machine.SDCard(slot=2, sck=5, mosi=6, miso=7, cs=4), '/sd')
-    print('SD_MOUNTED_SLOT2')
+    os.mount(machine.SDCard(slot=2, width=1, sck=39, miso=40, mosi=38, cs=47, freq=1000000), '/sd')
+    print('SD_MOUNTED_SLOT2_ACTUAL')
 except Exception as e1:
     print('SD_MOUNT_SLOT2_ERR', e1)
-    os.mount(machine.SDCard(slot=3, sck=5, mosi=6, miso=7, cs=4), '/sd')
-    print('SD_MOUNTED_SLOT3')
+    raise
 "
 /tmp/mpvenv/bin/mpremote resume fs cp sd_game_template/game/app.py :/sd/game/app.py
 /tmp/mpvenv/bin/mpremote resume fs cp sd_game_template/game/app_camera_test.py :/sd/game/app_camera_test.py
@@ -522,7 +563,7 @@ idf.py -B build-ESP32_GENERIC_S3-SPIRAM_OCT_NOBT -p /dev/ttyACM0 flash
 1. build 成功，產生 `micropython.bin`
 2. flash 成功，出現 hash verified + reset done
 3. 板上可 `import lgfx`
-4. SD 來源確認為 `/sd/game/app.py`
+4. SD 來源確認為 `/sd/game/app_camera_test.py`
 5. 目標模式在序列埠可見，例如 `CAMERA_TEST_MODE=...`
 
 
@@ -537,8 +578,19 @@ idf.py -B build-ESP32_GENERIC_S3-SPIRAM_OCT_NOBT -p /dev/ttyACM0 flash
 開機 log 應看到：
 
 - `SUBMIT_MODE=NATIVE_BAND_PIPELINE`
-- `BAND_PIPELINE_NATIVE_ON h=60`
+- `BAND_PIPELINE_NATIVE_ON h=40`
+
+目前實機量測中，`CAMERA_BAND_PIPELINE_H = 40` 比 `60 / 80 / 120` 都更佳，是目前建議固定的主線值。
 
 若缺少 `render_scene_bands_rgb565`，代表 firmware 仍是舊版或 `/tmp/esp-mp-local` 漏同步 `lgfx_mp.cpp` / `lgfx_band.cpp` / `lgfx_shared.hpp`。
 
-目前 `app_camera_sd.py` 語法檢查未通過，不要同步或加入追蹤。主線仍以 `/sd/game/app.py` -> `app_camera_test.py` 為準。
+目前主線仍以 `main.py` 直接 `exec` `/sd/game/config.py` 與 `/sd/game/app_camera_test.py` 為準；`/sd/game/app.py` 只作為存在性檢查與 wrapper 備用。
+
+若這次修改的是 panel bus / DMA 相關 firmware 參數，例如 `micropython/user_cmodules/lgfx/lgfx_config.hpp` 內的 `cfg.freq_write`，也要記得同步該檔到 `/tmp/esp-mp-local` 再重編；只同步 `lgfx_mp.cpp` / `lgfx_band.cpp` 不足以反映 bus clock 變更。
+
+目前實機驗證過：
+
+- `CAMERA_BAND_PIPELINE_H = 40` 是正式主線 band 高度
+- `lgfx_config.hpp` 的 `cfg.freq_write = 40000000` 是目前正式主線 SPI write clock
+- `80MHz` 雖可把 `submit_us` 明顯壓低、FPS 拉到約 `31.6`，但畫面會撕裂
+- 因此目前主線固定維持 `40MHz`，不要把 `80MHz` 當成預設 baseline
