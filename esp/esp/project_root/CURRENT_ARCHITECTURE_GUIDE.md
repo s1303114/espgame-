@@ -49,6 +49,18 @@ Python (`app_camera_test.py`) 負責：
 - object / overlay / enemy render descriptor 打包
 - 主迴圈 profile 與 fallback 控制
 
+目前 Python runtime 的控制流整理方向已開始落地：
+
+- `run()` 不再直接塞滿所有 mode branch
+- 啟動 banner 已抽成 `_print_camera_test_start(...)`
+- `ROWS_SAFE_NEAR_TILE_TEST`、`SPI_TFT_*`、`FULL_BUFFER_TEST` 已先抽到 `_run_pre_rows_safe_mode(...)`
+- `SPI_TFT_*` 內已清掉目前不會被走到的 `CHUNK_WAIT_*` / `COMPAT_*` dead branches，保留現行固定的 `BULK_WAIT_DIRECT`
+- 已移除目前未使用的 `BOARD_GENERATED_*`、`ROOT_RGB565_*`、`BLIT_*` mode families，避免歷史 bring-up/testing 分支繼續佔用 bytecode 與維護成本
+- 已再移除舊的 `PNG_SINGLE` / `PNG_FULL` / `FAR_ONLY` / `SINGLE_IMAGE_*` / `DIRECT_*` fallback renderer family，`run()` 現在只保留主線與少數仍可用的 bring-up mode
+- 已再把 `ROWS_SAFE_PROGRESSIVE` step 4 內的 native band submit 路徑與 profile/report/reset 路徑抽成 helper，繼續縮小 `run()` 的 bytecode 壓力
+- `run()` 目前先做 mode normalize、prerequisite check、`_lgfx.init()`、rotation、dispatcher 轉交
+- `ROWS_SAFE_PROGRESSIVE` 仍是下一個主要拆分目標，因為它仍是目前最大的 bytecode 風險來源
+
 C++ (`lgfx` user module) 負責：
 
 - `update_enemies_native(...)`
@@ -161,3 +173,75 @@ internal flash boot.py/main.py
 ```
 
 enemy logic 這條線已壓到次要瓶頸；目前真正大頭仍是 `submit_us`，下一步最佳化應優先集中在 band render / submit 路徑。
+
+## 10. 本次重新部署與驗證
+
+本次已重新部署：
+
+- 來源：`/workspace/esp/esp/project_root/sd_game_template/game/app_camera_test.py`
+- 目標：`/sd/game/app_camera_test.py`
+- 部署方式：重新 mount `/sd` 後以 `mpremote ... fs cp` 覆寫 SD 上 runtime 檔案
+
+本次實際整理內容：
+
+1. 將 `run()` 前段的啟動 log / mode banner 抽成 `_print_camera_test_start(...)`
+2. 將三條較早返回的測試路徑抽出：
+	- `ROWS_SAFE_NEAR_TILE_TEST`
+	- `SPI_TFT_SPEED_TEST` / `SPI_TFT_BULK_WAIT_TEST`
+	- `FULL_BUFFER_TEST`
+3. 新增 `_run_pre_rows_safe_mode(...)` 作為前段 dispatcher，讓 `run()` 先把非主線測試模式導走
+4. 保持現有行為不變，這一刀只做搬移與 dispatcher 整理，沒有改渲染策略、native band pipeline 或 profile tuple 格式
+5. 清掉 `SPI_TFT_*` 中目前不會被走到的多條 experimental path 分支，並移除未再使用的 `CAMERA_SPI_TEST_PATH` 設定
+6. 清掉未再使用的 `BOARD_GENERATED_*`、`ROOT_RGB565_*`、`BLIT_*` modes，並同步移除它們在 mode normalize、prerequisite、startup banner、`run()` 與 config 內的殘留引用
+7. 再清掉舊的 `PNG_SINGLE` / `PNG_FULL` / `FAR_ONLY` / `SINGLE_IMAGE_*` / `DIRECT_*` fallback renderer family，包含：
+	- mode 常數
+	- 舊版 `_ensure_prerequisites(...)`
+	- 舊版 `_print_camera_test_start(..., png_single_stage)`
+	- `run()` 裡 direct / single-image / manual-frame fallback 尾段
+	- `config.py` / `sd_config.py` 內對應的 `CAMERA_TEST_PNG_SINGLE_STAGE`、`CAMERA_TEST_STRIP_H`、`CAMERA_TEST_MANUAL_FRAMES`、`CAMERA_TEST_BG_*`、`CAMERA_TEST_BG_*_RGB565`
+8. 再把 `ROWS_SAFE_PROGRESSIVE` step 4 內兩塊可獨立切出的路徑抽成 helper：
+	- native band submit 分支
+	- profile / stall / dirty-profile 統計輸出與 reset 分支
+	- 這一刀先只做 move-only refactor，不改主線 renderer 行為
+
+本次補充驗證結果：
+
+- 重新部署後，板上仍正常從 SD 啟動
+- `CAMERA_TEST_MODE=ROWS_SAFE_PROGRESSIVE`
+- `CAMERA_TEST_STEP=4_START`
+- `SUBMIT_MODE=NATIVE_BAND_PIPELINE`
+- `BAND_PIPELINE_NATIVE_ON h=40`
+- 持續看到 `BAND_PIPELINE_SUBMIT_OK`
+- 未出現 `SAFE MODE` / `Traceback` / `NameError` / `UNSUPPORTED_MODE`
+
+本次板上開機驗證結果：
+
+- `Launcher source: sd`
+- `APP_RUN_START_PHASE_CAMERA_TEST_V2`
+- `CAMERA_TEST_MODE=ROWS_SAFE_PROGRESSIVE`
+- `CAMERA_TEST_STEP=4_START`
+- `ENEMY_UPDATE_IMPL=C_API`
+- `SUBMIT_MODE=NATIVE_BAND_PIPELINE`
+- `BAND_PIPELINE_NATIVE_ON h=40`
+- `BAND_PIPELINE_SUBMIT_OK`
+- `CAMERA_TEST_STEP=4_DRAW_OK`
+- 清理 dead code 後重新部署仍可正常啟動主線
+- 刪除 `BOARD_GENERATED_*` / `ROOT_RGB565_*` / `BLIT_*` 後重新部署仍可正常啟動主線
+
+本次驗證未再出現：
+
+- `_MODE_PNG_FULL` `NameError`
+- launcher `SAFE MODE`
+- 啟動階段 `Traceback`
+
+本次啟動後首個 profile window 觀察值：
+
+- `PROFILE update_us=7022`
+- `PROFILE submit_us=40429`
+- `PROFILE submit_compose_us=12172`
+- `PROFILE submit_wait_us=19822`
+- `PROFILE submit_dma_wait_us=19748`
+- `PROFILE total_us=48467`
+- `PROFILE fps=20.63`
+
+這代表目前 SD 上最新 runtime 已可正常進入正式 `ROWS_SAFE_PROGRESSIVE` 主線；目前 bottleneck 結論不變，仍優先指向 native band submit / DMA wait，而不是這次 Python 控制流整理本身。
