@@ -35,6 +35,11 @@ except Exception:
     gc = None
 
 try:
+    import math
+except Exception:
+    math = None
+
+try:
     import ujson as json
 except Exception:
     try:
@@ -60,6 +65,9 @@ _ENEMY_ROW_STRIDE = 12
 _ENEMY_STATE_STRIDE = 8
 _BULLET_STATE_STRIDE = 16
 _OBJECT_SOLID_STRIDE = 8
+_boot_source_tag = "ROOT"
+_draw_digits_to_buf = None
+_get_digits_text_width = None
 
 
 def _buf_get_i16_le(buf, off):
@@ -854,22 +862,6 @@ def _compose_full_grid_320x240(buf):
     _compose_grid_chunk565(buf, 320, 240, 0, 240)
 
 
-_TILEMAP_CSV = """0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,6,4,0,0,0,0,0,0,0,0,0,0
-0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,6,1,1,1,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,4,0,0,0,0,0,0,0,0,0,6,1,4,0,0,0,0,0,0,0,0,0,0,0,9,3,3,3,5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-2,2,2,2,2,2,2,2,2,2,2,2,2,3,3,5,0,0,0,0,0,0,0,0,0,7,2,8,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-2,2,2,2,2,2,2,2,2,2,2,3,5,0,0,0,0,0,0,0,0,0,0,0,0,9,3,5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-3,3,3,3,3,3,3,3,3,3,5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1
-"""
 
 def _parse_tilemap_csv(csv_text):
     rows = []
@@ -1379,6 +1371,76 @@ def _pick_swappable_bullet_index(enemy_bullets, player_x, player_y, player_w, pl
     return best_i
 
 
+def _pick_swappable_monk_orb(enemy_rows, enemy_states, enemy_meta, monk_orb_states, player_x, player_y, player_w, player_h, pick_far, camera_x, band_top, view_w, view_h, monk_frame_w, monk_frame_h):
+    if not enemy_rows or not enemy_states or not monk_orb_states:
+        return -1, -1
+    best_enemy_i = -1
+    best_slot_i = -1
+    best_d2 = -1
+    ei = 0
+    while ei < len(enemy_rows):
+        meta = enemy_meta[ei] if (enemy_meta is not None and ei < len(enemy_meta)) else None
+        enemy_type = str(meta.get("type", "bow") or "bow") if meta is not None else "bow"
+        state = enemy_states[ei] if ei < len(enemy_states) else None
+        slot_states = monk_orb_states[ei] if ei < len(monk_orb_states) else None
+        if enemy_type == "monk" and state is not None and slot_states:
+            wx, wy, ow, oh, visible, swappable = enemy_rows[ei]
+            if visible and swappable:
+                si = 0
+                while si < len(slot_states):
+                    orb_state = slot_states[si]
+                    orb_x, orb_y = _monk_orb_slot_world_pos(wx, wy, ow, oh, int(state.get("anim_counter", 0) or 0), si, monk_frame_w, monk_frame_h)
+                    orb_x += int(orb_state.get("offset_x", 0) or 0)
+                    orb_y += int(orb_state.get("offset_y", 0) or 0)
+                    d2 = _visible_target_distance2(orb_x, orb_y, _MONK_ORB_W, _MONK_ORB_H, player_x, player_y, player_w, player_h, camera_x, band_top, view_w, view_h)
+                    if d2 >= 0:
+                        if best_enemy_i < 0:
+                            best_enemy_i = ei
+                            best_slot_i = si
+                            best_d2 = d2
+                        elif pick_far:
+                            if d2 > best_d2:
+                                best_enemy_i = ei
+                                best_slot_i = si
+                                best_d2 = d2
+                        else:
+                            if d2 < best_d2:
+                                best_enemy_i = ei
+                                best_slot_i = si
+                                best_d2 = d2
+                    si += 1
+        ei += 1
+    return best_enemy_i, best_slot_i
+
+
+def _swap_with_monk_orb(enemy_rows, enemy_states, monk_orb_states, enemy_i, slot_i, player_x, player_y, player_w, player_h, max_player_x, map_h_px, monk_frame_w, monk_frame_h):
+    if enemy_i < 0 or slot_i < 0 or enemy_i >= len(enemy_rows) or enemy_i >= len(enemy_states) or enemy_i >= len(monk_orb_states):
+        return player_x, player_y, 0, False
+    slot_states = monk_orb_states[enemy_i]
+    if slot_states is None or slot_i >= len(slot_states):
+        return player_x, player_y, 0, False
+    row = enemy_rows[enemy_i]
+    state = enemy_states[enemy_i]
+    orb_state = slot_states[slot_i]
+    orb_x, orb_y = _monk_orb_current_world_pos(row[0], row[1], row[2], row[3], int(state.get("anim_counter", 0) or 0), slot_i, monk_frame_w, monk_frame_h, orb_state)
+    old_px = int(player_x)
+    old_py = int(player_y)
+    player_x = orb_x + ((_MONK_ORB_W - player_w) // 2)
+    player_y = orb_y + (_MONK_ORB_H - player_h)
+    max_player_y_swap = map_h_px - player_h
+    if max_player_y_swap < 0:
+        max_player_y_swap = 0
+    player_x = _clamp(player_x, 0, max_player_x)
+    player_y = _clamp(player_y, 0, max_player_y_swap)
+    new_orb_x = int(old_px + ((player_w - _MONK_ORB_W) // 2))
+    new_orb_y = int(old_py + (player_h - _MONK_ORB_H))
+    orb_state["detached_x"] = new_orb_x
+    orb_state["detached_y"] = new_orb_y
+    orb_state["return_radius"] = _MONK_ORB_RADIUS
+    orb_state["mode"] = "detached"
+    return player_x, player_y, 0, True
+
+
 def _pick_enemy_hit_by_bullet(enemy_rows, enemy_states, bx, by, bw, bh, ignore_enemy_i=-1):
     if not enemy_rows:
         return -1
@@ -1577,6 +1639,7 @@ def _load_enemy_runtime_assets():
     enemy_update_native_ready = bool(_lgfx is not None and hasattr(_lgfx, "update_enemies_native"))
     enemy_bow_ready = bool(enemy_sheet is not None and enemy_frame_w > 0 and enemy_frame_h > 0)
     enemy_monk_ready = bool(enemy_monk_sheet is not None and enemy_monk_frame_w > 0 and enemy_monk_frame_h > 0)
+    monk_orb_states = _build_monk_orb_states(enemy_rows, enemy_meta)
     enemy_render_enabled = bool(enemy_rows and enemy_states and (enemy_bow_ready or enemy_monk_ready))
 
     return {
@@ -1618,6 +1681,7 @@ def _load_enemy_runtime_assets():
         "enemy_monk_orb_atlas": enemy_monk_orb_atlas,
         "enemy_monk_orb_atlas_w": enemy_monk_orb_atlas_w,
         "enemy_monk_orb_atlas_h": enemy_monk_orb_atlas_h,
+        "monk_orb_states": monk_orb_states,
         "enemy_bullets": enemy_bullets,
         "enemy_update_native_ready": enemy_update_native_ready,
         "enemy_render_enabled": enemy_render_enabled,
@@ -2228,6 +2292,8 @@ def _perform_world_swap(
     objects_meta,
     enemy_rows,
     enemy_states,
+    monk_orb_states,
+    enemy_meta,
     enemy_bullets,
     player_x,
     player_y,
@@ -2242,12 +2308,16 @@ def _perform_world_swap(
     vel_y,
     objects_c_buf,
     objects_c_stride,
+    monk_frame_w,
+    monk_frame_h,
 ):
     if not swap_triggered or (not objects_rows and not enemy_rows and not enemy_bullets):
         return player_x, player_y, vel_y, _rebuild_object_solids(objects_rows)
 
     object_ti = -1
     enemy_ti = -1
+    monk_orb_enemy_i = -1
+    monk_orb_slot_i = -1
     bullet_ti = -1
     if objects_rows:
         object_ti = _pick_swappable_object_index(
@@ -2274,6 +2344,23 @@ def _perform_world_swap(
             band_top,
             view_w,
             view_h,
+        )
+        monk_orb_enemy_i, monk_orb_slot_i = _pick_swappable_monk_orb(
+            enemy_rows,
+            enemy_states,
+            enemy_meta,
+            monk_orb_states,
+            player_x,
+            player_y,
+            player_w,
+            player_h,
+            swap_pick_far,
+            camera_x,
+            band_top,
+            view_w,
+            view_h,
+            monk_frame_w,
+            monk_frame_h,
         )
     if enemy_bullets:
         bullet_ti = _pick_swappable_bullet_index(
@@ -2305,6 +2392,19 @@ def _perform_world_swap(
             target_kind = "enemy"
             ti = enemy_ti
             best_d2 = d2
+    if monk_orb_enemy_i >= 0 and monk_orb_slot_i >= 0:
+        row = enemy_rows[monk_orb_enemy_i]
+        state = enemy_states[monk_orb_enemy_i] if monk_orb_enemy_i < len(enemy_states) else None
+        slot_states = monk_orb_states[monk_orb_enemy_i] if (monk_orb_states is not None and monk_orb_enemy_i < len(monk_orb_states)) else None
+        if state is not None and slot_states is not None and monk_orb_slot_i < len(slot_states):
+            orb_state = slot_states[monk_orb_slot_i]
+            orb_x, orb_y = _monk_orb_current_world_pos(row[0], row[1], row[2], row[3], int(state.get("anim_counter", 0) or 0), monk_orb_slot_i, monk_frame_w, monk_frame_h, orb_state)
+            d2 = _visible_target_distance2(orb_x, orb_y, _MONK_ORB_W, _MONK_ORB_H, player_x, player_y, player_w, player_h, camera_x, band_top, view_w, view_h)
+            prefer_over_enemy = (target_kind == "enemy" and enemy_ti == monk_orb_enemy_i)
+            if d2 >= 0 and (prefer_over_enemy or ti < 0 or (swap_pick_far and d2 > best_d2) or ((not swap_pick_far) and d2 < best_d2)):
+                target_kind = "monk_orb"
+                ti = monk_orb_slot_i
+                best_d2 = d2
     if bullet_ti >= 0:
         row = enemy_bullets[bullet_ti]
         d2 = _visible_target_distance2(row[0], row[1], row[4], row[5], player_x, player_y, player_w, player_h, camera_x, band_top, view_w, view_h)
@@ -2332,6 +2432,15 @@ def _perform_world_swap(
             row = enemy_bullets[ti]
             info = _visible_target_metrics(row[0], row[1], row[4], row[5], player_x, player_y, player_w, player_h, camera_x, band_top, view_w, view_h)
             print("SWAP_TARGET_DBG kind=bullet idx=%d wx=%d wy=%d ow=%d oh=%d info=%r" % (ti, row[0], row[1], row[4], row[5], info))
+        elif target_kind == "monk_orb" and monk_orb_enemy_i >= 0:
+            row = enemy_rows[monk_orb_enemy_i]
+            state = enemy_states[monk_orb_enemy_i] if monk_orb_enemy_i < len(enemy_states) else None
+            slot_states = monk_orb_states[monk_orb_enemy_i] if (monk_orb_states is not None and monk_orb_enemy_i < len(monk_orb_states)) else None
+            if state is not None and slot_states is not None and ti < len(slot_states):
+                orb_state = slot_states[ti]
+                orb_x, orb_y = _monk_orb_current_world_pos(row[0], row[1], row[2], row[3], int(state.get("anim_counter", 0) or 0), ti, monk_frame_w, monk_frame_h, orb_state)
+                info = _visible_target_metrics(orb_x, orb_y, _MONK_ORB_W, _MONK_ORB_H, player_x, player_y, player_w, player_h, camera_x, band_top, view_w, view_h)
+                print("SWAP_TARGET_DBG kind=monk_orb enemy=%d slot=%d wx=%d wy=%d ow=%d oh=%d info=%r" % (monk_orb_enemy_i, ti, orb_x, orb_y, _MONK_ORB_W, _MONK_ORB_H, info))
         else:
             print("SWAP_TARGET_DBG kind=none idx=-1")
 
@@ -2418,6 +2527,29 @@ def _perform_world_swap(
             print("SWAP_FAR_OK_BULLET idx=%d px=%d py=%d" % (ti, player_x, player_y))
         else:
             print("SWAP_NEAR_OK_BULLET idx=%d px=%d py=%d" % (ti, player_x, player_y))
+    elif target_kind == "monk_orb" and monk_orb_enemy_i >= 0 and ti >= 0:
+        player_x, player_y, vel_y, swapped_ok = _swap_with_monk_orb(
+            enemy_rows,
+            enemy_states,
+            monk_orb_states,
+            monk_orb_enemy_i,
+            ti,
+            player_x,
+            player_y,
+            player_w,
+            player_h,
+            max_player_x,
+            map_h_px,
+            monk_frame_w,
+            monk_frame_h,
+        )
+        if swapped_ok:
+            if swap_pick_far:
+                print("SWAP_FAR_OK_MONK_ORB enemy=%d slot=%d px=%d py=%d" % (monk_orb_enemy_i, ti, player_x, player_y))
+            else:
+                print("SWAP_NEAR_OK_MONK_ORB enemy=%d slot=%d px=%d py=%d" % (monk_orb_enemy_i, ti, player_x, player_y))
+        else:
+            print("SWAP_FAIL_NO_TARGET_V2")
     else:
         print("SWAP_FAIL_NO_TARGET_V2")
     return player_x, player_y, vel_y, object_solids
@@ -2439,6 +2571,207 @@ _MONK_ORB_SCALE = 1024
 _MONK_ORB_TABLE_SIZE = 60
 _MONK_ORB_COS = (1024, 1018, 1002, 974, 935, 887, 828, 761, 685, 602, 512, 416, 316, 213, 107, 0, -107, -213, -316, -416, -512, -602, -685, -761, -828, -887, -935, -974, -1002, -1018, -1024, -1018, -1002, -974, -935, -887, -828, -761, -685, -602, -512, -416, -316, -213, -107, 0, 107, 213, 316, 416, 512, 602, 685, 761, 828, 887, 935, 974, 1002, 1018)
 _MONK_ORB_SIN = (0, 107, 213, 316, 416, 512, 602, 685, 761, 828, 887, 935, 974, 1002, 1018, 1024, 1018, 1002, 974, 935, 887, 828, 761, 685, 602, 512, 416, 316, 213, 107, 0, -107, -213, -316, -416, -512, -602, -685, -761, -828, -887, -935, -974, -1002, -1018, -1024, -1018, -1002, -974, -935, -887, -828, -761, -685, -602, -512, -416, -316, -213, -107)
+_MONK_ORB_CAPTURE_ANGLE_EPS = 1
+_MONK_ORB_CAPTURE_LOCK_FRAMES = 4
+_MONK_ORB_CAPTURE_LINE_EPS = 6
+_MONK_ORB_RETURN_DONE_RADIUS_EPS = 1
+_MONK_ORB_RETURN_RADIUS_DIV = 20
+_MONK_ORB_RETURN_RADIUS_MIN_STEP = 1
+_MONK_ORB_RAD_PER_IDX = 6.283185307179586 / _MONK_ORB_TABLE_SIZE
+
+
+def _cyclic_idx_diff(target_idx, current_idx, modulo):
+    diff = (int(target_idx) - int(current_idx)) % int(modulo)
+    if diff > (modulo // 2):
+        diff -= modulo
+    return diff
+
+
+def _monk_enemy_draw_origin(wx, wy, ow, oh, monk_frame_w, monk_frame_h):
+    draw_x = int(wx)
+    draw_y = int(wy)
+    if int(monk_frame_w) > 0 and int(ow) != int(monk_frame_w):
+        draw_x = int(wx) + ((int(ow) - int(monk_frame_w)) // 2)
+    if int(monk_frame_h) > 0 and int(oh) != int(monk_frame_h):
+        draw_y = int(wy) + (int(oh) - int(monk_frame_h))
+    return draw_x, draw_y
+
+
+def _monk_center_world_pos(wx, wy, ow, oh, monk_frame_w, monk_frame_h):
+    draw_x, draw_y = _monk_enemy_draw_origin(wx, wy, ow, oh, monk_frame_w, monk_frame_h)
+    return draw_x + (int(monk_frame_w) // 2), draw_y + (int(monk_frame_h) // 2)
+
+
+def _monk_orb_world_pos_from_polar(center_x, center_y, radius_px, angle_idx):
+    idx = int(angle_idx) % _MONK_ORB_TABLE_SIZE
+    orb_cx = int(center_x) + ((_MONK_ORB_COS[idx] * int(radius_px)) // _MONK_ORB_SCALE)
+    orb_cy = int(center_y) - ((_MONK_ORB_SIN[idx] * int(radius_px)) // _MONK_ORB_SCALE)
+    return orb_cx - (_MONK_ORB_W // 2), orb_cy - (_MONK_ORB_H // 2)
+
+
+def _monk_orb_world_pos_from_angle(center_x, center_y, radius_px, angle_rad):
+    if math is None:
+        idx = int((float(angle_rad) / _MONK_ORB_RAD_PER_IDX) + 0.5)
+        return _monk_orb_world_pos_from_polar(center_x, center_y, radius_px, idx)
+    orb_cx = int(center_x) + int(math.cos(float(angle_rad)) * float(radius_px))
+    orb_cy = int(center_y) - int(math.sin(float(angle_rad)) * float(radius_px))
+    return orb_cx - (_MONK_ORB_W // 2), orb_cy - (_MONK_ORB_H // 2)
+
+
+def _monk_orb_slot_angle_rad(anim_counter, slot_i):
+    angle_rad = float(int(anim_counter or 0)) * _MONK_ORB_RAD_PER_IDX
+    angle_rad += (float(slot_i) * 6.283185307179586) / float(_MONK_ORB_COUNT)
+    while angle_rad >= 6.283185307179586:
+        angle_rad -= 6.283185307179586
+    while angle_rad < 0.0:
+        angle_rad += 6.283185307179586
+    return angle_rad
+
+
+def _monk_orb_rel_to_center(center_x, center_y, orb_x, orb_y):
+    orb_cx = int(orb_x) + (_MONK_ORB_W // 2)
+    orb_cy = int(orb_y) + (_MONK_ORB_H // 2)
+    rel_x = orb_cx - int(center_x)
+    rel_y = int(center_y) - orb_cy
+    return rel_x, rel_y
+
+
+def _pick_nearest_monk_orb_angle_idx(rel_x, rel_y):
+    best_idx = 0
+    best_dot = None
+    idx = 0
+    while idx < _MONK_ORB_TABLE_SIZE:
+        dot = (int(rel_x) * _MONK_ORB_COS[idx]) + (int(rel_y) * _MONK_ORB_SIN[idx])
+        if best_dot is None or dot > best_dot:
+            best_dot = dot
+            best_idx = idx
+        idx += 1
+    return best_idx
+
+
+def _quantize_monk_orb_polar(center_x, center_y, orb_x, orb_y):
+    orb_cx = int(orb_x) + (_MONK_ORB_W // 2)
+    orb_cy = int(orb_y) + (_MONK_ORB_H // 2)
+    rel_x = orb_cx - int(center_x)
+    rel_y = int(center_y) - orb_cy
+    radius_px = _MONK_ORB_RADIUS
+    radius_sq = (rel_x * rel_x) + (rel_y * rel_y)
+    if radius_sq > 0:
+        if math is not None:
+            try:
+                radius_px = int(math.sqrt(radius_sq))
+            except Exception:
+                radius_px = _MONK_ORB_RADIUS
+    angle_rad = 0.0
+    if math is not None:
+        try:
+            angle_rad = math.atan2(float(rel_y), float(rel_x))
+            if angle_rad < 0.0:
+                angle_rad += 6.283185307179586
+        except Exception:
+            angle_idx = _pick_nearest_monk_orb_angle_idx(rel_x, rel_y)
+            angle_rad = float(angle_idx) * _MONK_ORB_RAD_PER_IDX
+    else:
+        angle_idx = _pick_nearest_monk_orb_angle_idx(rel_x, rel_y)
+        angle_rad = float(angle_idx) * _MONK_ORB_RAD_PER_IDX
+    return radius_px, angle_rad
+
+
+def _build_monk_orb_states(enemy_rows, enemy_meta=None, orb_count=_MONK_ORB_COUNT):
+    states = []
+    if not enemy_rows or orb_count <= 0:
+        return states
+    ei = 0
+    while ei < len(enemy_rows):
+        meta = enemy_meta[ei] if (enemy_meta is not None and ei < len(enemy_meta)) else None
+        enemy_type = str(meta.get("type", "bow") or "bow") if meta is not None else "bow"
+        if enemy_type == "monk":
+            slot_states = []
+            si = 0
+            while si < orb_count:
+                slot_states.append({
+                    "slot": si,
+                    "mode": "orbit",
+                    "detached_x": 0,
+                    "detached_y": 0,
+                    "return_radius": _MONK_ORB_RADIUS,
+                    "capture_lock": 0,
+                })
+                si += 1
+            states.append(slot_states)
+        else:
+            states.append(None)
+        ei += 1
+    return states
+
+
+def _step_monk_orb_state(orb_state, center_x, center_y, base_angle_rad):
+    if orb_state is None:
+        return "orbit"
+    mode = str(orb_state.get("mode", "orbit") or "orbit")
+    if mode == "orbit":
+        return "orbit"
+    if mode == "detached":
+        detached_x = int(orb_state.get("detached_x", 0) or 0)
+        detached_y = int(orb_state.get("detached_y", 0) or 0)
+        radius_px, angle_rad = _quantize_monk_orb_polar(center_x, center_y, detached_x, detached_y)
+        rel_x, rel_y = _monk_orb_rel_to_center(center_x, center_y, detached_x, detached_y)
+        if math is not None:
+            dir_x = math.cos(base_angle_rad)
+            dir_y = math.sin(base_angle_rad)
+            along = (float(rel_x) * dir_x) + (float(rel_y) * dir_y)
+            perp = abs((float(rel_x) * dir_y) - (float(rel_y) * dir_x))
+        else:
+            base_angle_idx = int((base_angle_rad / _MONK_ORB_RAD_PER_IDX) + 0.5)
+            angle_idx = int((angle_rad / _MONK_ORB_RAD_PER_IDX) + 0.5)
+            angle_diff = _cyclic_idx_diff(base_angle_idx, angle_idx, _MONK_ORB_TABLE_SIZE)
+            along = 1 if radius_px > 0 else 0
+            perp = abs(angle_diff) * max(radius_px, 1) * _MONK_ORB_RAD_PER_IDX
+        if along > 0 and perp <= _MONK_ORB_CAPTURE_LINE_EPS:
+            orb_state["capture_lock"] = _MONK_ORB_CAPTURE_LOCK_FRAMES
+            orb_state["mode"] = "captured_return"
+            orb_state["return_radius"] = radius_px
+            return "captured_return"
+        return "detached"
+    capture_lock = int(orb_state.get("capture_lock", 0) or 0)
+    if capture_lock > 0:
+        orb_state["capture_lock"] = capture_lock - 1
+    radius_px = int(orb_state.get("return_radius", _MONK_ORB_RADIUS) or _MONK_ORB_RADIUS)
+    if radius_px <= (_MONK_ORB_RADIUS + _MONK_ORB_RETURN_DONE_RADIUS_EPS):
+        orb_state["return_radius"] = _MONK_ORB_RADIUS
+        orb_state["mode"] = "orbit"
+        return "orbit"
+    shrink = (radius_px - _MONK_ORB_RADIUS) // _MONK_ORB_RETURN_RADIUS_DIV
+    if shrink < _MONK_ORB_RETURN_RADIUS_MIN_STEP:
+        shrink = _MONK_ORB_RETURN_RADIUS_MIN_STEP
+    radius_px -= shrink
+    if radius_px <= (_MONK_ORB_RADIUS + _MONK_ORB_RETURN_DONE_RADIUS_EPS):
+        radius_px = _MONK_ORB_RADIUS
+    if radius_px <= _MONK_ORB_RADIUS:
+        orb_state["return_radius"] = _MONK_ORB_RADIUS
+        orb_state["mode"] = "orbit"
+        return "orbit"
+    orb_state["return_radius"] = radius_px
+    orb_state["mode"] = "captured_return"
+    return "captured_return"
+
+
+def _monk_orb_current_world_pos(wx, wy, ow, oh, anim_counter, slot_i, monk_frame_w, monk_frame_h, orb_state):
+    base_x, base_y = _monk_orb_slot_world_pos(wx, wy, ow, oh, anim_counter, slot_i, monk_frame_w, monk_frame_h)
+    center_x, center_y = _monk_center_world_pos(wx, wy, ow, oh, monk_frame_w, monk_frame_h)
+    base_angle_rad = _monk_orb_slot_angle_rad(anim_counter, slot_i)
+    mode = _step_monk_orb_state(orb_state, center_x, center_y, base_angle_rad)
+    if mode == "orbit":
+        return base_x, base_y
+    if mode == "detached":
+        return int(orb_state.get("detached_x", base_x) or base_x), int(orb_state.get("detached_y", base_y) or base_y)
+    radius_px = int(orb_state.get("return_radius", _MONK_ORB_RADIUS) or _MONK_ORB_RADIUS)
+    return _monk_orb_world_pos_from_angle(center_x, center_y, radius_px, base_angle_rad)
+
+
+def _monk_orb_slot_world_pos(wx, wy, ow, oh, anim_counter, slot_i, monk_frame_w, monk_frame_h):
+    center_x, center_y = _monk_center_world_pos(wx, wy, ow, oh, monk_frame_w, monk_frame_h)
+    return _monk_orb_world_pos_from_angle(center_x, center_y, _MONK_ORB_RADIUS, _monk_orb_slot_angle_rad(anim_counter, slot_i))
 
 
 def _special_kind_from_anim_id(anim_id):
@@ -2504,6 +2837,7 @@ def _pack_special_object_descriptors(
 def _pack_monk_orb_descriptors(
     enemy_rows,
     enemy_states,
+    monk_orb_states=None,
     enemy_meta=None,
     camera_x=0,
     view_w=320,
@@ -2520,9 +2854,10 @@ def _pack_monk_orb_descriptors(
     while ei < len(enemy_rows):
         row = enemy_rows[ei]
         state = enemy_states[ei] if ei < len(enemy_states) else None
+        slot_states = monk_orb_states[ei] if (monk_orb_states is not None and ei < len(monk_orb_states)) else None
         meta = enemy_meta[ei] if (enemy_meta is not None and ei < len(enemy_meta)) else None
         enemy_type = str(meta.get("type", "bow") or "bow") if meta is not None else "bow"
-        if state is not None and enemy_type == "monk":
+        if state is not None and enemy_type == "monk" and slot_states:
             wx, wy, ow, oh, visible, _swappable = row
             draw_x = int(wx)
             draw_y = int(wy)
@@ -2532,20 +2867,14 @@ def _pack_monk_orb_descriptors(
                 draw_y = int(wy) + (int(oh) - int(monk_frame_h))
             orb_extent = _MONK_ORB_RADIUS + (_MONK_ORB_W // 2)
             if visible and _aabb_near_view(draw_x - orb_extent, draw_y - orb_extent, int(monk_frame_w) + (orb_extent * 2), int(monk_frame_h) + (orb_extent * 2), camera_x, view_w, view_h, 48, 32):
-                center_x = draw_x + (int(monk_frame_w) // 2)
-                center_y = draw_y + (int(monk_frame_h) // 2)
-                phase = int(state.get("anim_counter", 0) or 0) % _MONK_ORB_TABLE_SIZE
                 oi = 0
-                while oi < _MONK_ORB_COUNT:
-                    idx = phase + ((oi * _MONK_ORB_TABLE_SIZE) // _MONK_ORB_COUNT)
-                    while idx >= _MONK_ORB_TABLE_SIZE:
-                        idx -= _MONK_ORB_TABLE_SIZE
-                    orb_x = center_x + ((_MONK_ORB_COS[idx] * _MONK_ORB_RADIUS) // _MONK_ORB_SCALE) - (_MONK_ORB_W // 2)
-                    orb_y = center_y - ((_MONK_ORB_SIN[idx] * _MONK_ORB_RADIUS) // _MONK_ORB_SCALE) - (_MONK_ORB_H // 2)
+                while oi < len(slot_states):
+                    orb_state = slot_states[oi]
+                    orb_x, orb_y = _monk_orb_current_world_pos(wx, wy, ow, oh, int(state.get("anim_counter", 0) or 0), oi, monk_frame_w, monk_frame_h, orb_state)
                     _append_i16_le(out, orb_x)
                     _append_i16_le(out, orb_y)
                     out.append(_SPECIAL_KIND_MONK_ORB)
-                    out.append(0)
+                    out.append(oi & 0xFF)
                     out.append(0)
                     out.append(0)
                     count += 1
@@ -3594,7 +3923,9 @@ def _emit_step4_profile(
     avg_submit_swap_us = prof_submit_swap_us // n
     avg_total_us = prof_total_us // n
     avg_pace_us = prof_pace_us // n
-    avg_other_us = avg_total_us - (avg_update_us + avg_bg_us + avg_world_us + avg_sprite_us + avg_hud_us + avg_submit_us)
+    avg_other_us = avg_total_us - (
+        avg_update_us + avg_bg_us + avg_world_us + avg_sprite_us + avg_hud_us + avg_submit_us
+    )
     if avg_other_us < 0:
         avg_other_us = 0
     fps_prof = 0.0
@@ -3682,6 +4013,7 @@ def _submit_native_band_frame(
     anchor_anim_counter,
     enemy_rows,
     enemy_states,
+    monk_orb_states,
     enemy_meta,
     enemy_monk_sheet,
     enemy_monk_frame_w,
@@ -3735,6 +4067,7 @@ def _submit_native_band_frame(
     native_probe_disable_overlays,
     native_probe_disable_far,
     dirty_log_countdown,
+    defer_final_wait,
 ):
     submit_t0 = ticks_us()
     sprite_x = player_screen_x + draw_off_x
@@ -3767,6 +4100,7 @@ def _submit_native_band_frame(
     monk_orb_desc_buf, monk_orb_desc_stride, monk_orb_desc_count = _pack_monk_orb_descriptors(
         enemy_rows,
         enemy_states,
+        monk_orb_states,
         enemy_meta,
         camera_x,
         sw,
@@ -3902,6 +4236,7 @@ def _submit_native_band_frame(
                 enemy_frame_hold,
                 native_probe_flags,
                 False,
+                defer_final_wait,
             )
         else:
             band_res = _lgfx.render_scene_bands_rgb565(
@@ -3950,6 +4285,7 @@ def _submit_native_band_frame(
                 object_colorkey,
                 native_probe_flags,
                 False,
+                defer_final_wait,
             )
     except Exception:
         print("BAND_PIPELINE_NATIVE_FAIL")
@@ -4026,8 +4362,6 @@ def _submit_native_band_frame(
 
 
 def _print_camera_test_start(mode):
-    print("SWAP_DEBUG_BUILD_V1")
-    print("RUNTIME_APP_CAMERA_TEST_DEBUG_V2")
     print("APP_RUN_START_PHASE_CAMERA_TEST_V2")
     print("CAMERA_TEST_START")
     print("CAMERA_TEST_BOOT_SOURCE=%s" % _boot_source_tag)
@@ -5019,6 +5353,10 @@ def run(max_frames=None):
             dirty_last_rects_count = 0
             dirty_last_bands_count = 0
             dirty_last_camera_static = 1
+            tail_overlap_update_acc = 0
+            tail_overlap_residual_wait_acc = 0
+            tail_overlap_total_wait_acc = 0
+            native_tail_inflight = False
             floor_layer_enabled = bool(getattr(config, "FLOOR_LAYER_ENABLED", False))
             tilemap_enabled = bool(getattr(config, "TILEMAP_ENABLED", True))
             tilemap_rows = None
@@ -5142,6 +5480,7 @@ def run(max_frames=None):
             enemy_monk_orb_atlas = enemy_rt["enemy_monk_orb_atlas"]
             enemy_monk_orb_atlas_w = enemy_rt["enemy_monk_orb_atlas_w"]
             enemy_monk_orb_atlas_h = enemy_rt["enemy_monk_orb_atlas_h"]
+            monk_orb_states = enemy_rt["monk_orb_states"]
             enemy_bullets = enemy_rt["enemy_bullets"]
             enemy_update_native_ready = enemy_rt["enemy_update_native_ready"]
             enemy_render_enabled = enemy_rt["enemy_render_enabled"]
@@ -5435,6 +5774,11 @@ def run(max_frames=None):
                 )
             elif bool(getattr(config, "CAMERA_BAND_PIPELINE_NATIVE", False)):
                 print("BAND_PIPELINE_NATIVE_FALLBACK")
+            native_tail_overlap_enabled = (
+                native_band_pipeline_enabled
+                and hasattr(_lgfx, "band_pipeline_tail_wait")
+                and bool(getattr(config, "CAMERA_BAND_TAIL_OVERLAP_UPDATE", False))
+            )
 
             while True:
                 now = ticks_ms()
@@ -5648,6 +5992,8 @@ def run(max_frames=None):
                         objects_meta,
                         enemy_rows,
                         enemy_states,
+                        monk_orb_states,
+                        enemy_meta,
                         enemy_bullets,
                         player_x,
                         player_y,
@@ -5662,6 +6008,8 @@ def run(max_frames=None):
                         vel_y,
                         objects_c_buf,
                         objects_c_stride,
+                        enemy_monk_frame_w,
+                        enemy_monk_frame_h,
                     )
                     if swap_triggered:
                         _sync_enemy_rows_c_from_rows(enemy_rows_c_buf, enemy_rows_c_stride, enemy_rows, enemy_meta)
@@ -5842,7 +6190,28 @@ def run(max_frames=None):
                             print("PLAYER_RESPAWN_OK x=%d y=%d" % (player_x, player_y))
                     player_screen_x = -4096
 
-                prof_update_us += ticks_diff(ticks_us(), seg_t0)
+                frame_update_us = ticks_diff(ticks_us(), seg_t0)
+                prof_update_us += frame_update_us
+                if native_tail_overlap_enabled and native_tail_inflight:
+                    try:
+                        tail_total_wait_us, tail_residual_wait_us, tail_residual_dma_wait_us, tail_end_us = _lgfx.band_pipeline_tail_wait()
+                    except Exception:
+                        native_tail_inflight = False
+                        native_tail_overlap_enabled = False
+                        print("TAIL_OVERLAP_FALLBACK")
+                    else:
+                        native_tail_inflight = False
+                        overlap_update_us = tail_total_wait_us - tail_residual_wait_us
+                        if overlap_update_us < 0:
+                            overlap_update_us = 0
+                        if overlap_update_us > frame_update_us:
+                            overlap_update_us = frame_update_us
+                        tail_overlap_update_acc += overlap_update_us
+                        tail_overlap_residual_wait_acc += tail_residual_wait_us
+                        tail_overlap_total_wait_acc += tail_total_wait_us
+                        prof_submit_wait_us += tail_residual_wait_us
+                        prof_submit_dma_wait_us += tail_residual_dma_wait_us
+                        prof_submit_end_us += tail_end_us
 
                 frame_native_band_enabled = native_band_pipeline_enabled
 
@@ -5905,6 +6274,7 @@ def run(max_frames=None):
                         anchor_anim_counter,
                         enemy_rows,
                         enemy_states,
+                        monk_orb_states,
                         enemy_meta,
                         enemy_monk_sheet,
                         enemy_monk_frame_w,
@@ -5958,6 +6328,7 @@ def run(max_frames=None):
                         native_probe_disable_overlays,
                         native_probe_disable_far,
                         dirty_log_countdown,
+                        native_tail_overlap_enabled,
                     )
                     swap_us = 0
                     submit_acc += us
@@ -5989,6 +6360,7 @@ def run(max_frames=None):
                     prof_submit_dma_wait_us += wait_dma_us
                     prof_submit_end_us += end_us
                     prof_submit_swap_us += swap_us
+                    native_tail_inflight = native_tail_overlap_enabled
                     dirty_last_rects_count = band_count
                     dirty_last_bands_count = band_count
                     dirty_last_camera_static = 1 if camera_x == prev_camera_x else 0
@@ -6637,6 +7009,16 @@ def run(max_frames=None):
                         fallback_us_acc,
                         submit_acc,
                     )
+                    if native_tail_overlap_enabled:
+                        avg_tail_overlap_update_us = tail_overlap_update_acc // profile_every
+                        avg_tail_overlap_residual_wait_us = tail_overlap_residual_wait_acc // profile_every
+                        avg_tail_overlap_total_wait_us = tail_overlap_total_wait_acc // profile_every
+                        print("PROFILE tail_overlap_update_us=%d" % avg_tail_overlap_update_us)
+                        print("PROFILE tail_overlap_residual_wait_us=%d" % avg_tail_overlap_residual_wait_us)
+                        print("PROFILE tail_overlap_total_wait_us=%d" % avg_tail_overlap_total_wait_us)
+                        tail_overlap_update_acc = 0
+                        tail_overlap_residual_wait_acc = 0
+                        tail_overlap_total_wait_acc = 0
                     (
                         prof_update_us,
                         prof_bg_us,
@@ -6683,6 +7065,11 @@ def run(max_frames=None):
                     w_t0 = ticks_us()
                     _lgfx.blit_wait_done()
                     prof_submit_wait_us += ticks_diff(ticks_us(), w_t0)
+                except Exception:
+                    pass
+            if native_tail_inflight and hasattr(_lgfx, "band_pipeline_tail_wait"):
+                try:
+                    _lgfx.band_pipeline_tail_wait()
                 except Exception:
                     pass
             if far_runtime_file is not None:
