@@ -8,14 +8,14 @@
 - launcher 直接 `exec /sd/game/config.py`，再 `exec /sd/game/app_camera_test.py`
 - Python 更新玩家、camera、swap、respawn、object gravity 與主迴圈狀態
 - C++ `lgfx.update_enemies_native(...)` 更新 enemy / bullet
-- C++ `lgfx.render_scene_bands_rgb565(...)` 做 `320x240 -> 6 x 320x40` native band compose + wire-order DMA submit
+- C++ `lgfx.render_scene_bands_rgb565(...)` 做 `320x240 -> 5 x 320x48` native band compose + wire-order DMA submit
 
 ## 目前重點
 
 - 啟動路徑：`SD-only launcher`
 - 唯一 SD wiring：`slot=2, width=1, sck=39, miso=40, mosi=38, cs=47, freq=1000000`
 - 渲染主線：`NATIVE_BAND_PIPELINE`
-- band 高度：`40`
+- band 高度：`48`
 - enemy update：`C_API`
 - 資產格式：wire-order RGB565
 - DMA 前會做 cache sync
@@ -51,7 +51,7 @@
 - `OBJECT_COUNT=10`
 - `ENEMY_UPDATE_IMPL=C_API`
 - `SUBMIT_MODE=NATIVE_BAND_PIPELINE`
-- `BAND_PIPELINE_NATIVE_ON h=40`
+- `BAND_PIPELINE_NATIVE_ON h=48`
 - `CAMERA_TEST_STEP=4_DRAW_OK`
 
 ## 建置原則

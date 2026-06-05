@@ -387,7 +387,7 @@ print('APP_CALLS_NATIVE_OVERLAY', 'overlay_desc_buf,' in app)"
 正常啟動後 log 會看到遊戲主線輸出，例如：
 
 - `SUBMIT_MODE=NATIVE_BAND_PIPELINE`
-- `BAND_PIPELINE_NATIVE_ON h=40`
+- `BAND_PIPELINE_NATIVE_ON h=48`
 - `PROFILE fps=...`
 - `APP_RUN_START_PHASE_CAMERA_TEST`
 
@@ -501,7 +501,7 @@ rg -n "CAMERA_TEST_MODE|CAMERA_TEST_STEP|CAMERA_SPI_TEST_DBG_EVERY" /workspace/e
 - `APP_RUN_START_PHASE_CAMERA_TEST`
 - `CAMERA_TEST_MODE=...`
 - `SUBMIT_MODE=NATIVE_BAND_PIPELINE`
-- `BAND_PIPELINE_NATIVE_ON h=40`
+- `BAND_PIPELINE_NATIVE_ON h=48`
 - `PROFILE fps=...`
 
 ## 14. 一鍵流程（可直接貼上）
@@ -578,9 +578,9 @@ idf.py -B build-ESP32_GENERIC_S3-SPIRAM_OCT_NOBT -p /dev/ttyACM0 flash
 開機 log 應看到：
 
 - `SUBMIT_MODE=NATIVE_BAND_PIPELINE`
-- `BAND_PIPELINE_NATIVE_ON h=40`
+- `BAND_PIPELINE_NATIVE_ON h=48`
 
-目前實機量測中，`CAMERA_BAND_PIPELINE_H = 40` 比 `60 / 80 / 120` 都更佳，是目前建議固定的主線值。
+目前實機量測中，`CAMERA_BAND_PIPELINE_H = 48` 比 `40 / 32 / 24 / 56` 更佳，且在起始區域與 monk 區域都勝出，是目前建議固定的主線值。
 
 若缺少 `render_scene_bands_rgb565`，代表 firmware 仍是舊版或 `/tmp/esp-mp-local` 漏同步 `lgfx_mp.cpp` / `lgfx_band.cpp` / `lgfx_shared.hpp`。
 
@@ -590,7 +590,7 @@ idf.py -B build-ESP32_GENERIC_S3-SPIRAM_OCT_NOBT -p /dev/ttyACM0 flash
 
 目前實機驗證過：
 
-- `CAMERA_BAND_PIPELINE_H = 40` 是正式主線 band 高度
+- `CAMERA_BAND_PIPELINE_H = 48` 是正式主線 band 高度
 - `lgfx_config.hpp` 的 `cfg.freq_write = 40000000` 是目前正式主線 SPI write clock
 - `80MHz` 雖可把 `submit_us` 明顯壓低、FPS 拉到約 `31.6`，但畫面會撕裂
 - 因此目前主線固定維持 `40MHz`，不要把 `80MHz` 當成預設 baseline

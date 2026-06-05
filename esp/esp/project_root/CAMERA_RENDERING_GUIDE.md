@@ -10,9 +10,9 @@
 - `CAMERA_PLAYER_SPRITE_COMPOSE_IMPL = "C_API"`
 - `CAMERA_FULL_BULK_WIRE_ORDER = True`
 - `CAMERA_BAND_PIPELINE_NATIVE = True`
-- `CAMERA_BAND_PIPELINE_H = 40`
+- `CAMERA_BAND_PIPELINE_H = 48`
 - `SUBMIT_MODE=NATIVE_BAND_PIPELINE`
-- `BAND_PIPELINE_NATIVE_ON h=40`
+- `BAND_PIPELINE_NATIVE_ON h=48`
 
 目前 firmware 主線的 panel bus baseline：
 
@@ -56,7 +56,7 @@
    - 若 native path 失敗，印一次 `ENEMY_UPDATE_NATIVE_FALLBACK ...` 並回退 Python update
 3. Python 打包 object / overlay / enemy render descriptors
 4. Python 呼叫 `lgfx.render_scene_bands_rgb565(...)`
-5. C++ 以 `320 x 40` 的 band 逐條 compose 與 submit
+5. C++ 以 `320 x 48` 的 band 逐條 compose 與 submit
 
 目前 band 內 C++ compose 順序：
 
@@ -209,14 +209,10 @@ enemy native update 目前使用常駐 packed buffer，不再每幀重建。
 
 目前正式主線是 native band pipeline。
 
-目前 40MHz / `h=40` 正式主線大致觀察：
+目前 40MHz / `h=48` 正式主線大致觀察：
 
-- `submit_us` 約 `36.4ms`
-- `submit_kick_us` 約 `1.75ms`
-- `submit_wait_us` 約 `14.46ms`
-- `submit_sync_us` 約 `1.50ms`
-- `submit_dma_wait_us` 約 `14.38ms`
-- `fps` 約 `23.9`
+- 起始區域：`submit_us` 約 `32.1ms`、`submit_wait_us` 約 `13.8ms`、`submit_dma_wait_us` 約 `13.6ms`、`fps` 約 `25.9`
+- monk 區域：`submit_us` 約 `32.6ms`、`submit_wait_us` 約 `15.9ms`、`submit_dma_wait_us` 約 `15.8ms`、`fps` 約 `25.6`
 
 額外 probe 結論：
 
@@ -295,7 +291,7 @@ enemy update 搬到 C++ 並改成 persistent buffer 後，敵人區實測大致�
 - `ENEMY_MODE_ON`
 - `ENEMY_UPDATE_IMPL=C_API`
 - `SUBMIT_MODE=NATIVE_BAND_PIPELINE`
-- `BAND_PIPELINE_NATIVE_ON h=40`
+- `BAND_PIPELINE_NATIVE_ON h=48`
 - `BAND_PIPELINE_SUBMIT_OK`
 - `PROFILE update_us=...`
 - `PROFILE submit_us=...`
@@ -360,7 +356,7 @@ idf.py -B build-ESP32_GENERIC_S3-SPIRAM_OCT_NOBT -p /dev/ttyACM0 flash
 
 目前 enemy logic 這條線已經壓得差不多。下一步若要再拉 FPS，優先順序應放在 submit / render 路徑：
 
-1. 測 `CAMERA_BAND_PIPELINE_H = 40 / 48 / 80`
+1. 目前正式主線固定 `CAMERA_BAND_PIPELINE_H = 48`
 2. 若要再追 submit bottleneck，先優先檢查 panel bus / DMA 參數，而不是再關單一圖層
 3. 分析 enemy 區是否讓更多 band 被迫做完整 compose
 4. 減少不必要 band 更新量

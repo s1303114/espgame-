@@ -77,13 +77,13 @@ C++ (`lgfx` user module) 負責：
 
 - `CAMERA_TEST_MODE = "ROWS_SAFE_PROGRESSIVE"`
 - `CAMERA_BAND_PIPELINE_NATIVE = True`
-- `CAMERA_BAND_PIPELINE_H = 40`
+- `CAMERA_BAND_PIPELINE_H = 48`
 - `CAMERA_FULL_BULK_WIRE_ORDER = True`
 - `SUBMIT_MODE=NATIVE_BAND_PIPELINE`
-- `BAND_PIPELINE_NATIVE_ON h=40`
+- `BAND_PIPELINE_NATIVE_ON h=48`
 - `lgfx_config.hpp` 內 `cfg.freq_write = 40000000`
 
-目前畫面以 `320x240` 拆成 `6 x 320x40` bands。C++ 在每個 band 內依序處理：
+目前畫面以 `320x240` 拆成 `5 x 320x48` bands。C++ 在每個 band 內依序處理：
 
 1. far background
 2. tilemap
@@ -145,7 +145,7 @@ enemy update 已搬到 C++：
 建議優先看：
 
 - `SUBMIT_MODE=NATIVE_BAND_PIPELINE`
-- `BAND_PIPELINE_NATIVE_ON h=40`
+- `BAND_PIPELINE_NATIVE_ON h=48`
 - `OBJECT_COUNT=10`
 - `ENEMY_MODE_ON`
 - `ENEMY_UPDATE_IMPL=C_API`
@@ -210,7 +210,7 @@ enemy logic 這條線已壓到次要瓶頸；目前真正大頭仍是 `submit_us
 - `CAMERA_TEST_MODE=ROWS_SAFE_PROGRESSIVE`
 - `CAMERA_TEST_STEP=4_START`
 - `SUBMIT_MODE=NATIVE_BAND_PIPELINE`
-- `BAND_PIPELINE_NATIVE_ON h=40`
+- `BAND_PIPELINE_NATIVE_ON h=48`
 - 持續看到 `BAND_PIPELINE_SUBMIT_OK`
 - 未出現 `SAFE MODE` / `Traceback` / `NameError` / `UNSUPPORTED_MODE`
 
@@ -222,7 +222,7 @@ enemy logic 這條線已壓到次要瓶頸；目前真正大頭仍是 `submit_us
 - `CAMERA_TEST_STEP=4_START`
 - `ENEMY_UPDATE_IMPL=C_API`
 - `SUBMIT_MODE=NATIVE_BAND_PIPELINE`
-- `BAND_PIPELINE_NATIVE_ON h=40`
+- `BAND_PIPELINE_NATIVE_ON h=48`
 - `BAND_PIPELINE_SUBMIT_OK`
 - `CAMERA_TEST_STEP=4_DRAW_OK`
 - 清理 dead code 後重新部署仍可正常啟動主線
