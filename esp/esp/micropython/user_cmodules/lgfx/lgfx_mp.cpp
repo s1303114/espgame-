@@ -20,6 +20,7 @@ extern "C" {
 #include "lgfx_config.hpp"
 #include "lgfx_shared.hpp"
 LGFX lcd;
+extern "C" mp_obj_t lgfx_band_pipeline_tail_wait(void);
 
 static uint8_t *read_file_bytes(const char *path, size_t *out_len) {
     mp_obj_t args[2] = {
@@ -405,6 +406,7 @@ static mp_obj_t lgfx_blit_wait_done(void) {
     return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(lgfx_blit_wait_done_obj, lgfx_blit_wait_done);
+static MP_DEFINE_CONST_FUN_OBJ_0(lgfx_band_pipeline_tail_wait_obj, lgfx_band_pipeline_tail_wait);
 
 
 static mp_obj_t lgfx_async_probe_rgb565(size_t n_args, const mp_obj_t *args) {
@@ -966,12 +968,13 @@ static int32_t lgfx_pick_enemy_hit_by_bullet(
 }
 
 static mp_obj_t lgfx_update_enemies_native(size_t n_args, const mp_obj_t *args) {
-    if (n_args != 41) {
-        mp_raise_ValueError(MP_ERROR_TEXT("need 41 args"));
+    if (n_args != 44) {
+        mp_raise_ValueError(MP_ERROR_TEXT("need 44 args"));
     }
 
     mp_buffer_info_t enemy_rows_info;
     mp_buffer_info_t enemy_states_info;
+    mp_buffer_info_t monk_hover_info;
     mp_buffer_info_t bullet_info;
     mp_buffer_info_t tilemap_info;
     mp_buffer_info_t solids_info;
@@ -980,44 +983,47 @@ static mp_obj_t lgfx_update_enemies_native(size_t n_args, const mp_obj_t *args) 
     mp_get_buffer_raise(args[2], &enemy_states_info, MP_BUFFER_RW);
     mp_int_t enemy_state_stride = mp_obj_get_int(args[3]);
     mp_int_t enemy_count = mp_obj_get_int(args[4]);
-    mp_get_buffer_raise(args[5], &bullet_info, MP_BUFFER_RW);
-    mp_int_t bullet_stride = mp_obj_get_int(args[6]);
-    mp_int_t bullet_count = mp_obj_get_int(args[7]);
-    mp_int_t player_x = mp_obj_get_int(args[8]);
-    mp_int_t player_y = mp_obj_get_int(args[9]);
-    mp_int_t player_w = mp_obj_get_int(args[10]);
-    mp_int_t player_h = mp_obj_get_int(args[11]);
-    mp_int_t vel_y = mp_obj_get_int(args[12]);
-    mp_get_buffer_raise(args[13], &tilemap_info, MP_BUFFER_READ);
-    mp_int_t tilemap_w = mp_obj_get_int(args[14]);
-    mp_int_t tilemap_h = mp_obj_get_int(args[15]);
-    mp_int_t tile_size = mp_obj_get_int(args[16]);
-    mp_get_buffer_raise(args[17], &solids_info, MP_BUFFER_READ);
-    mp_int_t solid_stride = mp_obj_get_int(args[18]);
-    mp_int_t solid_count = mp_obj_get_int(args[19]);
-    mp_int_t death_margin = mp_obj_get_int(args[20]);
-    mp_int_t enemy_detect_x = mp_obj_get_int(args[21]);
-    mp_int_t enemy_flee_x = mp_obj_get_int(args[22]);
-    mp_int_t enemy_detect_y = mp_obj_get_int(args[23]);
-    mp_int_t enemy_move_speed = mp_obj_get_int(args[24]);
-    mp_int_t enemy_gravity_step = mp_obj_get_int(args[25]);
-    mp_int_t enemy_frame_hold = mp_obj_get_int(args[26]);
-    mp_int_t enemy_shoot_fire_frame = mp_obj_get_int(args[27]);
-    mp_int_t enemy_bullet_speed = mp_obj_get_int(args[28]);
-    mp_int_t enemy_bullet_w = mp_obj_get_int(args[29]);
-    mp_int_t enemy_bullet_h = mp_obj_get_int(args[30]);
-    mp_int_t enemy_shoot_interval = mp_obj_get_int(args[31]);
-    mp_int_t fall_speed_max = mp_obj_get_int(args[32]);
-    mp_int_t map_w_px = mp_obj_get_int(args[33]);
-    mp_int_t map_h_px = mp_obj_get_int(args[34]);
-    mp_int_t camera_x = mp_obj_get_int(args[35]);
-    mp_int_t screen_w = mp_obj_get_int(args[36]);
-    mp_int_t screen_h = mp_obj_get_int(args[37]);
-    mp_int_t enemy_update_margin_x = mp_obj_get_int(args[38]);
-    mp_int_t enemy_update_margin_y = mp_obj_get_int(args[39]);
-    mp_int_t enemy_bullet_cull_margin = mp_obj_get_int(args[40]);
+    mp_get_buffer_raise(args[5], &monk_hover_info, MP_BUFFER_RW);
+    mp_int_t monk_hover_stride = mp_obj_get_int(args[6]);
+    mp_int_t monk_hover_count = mp_obj_get_int(args[7]);
+    mp_get_buffer_raise(args[8], &bullet_info, MP_BUFFER_RW);
+    mp_int_t bullet_stride = mp_obj_get_int(args[9]);
+    mp_int_t bullet_count = mp_obj_get_int(args[10]);
+    mp_int_t player_x = mp_obj_get_int(args[11]);
+    mp_int_t player_y = mp_obj_get_int(args[12]);
+    mp_int_t player_w = mp_obj_get_int(args[13]);
+    mp_int_t player_h = mp_obj_get_int(args[14]);
+    mp_int_t vel_y = mp_obj_get_int(args[15]);
+    mp_get_buffer_raise(args[16], &tilemap_info, MP_BUFFER_READ);
+    mp_int_t tilemap_w = mp_obj_get_int(args[17]);
+    mp_int_t tilemap_h = mp_obj_get_int(args[18]);
+    mp_int_t tile_size = mp_obj_get_int(args[19]);
+    mp_get_buffer_raise(args[20], &solids_info, MP_BUFFER_READ);
+    mp_int_t solid_stride = mp_obj_get_int(args[21]);
+    mp_int_t solid_count = mp_obj_get_int(args[22]);
+    mp_int_t death_margin = mp_obj_get_int(args[23]);
+    mp_int_t enemy_detect_x = mp_obj_get_int(args[24]);
+    mp_int_t enemy_flee_x = mp_obj_get_int(args[25]);
+    mp_int_t enemy_detect_y = mp_obj_get_int(args[26]);
+    mp_int_t enemy_move_speed = mp_obj_get_int(args[27]);
+    mp_int_t enemy_gravity_step = mp_obj_get_int(args[28]);
+    mp_int_t enemy_frame_hold = mp_obj_get_int(args[29]);
+    mp_int_t enemy_shoot_fire_frame = mp_obj_get_int(args[30]);
+    mp_int_t enemy_bullet_speed = mp_obj_get_int(args[31]);
+    mp_int_t enemy_bullet_w = mp_obj_get_int(args[32]);
+    mp_int_t enemy_bullet_h = mp_obj_get_int(args[33]);
+    mp_int_t enemy_shoot_interval = mp_obj_get_int(args[34]);
+    mp_int_t fall_speed_max = mp_obj_get_int(args[35]);
+    mp_int_t map_w_px = mp_obj_get_int(args[36]);
+    mp_int_t map_h_px = mp_obj_get_int(args[37]);
+    mp_int_t camera_x = mp_obj_get_int(args[38]);
+    mp_int_t screen_w = mp_obj_get_int(args[39]);
+    mp_int_t screen_h = mp_obj_get_int(args[40]);
+    mp_int_t enemy_update_margin_x = mp_obj_get_int(args[41]);
+    mp_int_t enemy_update_margin_y = mp_obj_get_int(args[42]);
+    mp_int_t enemy_bullet_cull_margin = mp_obj_get_int(args[43]);
 
-    if (enemy_row_stride < 12 || enemy_state_stride < 8 || bullet_stride < 16) {
+    if (enemy_row_stride < 12 || enemy_state_stride < 8 || monk_hover_stride < 11 || bullet_stride < 16) {
         mp_raise_ValueError(MP_ERROR_TEXT("invalid stride"));
     }
     if (enemy_count < 0 || bullet_count < 0 || tilemap_w <= 0 || tilemap_h <= 0 || tile_size <= 0) {
@@ -1028,6 +1034,9 @@ static mp_obj_t lgfx_update_enemies_native(size_t n_args, const mp_obj_t *args) 
     }
     if (enemy_states_info.len < (size_t)enemy_state_stride * (size_t)enemy_count) {
         mp_raise_ValueError(MP_ERROR_TEXT("enemy states buf too small"));
+    }
+    if (monk_hover_info.len < (size_t)monk_hover_stride * (size_t)monk_hover_count) {
+        mp_raise_ValueError(MP_ERROR_TEXT("monk hover buf too small"));
     }
     if (bullet_info.len < (size_t)bullet_stride * (size_t)bullet_count) {
         mp_raise_ValueError(MP_ERROR_TEXT("enemy bullets buf too small"));
@@ -1041,6 +1050,7 @@ static mp_obj_t lgfx_update_enemies_native(size_t n_args, const mp_obj_t *args) 
 
     uint8_t *enemy_rows = (uint8_t *)enemy_rows_info.buf;
     uint8_t *enemy_states = (uint8_t *)enemy_states_info.buf;
+    uint8_t *monk_hover = (uint8_t *)monk_hover_info.buf;
     uint8_t *bullet_buf = (uint8_t *)bullet_info.buf;
     const uint8_t *tilemap = (const uint8_t *)tilemap_info.buf;
     const uint8_t *solids = (const uint8_t *)solids_info.buf;
@@ -1049,6 +1059,17 @@ static mp_obj_t lgfx_update_enemies_native(size_t n_args, const mp_obj_t *args) 
     int32_t player_center_y = player_y + (player_h / 2);
     int32_t shoot_anim_total = 10 * enemy_frame_hold;
     int32_t shoot_fire_tick = enemy_shoot_fire_frame * enemy_frame_hold;
+    static const int32_t monk_hover_min_x = 1616;
+    static const int32_t monk_hover_max_x = 1887;
+    static const int32_t monk_hover_min_y = 32;
+    static const int32_t monk_hover_max_y = 111;
+    static const int32_t monk_hover_target_eps = 12;
+    static const int32_t monk_hover_reached_eps = 1;
+    static const int32_t monk_hover_phase_step = 2;
+    static const int32_t monk_hover_retarget_frames = 30;
+    static const int32_t monk_hover_wave_amp_x = 3;
+    static const int32_t monk_hover_wave_amp_y = 2;
+    static const uint8_t monk_hover_state_moving = 0xFF;
     if (shoot_fire_tick < 1) {
         shoot_fire_tick = enemy_frame_hold < 1 ? 1 : enemy_frame_hold;
     }
@@ -1069,6 +1090,7 @@ static mp_obj_t lgfx_update_enemies_native(size_t n_args, const mp_obj_t *args) 
         int32_t facing_enemy = state[0] ? 1 : -1;
         int32_t vel_enemy_y = (int32_t)(int8_t)state[7];
         int32_t shoot_cooldown = lgfx_rd_i16(state + 4);
+        bool static_enemy = row[11] != 0;
         int32_t enemy_center_x = wx + (ew / 2);
         int32_t enemy_center_y = wy + (eh / 2);
         int32_t dx_to_player = player_center_x - enemy_center_x;
@@ -1081,6 +1103,142 @@ static mp_obj_t lgfx_update_enemies_native(size_t n_args, const mp_obj_t *args) 
         if (shoot_cooldown > 0) {
             shoot_cooldown -= 1;
         }
+        if (static_enemy) {
+            uint8_t *hover = nullptr;
+            if (ei < monk_hover_count) {
+                hover = monk_hover + ((size_t)ei * (size_t)monk_hover_stride);
+            }
+            int32_t next_anim_counter = lgfx_rd_i16(state + 2) + 1;
+            if (next_anim_counter > 30000) {
+                next_anim_counter = 0;
+            }
+            int32_t hover_target_x = wx;
+            int32_t hover_target_y = wy;
+            int32_t hover_phase = 0;
+            int32_t hover_retarget_cd = 0;
+            int32_t hover_speed_q8 = 256;
+            if (hover != nullptr) {
+                hover_target_x = lgfx_rd_i16(hover + 0);
+                hover_target_y = lgfx_rd_i16(hover + 2);
+                hover_phase = (uint16_t)hover[6] | ((uint16_t)hover[7] << 8);
+                hover_retarget_cd = hover[8];
+                hover_speed_q8 = lgfx_rd_i16(hover + 9);
+                if (hover_speed_q8 <= 0) {
+                    hover_speed_q8 = 256;
+                }
+            }
+            if (hover_retarget_cd != monk_hover_state_moving && hover_retarget_cd > 0) {
+                hover_retarget_cd -= 1;
+            }
+            int32_t dx_target = hover_target_x - wx;
+            int32_t dy_target = hover_target_y - wy;
+            int32_t abs_dx_target = (dx_target >= 0) ? dx_target : -dx_target;
+            int32_t abs_dy_target = (dy_target >= 0) ? dy_target : -dy_target;
+            bool at_target = (abs_dx_target <= monk_hover_reached_eps) && (abs_dy_target <= monk_hover_reached_eps);
+            if (!at_target && hover_retarget_cd != monk_hover_state_moving) {
+                hover_retarget_cd = monk_hover_state_moving;
+            }
+            if (at_target) {
+                wx = hover_target_x;
+                wy = hover_target_y;
+                if (hover_retarget_cd == monk_hover_state_moving) {
+                    hover_retarget_cd = (uint8_t)monk_hover_retarget_frames;
+                } else if (hover_retarget_cd <= 0) {
+                    uint32_t seed = (uint32_t)(hover_phase + (ei * 131u) + (uint32_t)wx + 17u);
+                    seed = (seed * 1103515245u) + 12345u;
+                    int32_t target_min_x = monk_hover_min_x;
+                    int32_t target_max_x = monk_hover_max_x - ew;
+                    if (target_max_x < target_min_x) {
+                        target_max_x = target_min_x;
+                    }
+                    int32_t span = target_max_x - target_min_x;
+                    if (span < 0) {
+                        span = 0;
+                    }
+                    hover_target_x = target_min_x + (int32_t)(seed % (uint32_t)(span + 1));
+                    seed = (seed * 1103515245u) + 12345u;
+                    int32_t target_min_y = monk_hover_min_y;
+                    int32_t target_max_y = monk_hover_max_y;
+                    if (target_max_y < target_min_y) {
+                        target_max_y = target_min_y;
+                    }
+                    span = target_max_y - target_min_y;
+                    if (span < 0) {
+                        span = 0;
+                    }
+                    hover_target_y = target_min_y + (int32_t)(seed % (uint32_t)(span + 1));
+                    hover_retarget_cd = monk_hover_state_moving;
+                    dx_target = hover_target_x - wx;
+                    dy_target = hover_target_y - wy;
+                    at_target = false;
+                }
+            }
+            if (!at_target && hover_retarget_cd == monk_hover_state_moving) {
+                int32_t step_x = 0;
+                if (dx_target != 0) {
+                    step_x = (hover_speed_q8 + 128) / 256;
+                    if (step_x < 1) {
+                        step_x = 1;
+                    }
+                    if (dx_target > 0) {
+                        wx += (dx_target < step_x) ? dx_target : step_x;
+                        facing_enemy = 1;
+                    } else {
+                        int32_t mag = (-dx_target < step_x) ? -dx_target : step_x;
+                        wx -= mag;
+                        facing_enemy = -1;
+                    }
+                }
+                int32_t step_y = (hover_speed_q8 + 128) / 256;
+                if (step_y < 1) {
+                    step_y = 1;
+                }
+                if (dy_target > 0) {
+                    wy += (dy_target < step_y) ? dy_target : step_y;
+                } else if (dy_target < 0) {
+                    int32_t mag_y = (-dy_target < step_y) ? -dy_target : step_y;
+                    wy -= mag_y;
+                }
+            }
+            hover_phase = (hover_phase + monk_hover_phase_step) & 0xFFFF;
+            int32_t max_enemy_x_hover = map_w_px - ew;
+            if (max_enemy_x_hover < 0) {
+                max_enemy_x_hover = 0;
+            }
+            wx = lgfx_clamp_i32(wx, 0, max_enemy_x_hover);
+            wy = lgfx_clamp_i32(wy, monk_hover_min_y, monk_hover_max_y);
+            if (wy < 0) {
+                wy = 0;
+            }
+            lgfx_wr_i16(row + 0, wx);
+            lgfx_wr_i16(row + 2, wy);
+            if (hover != nullptr) {
+                lgfx_wr_i16(hover + 0, hover_target_x);
+                lgfx_wr_i16(hover + 2, hover_target_y);
+                lgfx_wr_i16(hover + 4, hover_target_y);
+                lgfx_wr_i16(hover + 6, hover_phase);
+                hover[8] = (uint8_t)(hover_retarget_cd & 0xFF);
+                lgfx_wr_i16(hover + 9, hover_speed_q8);
+            }
+            if (ei == 2 && (next_anim_counter % 30) == 0) {
+                mp_printf(&mp_plat_print, "MONK_HOVER_DBG wx=%d wy=%d tx=%d ty=%d speed=%d cd=%d phase=%d\n",
+                    (int)wx,
+                    (int)wy,
+                    (int)hover_target_x,
+                    (int)hover_target_y,
+                    (int)hover_speed_q8,
+                    (int)hover_retarget_cd,
+                    (int)hover_phase);
+            }
+            state[0] = (facing_enemy >= 0) ? 1u : 0u;
+            state[1] = 0u;
+            lgfx_wr_i16(state + 2, next_anim_counter);
+            lgfx_wr_i16(state + 4, 0);
+            state[6] = 0u;
+            state[7] = 0u;
+            continue;
+        }
+
         bool detect_player = (dx_to_player >= 0) ? (dx_to_player <= enemy_detect_x) : ((-dx_to_player) <= enemy_detect_x);
         if (detect_player) {
             detect_player = (dy_to_player >= 0) ? (dy_to_player <= enemy_detect_y) : ((-dy_to_player) <= enemy_detect_y);
@@ -1185,9 +1343,11 @@ static mp_obj_t lgfx_update_enemies_native(size_t n_args, const mp_obj_t *args) 
                     } else {
                         bullet_x = moved_x - enemy_bullet_w;
                     }
-                    int32_t bullet_base_y = moved_y + (eh / 2) - (enemy_bullet_h / 2);
+                    // Fire from the lower half of the enemy body: for a 32px enemy and
+                    // 16px bullet, this anchors the bullet top at enemy_y + 16.
+                    int32_t bullet_base_y = moved_y + (eh / 2);
                     int32_t bullet_y = lgfx_find_enemy_bullet_spawn_y(
-                        bullet_base_y + 16,
+                        bullet_base_y,
                         bullet_base_y,
                         bullet_x,
                         enemy_bullet_w,
@@ -1262,7 +1422,7 @@ static mp_obj_t lgfx_update_enemies_native(size_t n_args, const mp_obj_t *args) 
     };
     return mp_obj_new_tuple(2, out);
 }
-static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lgfx_update_enemies_native_obj, 41, 41, lgfx_update_enemies_native);
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lgfx_update_enemies_native_obj, 44, 44, lgfx_update_enemies_native);
 
 static mp_obj_t lgfx_compose_tilemap_rgb565(size_t n_args, const mp_obj_t *args) {
     if (n_args != 11 && n_args != 12) {
@@ -1825,6 +1985,7 @@ static const mp_rom_map_elem_t lgfx_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_async_probe_rgb565), MP_ROM_PTR(&lgfx_async_probe_rgb565_obj) },
     { MP_ROM_QSTR(MP_QSTR_submit_probe_rgb565), MP_ROM_PTR(&lgfx_submit_probe_rgb565_obj) },
     { MP_ROM_QSTR(MP_QSTR_band_submit_probe_rgb565), MP_ROM_PTR(&lgfx_band_submit_probe_rgb565_obj) },
+    { MP_ROM_QSTR(MP_QSTR_band_pipeline_tail_wait), MP_ROM_PTR(&lgfx_band_pipeline_tail_wait_obj) },
     { MP_ROM_QSTR(MP_QSTR_render_scene_bands_rgb565), MP_ROM_PTR(&lgfx_render_scene_bands_rgb565_obj) },
     { MP_ROM_QSTR(MP_QSTR_update_enemies_native), MP_ROM_PTR(&lgfx_update_enemies_native_obj) },
     { MP_ROM_QSTR(MP_QSTR_compose_tilemap_rgb565), MP_ROM_PTR(&lgfx_compose_tilemap_rgb565_obj) },
@@ -1868,6 +2029,7 @@ static const mp_rom_map_elem_t lgfx_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_async_probe_rgb565), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_submit_probe_rgb565), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_band_submit_probe_rgb565), MP_ROM_INT(0) },
+    { MP_ROM_QSTR(MP_QSTR_band_pipeline_tail_wait), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_render_scene_bands_rgb565), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_update_enemies_native), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_compose_tilemap_rgb565), MP_ROM_INT(0) },

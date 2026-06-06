@@ -1,5 +1,5 @@
 id,type,world_x,world_y,w,h,sprite,solid,trigger,layer,swappable,src_x,src_y,src_w,src_h,gravity,anim_id,checkpoint
-house,decor,0,32,64,112,house,0,0,1,0,0,0,64,112,0,,0
+house,decor,16,32,64,112,house,0,0,1,0,0,0,64,112,0,,0
 respawn_stone_01,checkpoint,128,112,32,32,respawn_stone,0,1,1,1,0,0,32,32,0,respawn_stone,1
 grass,decor,224,112,32,32,grass,0,0,1,1,144,0,32,32,1,,0
 plants,decor,432,112,32,32,plants,0,0,1,1,176,0,32,32,1,,0

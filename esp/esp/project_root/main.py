@@ -19,6 +19,14 @@ def _safe_mode(reason):
         sleep_ms(1000)
 
 
+def _trace(msg):
+    try:
+        with open("/launcher_trace.txt", "a") as f:
+            f.write(str(msg) + "\n")
+    except Exception:
+        pass
+
+
 def _mount_sd():
     try:
         import machine
@@ -26,19 +34,34 @@ def _mount_sd():
     except Exception as exc:
         return False, "machine/os unavailable: %r" % (exc,)
 
-    # Try slot 2 first (common SPI SD mode), then slot 3 fallback.
+    # Single supported SD path for the current board wiring.
     try:
-        sd = machine.SDCard(slot=2, sck=5, mosi=6, miso=7, cs=4)
+        os.mkdir("/sd")
+    except Exception:
+        pass
+    try:
+        os.umount("/sd")
+    except Exception:
+        pass
+    try:
+        sd = machine.SDCard(
+            slot=2,
+            width=1,
+            sck=39,
+            miso=40,
+            mosi=38,
+            cs=47,
+            freq=1000000,
+        )
         os.mount(sd, "/sd")
-        return True, "mounted with slot=2"
+        return True, "mounted with slot=2 width=1 sck=39 miso=40 mosi=38 cs=47"
     except Exception as exc_slot2:
         try:
-            sd = machine.SDCard(slot=3, sck=5, mosi=6, miso=7, cs=4)
-            os.mount(sd, "/sd")
-            return True, "mounted with slot=3"
-        except Exception as exc_slot3:
-            msg = "slot2=%r; slot3=%r" % (exc_slot2, exc_slot3)
-            return False, msg
+            os.stat("/sd/game/config.py")
+            os.stat("/sd/game/app_camera_test.py")
+            return True, "reusing existing /sd mount after slot2=%r" % (exc_slot2,)
+        except Exception:
+            return False, "slot2=%r" % (exc_slot2,)
 
 
 def _reset_game_imports():
@@ -119,16 +142,21 @@ def _load_sd_app():
 
 
 def main():
+    _trace("MAIN_ENTER")
     ok, detail = _mount_sd()
     if ok:
+        _trace("MOUNT_OK:%s" % detail)
         print("SD mount: %s" % detail)
     else:
+        _trace("MOUNT_FAIL:%s" % detail)
         print("SD mount failed: %s" % detail)
         _safe_mode("sd mount failed")
         return
 
     try:
+        _trace("LOAD_SD_APP_BEGIN")
         app = _load_sd_app()
+        _trace("LOAD_SD_APP_OK")
         try:
             print("LAUNCHER_APP_TYPE=%s" % type(app).__name__)
         except Exception:
@@ -146,8 +174,11 @@ def main():
             app._boot_source_tag = "SD"
         except Exception:
             pass
+        _trace("APP_RUN_BEGIN")
         app.run()
+        _trace("APP_RUN_RETURN")
     except Exception as exc:
+        _trace("APP_RUN_EXCEPTION:%r" % (exc,))
         try:
             import sys
             print("Launcher run crashed")

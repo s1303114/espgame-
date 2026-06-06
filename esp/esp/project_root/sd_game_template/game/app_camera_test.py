@@ -65,6 +65,7 @@ _ENEMY_ROW_STRIDE = 12
 _ENEMY_STATE_STRIDE = 8
 _BULLET_STATE_STRIDE = 16
 _OBJECT_SOLID_STRIDE = 8
+_MONK_HOVER_STATE_STRIDE = 11
 _boot_source_tag = "ROOT"
 _draw_digits_to_buf = None
 _get_digits_text_width = None
@@ -247,6 +248,27 @@ def _bullet_debug(tag, text):
         return
     print("%s %s" % (tag, text))
     _bullet_debug_count += 1
+
+
+def _runtime_verbose_enabled():
+    try:
+        return bool(getattr(config, "CAMERA_RUNTIME_VERBOSE", False))
+    except Exception:
+        return False
+
+
+def _monk_intro_enabled():
+    try:
+        return bool(getattr(config, "MONK_INTRO_ENABLED", True))
+    except Exception:
+        return True
+
+
+def _monk_attack_enabled():
+    try:
+        return bool(getattr(config, "MONK_ATTACK_ENABLED", False))
+    except Exception:
+        return False
 
 
 def _bullet_debug_active(enemy_bullets, camera_x, screen_w, screen_h):
@@ -1159,6 +1181,7 @@ def _parse_enemies_csv(text):
                 "facing": facing,
                 "static": static_enemy,
                 "gravity": gravity_enabled,
+                "spawn_mode": _col(cols, "spawn_mode", "live"),
             }
         )
     return rows, meta_rows
@@ -1180,6 +1203,51 @@ def _clone_enemy_rows(rows):
     if not rows:
         return []
     return [list(row) for row in rows]
+
+
+def _clone_enemy_meta_rows(meta_rows):
+    if not meta_rows:
+        return []
+    return [dict(row) for row in meta_rows]
+
+
+def _build_monk_encounter_from_template(row, meta):
+    return {
+        "state": _MONK_ENCOUNTER_STATE_INACTIVE,
+        "template_row": list(row),
+        "template_meta": dict(meta),
+        "intro_state": None,
+        "live_enemy_i": -1,
+        "body_x": 0,
+        "body_y": 0,
+        "body_target_x": 0,
+        "body_target_y": 0,
+        "body_target_bottom_y": 0,
+        "anim_counter": 0,
+        "orbs": [],
+        "orb_states": [],
+    }
+
+
+def _split_live_enemies_and_monk_encounters(rows, meta_rows):
+    live_rows = []
+    live_meta = []
+    monk_encounters = []
+    if not rows:
+        return live_rows, live_meta, monk_encounters
+    ei = 0
+    while ei < len(rows):
+        row = rows[ei]
+        meta = meta_rows[ei] if (meta_rows is not None and ei < len(meta_rows)) else {}
+        enemy_type = str(meta.get("type", "bow") or "bow") if meta is not None else "bow"
+        spawn_mode = str(meta.get("spawn_mode", "live") or "live") if meta is not None else "live"
+        if enemy_type == "monk" and spawn_mode != "live":
+            monk_encounters.append(_build_monk_encounter_from_template(row, meta))
+        else:
+            live_rows.append(list(row))
+            live_meta.append(dict(meta))
+        ei += 1
+    return live_rows, live_meta, monk_encounters
 
 
 def _reset_enemy_state(state, meta=None):
@@ -1319,7 +1387,7 @@ def _visible_target_distance2(wx, wy, ow, oh, player_x, player_y, player_w, play
     return info['d2']
 
 
-def _pick_swappable_enemy_index(enemy_rows, player_x, player_y, player_w, player_h, pick_far, camera_x, band_top, view_w, view_h):
+def _pick_swappable_enemy_index(enemy_rows, player_x, player_y, player_w, player_h, pick_far, camera_x, band_top, view_w, view_h, enemy_meta=None):
     if not enemy_rows:
         return -1
     best_i = -1
@@ -1327,7 +1395,9 @@ def _pick_swappable_enemy_index(enemy_rows, player_x, player_y, player_w, player
     ei = 0
     while ei < len(enemy_rows):
         wx, wy, ow, oh, visible, swappable = enemy_rows[ei]
-        if visible and swappable:
+        meta = enemy_meta[ei] if (enemy_meta is not None and ei < len(enemy_meta)) else None
+        enemy_type = str(meta.get("type", "bow") or "bow") if meta is not None else "bow"
+        if visible and swappable and enemy_type != "monk":
             d2 = _visible_target_distance2(wx, wy, ow, oh, player_x, player_y, player_w, player_h, camera_x, band_top, view_w, view_h)
             if d2 >= 0:
                 if best_i < 0:
@@ -1389,9 +1459,7 @@ def _pick_swappable_monk_orb(enemy_rows, enemy_states, enemy_meta, monk_orb_stat
                 si = 0
                 while si < len(slot_states):
                     orb_state = slot_states[si]
-                    orb_x, orb_y = _monk_orb_slot_world_pos(wx, wy, ow, oh, int(state.get("anim_counter", 0) or 0), si, monk_frame_w, monk_frame_h)
-                    orb_x += int(orb_state.get("offset_x", 0) or 0)
-                    orb_y += int(orb_state.get("offset_y", 0) or 0)
+                    orb_x, orb_y = _monk_orb_current_world_pos(wx, wy, ow, oh, int(state.get("anim_counter", 0) or 0), si, monk_frame_w, monk_frame_h, orb_state)
                     d2 = _visible_target_distance2(orb_x, orb_y, _MONK_ORB_W, _MONK_ORB_H, player_x, player_y, player_w, player_h, camera_x, band_top, view_w, view_h)
                     if d2 >= 0:
                         if best_enemy_i < 0:
@@ -1441,7 +1509,7 @@ def _swap_with_monk_orb(enemy_rows, enemy_states, monk_orb_states, enemy_i, slot
     return player_x, player_y, 0, True
 
 
-def _pick_enemy_hit_by_bullet(enemy_rows, enemy_states, bx, by, bw, bh, ignore_enemy_i=-1):
+def _pick_enemy_hit_by_bullet(enemy_rows, enemy_states, bx, by, bw, bh, ignore_enemy_i=-1, enemy_meta=None):
     if not enemy_rows:
         return -1
     ei = 0
@@ -1449,8 +1517,10 @@ def _pick_enemy_hit_by_bullet(enemy_rows, enemy_states, bx, by, bw, bh, ignore_e
         row = enemy_rows[ei]
         state = enemy_states[ei] if ei < len(enemy_states) else None
         if state is not None and ei != int(ignore_enemy_i):
+            meta = enemy_meta[ei] if (enemy_meta is not None and ei < len(enemy_meta)) else None
+            enemy_type = str(meta.get("type", "bow") or "bow") if meta is not None else "bow"
             ex, ey, ew, eh, visible, _swappable = row
-            if visible and bx < (ex + ew) and (bx + bw) > ex and by < (ey + eh) and (by + bh) > ey:
+            if enemy_type != "monk" and visible and bx < (ex + ew) and (bx + bw) > ex and by < (ey + eh) and (by + bh) > ey:
                 return ei
         ei += 1
     return -1
@@ -1600,9 +1670,11 @@ def _load_enemy_runtime_assets():
         enemy_bullet_cull_margin = 0
     enemy_bullet_color = int(getattr(config, "COLOR_BULLET", 0xFFFF)) & 0xFFFF
 
-    enemy_rows, enemy_meta = _load_enemies_rows_and_meta(enemy_csv_path)
+    enemy_rows_all, enemy_meta_all = _load_enemies_rows_and_meta(enemy_csv_path)
+    enemy_rows, enemy_meta, monk_encounters = _split_live_enemies_and_monk_encounters(enemy_rows_all, enemy_meta_all)
     enemy_rows_initial = _clone_enemy_rows(enemy_rows)
     enemy_rows_c_buf, enemy_rows_c_stride, enemy_rows_c_count = _pack_enemy_rows_for_c(enemy_rows, enemy_meta)
+    monk_hover_c_buf, monk_hover_c_stride, monk_hover_c_count = _pack_monk_hover_states_for_c(enemy_rows, enemy_meta, int(getattr(config, "CAMERA_TEST_MAP_W", 0)))
     enemy_states = _build_enemy_states(enemy_meta)
 
     enemy_sheet = None
@@ -1640,6 +1712,8 @@ def _load_enemy_runtime_assets():
     enemy_bow_ready = bool(enemy_sheet is not None and enemy_frame_w > 0 and enemy_frame_h > 0)
     enemy_monk_ready = bool(enemy_monk_sheet is not None and enemy_monk_frame_w > 0 and enemy_monk_frame_h > 0)
     monk_orb_states = _build_monk_orb_states(enemy_rows, enemy_meta)
+    monk_attack_states = _build_monk_attack_states(enemy_rows, enemy_meta)
+    monk_intro_states = _build_monk_intro_states(monk_encounters)
     enemy_render_enabled = bool(enemy_rows and enemy_states and (enemy_bow_ready or enemy_monk_ready))
 
     return {
@@ -1663,9 +1737,13 @@ def _load_enemy_runtime_assets():
         "enemy_rows": enemy_rows,
         "enemy_meta": enemy_meta,
         "enemy_rows_initial": enemy_rows_initial,
+        "monk_encounters": monk_encounters,
         "enemy_rows_c_buf": enemy_rows_c_buf,
         "enemy_rows_c_stride": enemy_rows_c_stride,
         "enemy_rows_c_count": enemy_rows_c_count,
+        "monk_hover_c_buf": monk_hover_c_buf,
+        "monk_hover_c_stride": monk_hover_c_stride,
+        "monk_hover_c_count": monk_hover_c_count,
         "enemy_states": enemy_states,
         "enemy_sheet": enemy_sheet,
         "enemy_sheet_w": enemy_sheet_w,
@@ -1682,6 +1760,8 @@ def _load_enemy_runtime_assets():
         "enemy_monk_orb_atlas_w": enemy_monk_orb_atlas_w,
         "enemy_monk_orb_atlas_h": enemy_monk_orb_atlas_h,
         "monk_orb_states": monk_orb_states,
+        "monk_attack_states": monk_attack_states,
+        "monk_intro_states": monk_intro_states,
         "enemy_bullets": enemy_bullets,
         "enemy_update_native_ready": enemy_update_native_ready,
         "enemy_render_enabled": enemy_render_enabled,
@@ -2156,7 +2236,7 @@ def _update_enemies_and_bullets(
                 active = 0
                 _bullet_debug("BULLET_CULL", "world x=%d y=%d" % (bx, by))
             else:
-                hit_enemy_i = _pick_enemy_hit_by_bullet(enemy_rows, enemy_states, bx, by, bw, bh, shooter_enemy_i)
+                hit_enemy_i = _pick_enemy_hit_by_bullet(enemy_rows, enemy_states, bx, by, bw, bh, shooter_enemy_i, enemy_meta)
                 if hit_enemy_i >= 0:
                     active = 0
                     _bullet_debug("BULLET_HIT", "enemy idx=%d x=%d y=%d" % (int(hit_enemy_i), bx, by))
@@ -2188,6 +2268,9 @@ def _update_enemies_and_bullets_native(
     enemy_rows_c_buf,
     enemy_rows_c_stride,
     enemy_rows_c_count,
+    monk_hover_c_buf,
+    monk_hover_c_stride,
+    monk_hover_c_count,
     object_solids_c_buf,
     object_solids_c_stride,
     object_solids_c_count,
@@ -2240,6 +2323,9 @@ def _update_enemies_and_bullets_native(
             enemy_states._buf,
             _ENEMY_STATE_STRIDE,
             enemy_rows_c_count,
+            monk_hover_c_buf,
+            monk_hover_c_stride,
+            monk_hover_c_count,
             enemy_bullets._buf,
             _BULLET_STATE_STRIDE,
             len(enemy_bullets),
@@ -2310,9 +2396,20 @@ def _perform_world_swap(
     objects_c_stride,
     monk_frame_w,
     monk_frame_h,
+    monk_intro_states=None,
 ):
     if not swap_triggered or (not objects_rows and not enemy_rows and not enemy_bullets):
         return player_x, player_y, vel_y, _rebuild_object_solids(objects_rows)
+
+    if monk_intro_states:
+        ei = 0
+        while ei < len(monk_intro_states):
+            intro_state = monk_intro_states[ei]
+            if intro_state is not None and int(intro_state.get("state", _MONK_INTRO_STATE_IDLE) or _MONK_INTRO_STATE_IDLE) == _MONK_INTRO_STATE_DROPPING:
+                if _runtime_verbose_enabled():
+                    print("SWAP_BLOCKED_MONK_INTRO")
+                return player_x, player_y, vel_y, _rebuild_object_solids(objects_rows)
+            ei += 1
 
     object_ti = -1
     enemy_ti = -1
@@ -2344,6 +2441,7 @@ def _perform_world_swap(
             band_top,
             view_w,
             view_h,
+            enemy_meta,
         )
         monk_orb_enemy_i, monk_orb_slot_i = _pick_swappable_monk_orb(
             enemy_rows,
@@ -2578,6 +2676,24 @@ _MONK_ORB_RETURN_DONE_RADIUS_EPS = 1
 _MONK_ORB_RETURN_RADIUS_DIV = 20
 _MONK_ORB_RETURN_RADIUS_MIN_STEP = 1
 _MONK_ORB_RAD_PER_IDX = 6.283185307179586 / _MONK_ORB_TABLE_SIZE
+_MONK_ORB_MODE_SCRIPTED_INTRO = "scripted_intro"
+_MONK_ORB_MODE_SCRIPTED_ATTACK = "scripted_attack"
+_MONK_ENCOUNTER_STATE_INACTIVE = "inactive"
+_MONK_ENCOUNTER_STATE_INTRO = "intro_drop"
+_MONK_ENCOUNTER_STATE_LIVE = "live"
+_MONK_ATTACK_PHASE_SPLIT = "split_edges"
+_MONK_ATTACK_PHASE_DROP = "drop_profile"
+_MONK_ATTACK_PHASE_SWEEP = "sweep"
+_MONK_ATTACK_PHASE_PAUSE = "pause"
+_MONK_ATTACK_PAUSE_FRAMES = 30
+_MONK_ATTACK_EDGE_SPEED = 6
+_MONK_ATTACK_DROP_SPEED = 6
+_MONK_ATTACK_SWEEP_SPEED = 4
+_MONK_ATTACK_BODY_LOCK_CD = 2
+_MONK_ATTACK_PROFILE_LIFTS = ((0, 16), (16, 0), (0, 32), (32, 0))
+_MONK_INTRO_STATE_IDLE = 0
+_MONK_INTRO_STATE_DROPPING = 1
+_MONK_INTRO_STATE_DONE = 2
 
 
 def _cyclic_idx_diff(target_idx, current_idx, modulo):
@@ -2696,6 +2812,10 @@ def _build_monk_orb_states(enemy_rows, enemy_meta=None, orb_count=_MONK_ORB_COUN
                     "detached_y": 0,
                     "return_radius": _MONK_ORB_RADIUS,
                     "capture_lock": 0,
+                    "script_x": 0,
+                    "script_y": 0,
+                    "script_target_x": 0,
+                    "script_target_y": 0,
                 })
                 si += 1
             states.append(slot_states)
@@ -2703,6 +2823,630 @@ def _build_monk_orb_states(enemy_rows, enemy_meta=None, orb_count=_MONK_ORB_COUN
             states.append(None)
         ei += 1
     return states
+
+
+def _build_monk_attack_states(enemy_rows, enemy_meta=None):
+    out = []
+    if not enemy_rows:
+        return out
+    ei = 0
+    while ei < len(enemy_rows):
+        meta = enemy_meta[ei] if (enemy_meta is not None and ei < len(enemy_meta)) else None
+        enemy_type = str(meta.get("type", "bow") or "bow") if meta is not None else "bow"
+        if enemy_type == "monk":
+            out.append({
+                "active": 0,
+                "phase": "",
+                "timer": 0,
+                "slot_a": -1,
+                "slot_b": -1,
+                "left_edge_x": 0,
+                "right_edge_x": 0,
+                "left_floor_y": 0,
+                "right_floor_y": 0,
+                "left_lift": 0,
+                "right_lift": 16,
+                "body_anchor_x": 0,
+                "body_anchor_y": 0,
+                "prev_cd": 255,
+            })
+        else:
+            out.append(None)
+        ei += 1
+    return out
+
+
+def _build_monk_intro_states(monk_encounters):
+    out = []
+    if not monk_encounters:
+        return out
+    ei = 0
+    while ei < len(monk_encounters):
+        encounter = monk_encounters[ei]
+        if encounter is not None:
+            state_obj = {
+                "state": _MONK_INTRO_STATE_IDLE,
+                "armed": 0,
+                "body_target_x": 0,
+                "body_target_y": 0,
+                "body_target_bottom_y": 0,
+            }
+            encounter["intro_state"] = state_obj
+            out.append(state_obj)
+        else:
+            out.append(None)
+        ei += 1
+    return out
+
+
+def _apply_monk_intro_initial_visibility(enemy_rows, enemy_rows_initial, enemy_meta=None):
+    if not _monk_intro_enabled() or not enemy_rows:
+        return
+    ei = 0
+    while ei < len(enemy_rows):
+        meta = enemy_meta[ei] if (enemy_meta is not None and ei < len(enemy_meta)) else None
+        enemy_type = str(meta.get("type", "bow") or "bow") if meta is not None else "bow"
+        if enemy_type == "monk":
+            enemy_rows[ei][4] = 0
+            if enemy_rows_initial is not None and ei < len(enemy_rows_initial):
+                enemy_rows_initial[ei][4] = 0
+        ei += 1
+
+
+def _start_monk_intro(encounter_i, intro_state, monk_encounters, camera_x, view_w):
+    if intro_state is None or encounter_i < 0 or encounter_i >= len(monk_encounters):
+        return False
+    encounter = monk_encounters[encounter_i]
+    if encounter is None:
+        return False
+    if not int(intro_state.get("armed", 0) or 0):
+        return False
+    template_row = encounter.get("template_row") or None
+    if template_row is None:
+        return False
+    body_w = int(template_row[2])
+    body_h = int(template_row[3])
+    body_target_x = int(template_row[0])
+    center_target_y = 72
+    body_target_bottom_y = center_target_y + body_h
+    intro_start_offset_y = int(getattr(config, "MONK_INTRO_START_OFFSET_Y", 96) or 96)
+    monk_frame_w = int(getattr(config, "ENEMY_MONK_FRAME_W", 32) or 32)
+    monk_frame_h = int(getattr(config, "ENEMY_MONK_FRAME_H", 48) or 48)
+    if intro_start_offset_y < 0:
+        intro_start_offset_y = 0
+    encounter["body_x"] = body_target_x
+    encounter["body_y"] = -intro_start_offset_y
+    encounter["body_target_x"] = body_target_x
+    encounter["body_target_y"] = center_target_y
+    intro_state["body_target_x"] = body_target_x
+    intro_state["body_target_y"] = center_target_y
+    intro_state["body_target_bottom_y"] = body_target_bottom_y
+    encounter["anim_counter"] = 0
+    orb_states = _build_monk_orb_states([template_row], [encounter.get("template_meta") or {}])
+    encounter_orb_states = orb_states[0] if orb_states else []
+    encounter_orbs = []
+    si = 0
+    while si < _MONK_ORB_COUNT:
+        orb_state = encounter_orb_states[si] if si < len(encounter_orb_states) else None
+        orb_x, orb_y = _monk_orb_slot_world_pos(body_target_x, -intro_start_offset_y, body_w, body_h, int(encounter.get("anim_counter", 0) or 0), si, monk_frame_w, monk_frame_h)
+        if orb_state is not None:
+            orb_state["mode"] = _MONK_ORB_MODE_SCRIPTED_INTRO
+            orb_state["script_x"] = orb_x
+            orb_state["script_y"] = orb_y
+            orb_state["detached_x"] = orb_x
+            orb_state["detached_y"] = orb_y
+        encounter_orbs.append({
+            "x": orb_x,
+            "y": orb_y,
+        })
+        si += 1
+    encounter["orbs"] = encounter_orbs
+    encounter["orb_states"] = encounter_orb_states
+    intro_state["state"] = _MONK_INTRO_STATE_DROPPING
+    intro_state["armed"] = 0
+    encounter["state"] = _MONK_ENCOUNTER_STATE_INTRO
+    if _runtime_verbose_enabled():
+        print("MONK_INTRO_START encounter=%d x=%d y=%d" % (encounter_i, body_target_x, center_target_y))
+    return True
+
+
+def _update_monk_intro_states(monk_intro_states, monk_encounters, camera_x, view_w):
+    if not monk_intro_states or not monk_encounters:
+        return False
+    if not _monk_intro_enabled():
+        return False
+    intro_changed = False
+    ei = 0
+    while ei < len(monk_intro_states) and ei < len(monk_encounters):
+        intro_state = monk_intro_states[ei]
+        encounter = monk_encounters[ei]
+        if intro_state is None or encounter is None:
+            ei += 1
+            continue
+        if intro_state.get("state") == _MONK_INTRO_STATE_IDLE:
+            if _start_monk_intro(ei, intro_state, monk_encounters, camera_x, view_w):
+                intro_changed = True
+        if intro_state.get("state") == _MONK_INTRO_STATE_DROPPING:
+            drop_speed = int(getattr(config, "MONK_INTRO_DROP_SPEED", 6) or 6)
+            monk_frame_w = int(getattr(config, "ENEMY_MONK_FRAME_W", 32) or 32)
+            monk_frame_h = int(getattr(config, "ENEMY_MONK_FRAME_H", 48) or 48)
+            if drop_speed < 1:
+                drop_speed = 1
+            template_row = encounter.get("template_row") or [0, 0, 48, 64]
+            body_w = int(template_row[2])
+            body_h = int(template_row[3])
+            body_target_x = int(intro_state.get("body_target_x", encounter.get("body_x", 0)) or encounter.get("body_x", 0))
+            body_y_now = int(encounter.get("body_y", 0) or 0)
+            body_bottom_y = body_y_now + body_h
+            body_bottom_y = _move_toward_scalar(body_bottom_y, intro_state.get("body_target_bottom_y", body_bottom_y), drop_speed)
+            encounter["body_y"] = body_bottom_y - body_h
+            encounter["body_x"] = body_target_x
+            body_done = int(encounter.get("body_y", 0) or 0) == int(intro_state.get("body_target_y", 0) or 0)
+            encounter_orbs = encounter.get("orbs") or []
+            encounter_orb_states = encounter.get("orb_states") or []
+            encounter["anim_counter"] = int(encounter.get("anim_counter", 0) or 0) + 1
+            si = 0
+            while si < len(encounter_orbs):
+                orb = encounter_orbs[si]
+                orb_state = encounter_orb_states[si] if si < len(encounter_orb_states) else None
+                orb_x, orb_y = _monk_orb_slot_world_pos(
+                    int(encounter.get("body_x", 0) or 0),
+                    int(encounter.get("body_y", 0) or 0),
+                    body_w,
+                    body_h,
+                    int(encounter.get("anim_counter", 0) or 0),
+                    si,
+                    monk_frame_w,
+                    monk_frame_h,
+                )
+                orb["x"] = orb_x
+                orb["y"] = orb_y
+                if orb_state is not None:
+                    orb_state["mode"] = _MONK_ORB_MODE_SCRIPTED_INTRO
+                    orb_state["script_x"] = orb_x
+                    orb_state["script_y"] = orb_y
+                    orb_state["detached_x"] = orb_x
+                    orb_state["detached_y"] = orb_y
+                si += 1
+            intro_changed = True
+            if body_done:
+                intro_state["state"] = _MONK_INTRO_STATE_DONE
+                if _runtime_verbose_enabled():
+                    print("MONK_INTRO_DONE encounter=%d x=%d y=%d" % (ei, int(encounter.get("body_x", 0) or 0), int(encounter.get("body_y", 0) or 0)))
+        ei += 1
+    return intro_changed
+
+
+def _instantiate_live_monk_from_encounter(encounter, enemy_rows, enemy_meta, enemy_states, enemy_rows_c_buf, enemy_rows_c_stride, monk_hover_c_buf, monk_hover_c_stride, monk_hover_c_count, monk_orb_states):
+    if encounter is None:
+        return -1
+    template_row = encounter.get("template_row") or None
+    template_meta = encounter.get("template_meta") or None
+    if template_row is None or template_meta is None:
+        return -1
+    live_row = list(template_row)
+    live_row[0] = int(encounter.get("body_x", live_row[0]) or live_row[0])
+    live_row[1] = int(encounter.get("body_y", live_row[1]) or live_row[1])
+    live_row[4] = 1
+    enemy_rows.append(live_row)
+    enemy_meta.append(dict(template_meta))
+    live_enemy_i = len(enemy_rows) - 1
+    if hasattr(enemy_states, "_count") and hasattr(enemy_states, "_buf"):
+        enemy_states._buf.extend(bytearray(_ENEMY_STATE_STRIDE))
+        enemy_states._count += 1
+        _reset_enemy_state(enemy_states[live_enemy_i], enemy_meta[live_enemy_i])
+        enemy_states[live_enemy_i]["anim_counter"] = int(encounter.get("anim_counter", 0) or 0)
+    if enemy_rows_c_buf is not None:
+        enemy_rows_c_buf.extend(bytearray(enemy_rows_c_stride))
+        _sync_enemy_rows_c_from_rows(enemy_rows_c_buf, enemy_rows_c_stride, enemy_rows, enemy_meta)
+        encounter["enemy_rows_c_count"] = len(enemy_rows)
+    if monk_hover_c_buf is not None:
+        monk_hover_c_buf.extend(bytearray(monk_hover_c_stride))
+        base = live_enemy_i * int(monk_hover_c_stride)
+        hover_min_x = int(getattr(config, "MONK_HOVER_MIN_X", 1616) or 1616)
+        hover_max_x = int(getattr(config, "MONK_HOVER_MAX_X", 1856) or 1856)
+        hover_base_y = int(getattr(config, "MONK_HOVER_BASE_Y", 112) or 112)
+        hover_retarget_frames = int(getattr(config, "MONK_HOVER_RETARGET_FRAMES", 30) or 30)
+        if hover_retarget_frames < 1:
+            hover_retarget_frames = 1
+        hover_target_x = hover_min_x + ((hover_max_x - hover_min_x) // 2)
+        if hover_target_x < hover_min_x:
+            hover_target_x = hover_min_x
+        if hover_target_x > hover_max_x:
+            hover_target_x = hover_max_x
+        _buf_set_i16_le(monk_hover_c_buf, base + 0, hover_target_x)
+        _buf_set_i16_le(monk_hover_c_buf, base + 2, hover_base_y)
+        _buf_set_i16_le(monk_hover_c_buf, base + 4, hover_base_y)
+        _buf_set_i16_le(monk_hover_c_buf, base + 6, 0)
+        monk_hover_c_buf[base + 8] = hover_retarget_frames & 0xFF
+        _buf_set_i16_le(monk_hover_c_buf, base + 9, int(getattr(config, "MONK_HOVER_SPEED_Q8", 512) or 512))
+        encounter["monk_hover_c_count"] = live_enemy_i + 1
+    encounter_orb_states = encounter.get("orb_states") or []
+    if encounter_orb_states:
+        si = 0
+        while si < len(encounter_orb_states):
+            orb_state = encounter_orb_states[si]
+            if orb_state is not None:
+                orb_state["mode"] = "orbit"
+                orb_state["detached_x"] = int(orb_state.get("script_x", 0) or 0)
+                orb_state["detached_y"] = int(orb_state.get("script_y", 0) or 0)
+            si += 1
+        monk_orb_states.append(encounter_orb_states)
+    else:
+        slot_states = _build_monk_orb_states([live_row], [enemy_meta[live_enemy_i]])
+        monk_orb_states.append(slot_states[0] if slot_states else None)
+    encounter["live_enemy_i"] = live_enemy_i
+    if _runtime_verbose_enabled():
+        print("MONK_LIVE_INSTANTIATED idx=%d x=%d y=%d" % (live_enemy_i, live_row[0], live_row[1]))
+    return live_enemy_i
+
+
+def _update_monk_encounters(monk_encounters, enemy_rows, enemy_meta, enemy_states, enemy_rows_c_buf, enemy_rows_c_stride, monk_hover_c_buf, monk_hover_c_stride, monk_hover_c_count, monk_orb_states, camera_x, view_w):
+    if not monk_encounters:
+        return
+    ei = 0
+    while ei < len(monk_encounters):
+        encounter = monk_encounters[ei]
+        if encounter is None:
+            ei += 1
+            continue
+        state = str(encounter.get("state", _MONK_ENCOUNTER_STATE_INACTIVE) or _MONK_ENCOUNTER_STATE_INACTIVE)
+        if state == _MONK_ENCOUNTER_STATE_INACTIVE:
+            if int(camera_x) >= 1600:
+                encounter["state"] = _MONK_ENCOUNTER_STATE_INTRO
+                if _runtime_verbose_enabled():
+                    print("MONK_ENCOUNTER_STATE=intro_drop")
+        elif state == _MONK_ENCOUNTER_STATE_INTRO:
+            intro_state = encounter.get("intro_state") or None
+            intro_done = False
+            if _runtime_verbose_enabled() and intro_state is not None and int(intro_state.get("state", _MONK_INTRO_STATE_IDLE) or _MONK_INTRO_STATE_IDLE) == _MONK_INTRO_STATE_DROPPING:
+                orbs = encounter.get("orbs") or []
+                if orbs:
+                    first_orb = orbs[0]
+                    print(
+                        "MONK_INTRO_DBG body=%d,%d target=%d,%d orb0=%d,%d orb0t=%d,%d"
+                        % (
+                            int(encounter.get("body_x", 0) or 0),
+                            int(encounter.get("body_y", 0) or 0),
+                            int(encounter.get("body_target_x", 0) or 0),
+                            int(encounter.get("body_target_y", 0) or 0),
+                            int(first_orb.get("x", 0) or 0),
+                            int(first_orb.get("y", 0) or 0),
+                            int(first_orb.get("target_x", 0) or 0),
+                            int(first_orb.get("target_y", 0) or 0),
+                        )
+                    )
+            if intro_state is not None:
+                intro_done = str(intro_state.get("state", "") or "") == str(_MONK_INTRO_STATE_DONE)
+            else:
+                body_x = int(encounter.get("body_x", 0) or 0)
+                body_y = int(encounter.get("body_y", 0) or 0)
+                target_x = int(encounter.get("body_target_x", body_x) or body_x)
+                target_y = int(encounter.get("body_target_y", body_y) or body_y)
+                intro_done = (body_x == target_x) and (body_y == target_y)
+            if intro_done:
+                live_enemy_i = _instantiate_live_monk_from_encounter(
+                    encounter,
+                    enemy_rows,
+                    enemy_meta,
+                    enemy_states,
+                    enemy_rows_c_buf,
+                    enemy_rows_c_stride,
+                    monk_hover_c_buf,
+                    monk_hover_c_stride,
+                    monk_hover_c_count,
+                    monk_orb_states,
+                )
+                if live_enemy_i >= 0:
+                    encounter["state"] = _MONK_ENCOUNTER_STATE_LIVE
+                    if _runtime_verbose_enabled():
+                        print("MONK_ENCOUNTER_STATE=live")
+        ei += 1
+
+
+def _move_toward_scalar(curr_v, target_v, speed_px):
+    curr_i = int(curr_v)
+    target_i = int(target_v)
+    step = int(speed_px)
+    if step < 1:
+        step = 1
+    delta = target_i - curr_i
+    if delta > 0:
+        curr_i += delta if delta < step else step
+    elif delta < 0:
+        delta = -delta
+        curr_i -= delta if delta < step else step
+    return curr_i
+
+
+def _phase_frames_from_distance(max_delta, speed_px):
+    speed_i = int(speed_px)
+    if speed_i < 1:
+        speed_i = 1
+    delta_i = int(max_delta)
+    if delta_i < 1:
+        delta_i = 1
+    return (delta_i + speed_i - 1) // speed_i
+
+
+def _lerp_int(start_v, target_v, step_i, step_total):
+    start_i = int(start_v)
+    target_i = int(target_v)
+    total_i = int(step_total)
+    if total_i <= 0:
+        return target_i
+    step_now = int(step_i)
+    if step_now < 0:
+        step_now = 0
+    if step_now > total_i:
+        step_now = total_i
+    delta = target_i - start_i
+    return start_i + ((delta * step_now) // total_i)
+
+
+def _begin_monk_attack_phase(attack_state, phase_name, orb_a, orb_b, ax, ay, bx, by, speed_px):
+    ax0 = int(orb_a.get("script_x", 0) or 0)
+    ay0 = int(orb_a.get("script_y", 0) or 0)
+    bx0 = int(orb_b.get("script_x", 0) or 0)
+    by0 = int(orb_b.get("script_y", 0) or 0)
+    max_delta = 0
+    for delta in (
+        abs(int(ax) - ax0),
+        abs(int(ay) - ay0),
+        abs(int(bx) - bx0),
+        abs(int(by) - by0),
+    ):
+        if delta > max_delta:
+            max_delta = delta
+    phase_frames = _phase_frames_from_distance(max_delta, speed_px)
+    attack_state["phase"] = phase_name
+    attack_state["timer"] = phase_frames
+    attack_state["phase_total"] = phase_frames
+    attack_state["a_start_x"] = ax0
+    attack_state["a_start_y"] = ay0
+    attack_state["a_target_x"] = int(ax)
+    attack_state["a_target_y"] = int(ay)
+    attack_state["b_start_x"] = bx0
+    attack_state["b_start_y"] = by0
+    attack_state["b_target_x"] = int(bx)
+    attack_state["b_target_y"] = int(by)
+
+
+def _find_floor_y_for_orb(world_x, tilemap_idx, tilemap_w, tilemap_h, tile_size, object_solids, map_h_px):
+    probe_x = int(world_x)
+    max_probe_y = int(map_h_px) - _MONK_ORB_H
+    if max_probe_y < 0:
+        max_probe_y = 0
+    probe_y = 0
+    while probe_y <= max_probe_y:
+        if _aabb_collides_world(probe_x, probe_y + 1, _MONK_ORB_W, _MONK_ORB_H, tilemap_idx, tilemap_w, tilemap_h, tile_size, object_solids):
+            return probe_y
+        probe_y += 1
+    return max_probe_y
+
+
+def _lock_monk_body_for_attack(enemy_i, attack_state, enemy_rows, monk_hover_c_buf, monk_hover_c_stride, monk_hover_c_count, enemy_rows_c_buf, enemy_rows_c_stride, enemy_meta):
+    if attack_state is None or enemy_i < 0 or enemy_i >= len(enemy_rows):
+        return False
+    anchor_x = int(attack_state.get("body_anchor_x", enemy_rows[enemy_i][0]) or enemy_rows[enemy_i][0])
+    anchor_y = int(attack_state.get("body_anchor_y", enemy_rows[enemy_i][1]) or enemy_rows[enemy_i][1])
+    row = enemy_rows[enemy_i]
+    changed = (int(row[0]) != anchor_x) or (int(row[1]) != anchor_y)
+    row[0] = anchor_x
+    row[1] = anchor_y
+    if monk_hover_c_buf is not None and enemy_i < monk_hover_c_count:
+        base = int(enemy_i) * int(monk_hover_c_stride)
+        _buf_set_i16_le(monk_hover_c_buf, base + 0, anchor_x)
+        _buf_set_i16_le(monk_hover_c_buf, base + 2, anchor_y)
+        monk_hover_c_buf[base + 8] = _MONK_ATTACK_BODY_LOCK_CD & 0xFF
+    if changed:
+        _sync_enemy_rows_c_from_rows(enemy_rows_c_buf, enemy_rows_c_stride, enemy_rows, enemy_meta)
+    return changed
+
+
+def _pick_monk_attack_slots(slot_states):
+    if not slot_states:
+        return -1, -1
+    orbit_slots = []
+    si = 0
+    while si < len(slot_states):
+        orb_state = slot_states[si]
+        mode = str(orb_state.get("mode", "orbit") or "orbit") if orb_state is not None else "orbit"
+        if mode == "orbit":
+            orbit_slots.append(si)
+        si += 1
+    if len(orbit_slots) < 2:
+        return -1, -1
+    slot_a = orbit_slots[0]
+    slot_b = orbit_slots[2] if len(orbit_slots) > 2 else orbit_slots[1]
+    return slot_a, slot_b
+
+
+def _start_monk_attack(enemy_i, attack_state, enemy_rows, enemy_states, monk_orb_states, camera_x, view_w, tilemap_idx, tilemap_w, tilemap_h, tile_size, object_solids, map_h_px, monk_frame_w, monk_frame_h):
+    if attack_state is None or enemy_i < 0 or enemy_i >= len(enemy_rows) or enemy_i >= len(enemy_states) or enemy_i >= len(monk_orb_states):
+        return False
+    slot_states = monk_orb_states[enemy_i]
+    if not slot_states:
+        return False
+    slot_a, slot_b = _pick_monk_attack_slots(slot_states)
+    if slot_a < 0 or slot_b < 0:
+        return False
+    row = enemy_rows[enemy_i]
+    state = enemy_states[enemy_i]
+    wx, wy, ow, oh, visible, _swappable = row
+    if not visible:
+        return False
+    left_edge_x = int(camera_x)
+    right_edge_x = int(camera_x) + int(view_w) - _MONK_ORB_W
+    if right_edge_x < left_edge_x:
+        right_edge_x = left_edge_x
+    left_floor_y = _find_floor_y_for_orb(left_edge_x, tilemap_idx, tilemap_w, tilemap_h, tile_size, object_solids, map_h_px)
+    right_floor_y = _find_floor_y_for_orb(right_edge_x, tilemap_idx, tilemap_w, tilemap_h, tile_size, object_solids, map_h_px)
+    profile_idx = (int(state.get("anim_counter", 0) or 0) + enemy_i) % len(_MONK_ATTACK_PROFILE_LIFTS)
+    left_lift, right_lift = _MONK_ATTACK_PROFILE_LIFTS[profile_idx]
+    orb_a = slot_states[slot_a]
+    orb_b = slot_states[slot_b]
+    orb_a_x, orb_a_y = _monk_orb_current_world_pos(wx, wy, ow, oh, int(state.get("anim_counter", 0) or 0), slot_a, monk_frame_w, monk_frame_h, orb_a)
+    orb_b_x, orb_b_y = _monk_orb_current_world_pos(wx, wy, ow, oh, int(state.get("anim_counter", 0) or 0), slot_b, monk_frame_w, monk_frame_h, orb_b)
+    orb_a["mode"] = _MONK_ORB_MODE_SCRIPTED_ATTACK
+    orb_a["script_x"] = orb_a_x
+    orb_a["script_y"] = orb_a_y
+    orb_b["mode"] = _MONK_ORB_MODE_SCRIPTED_ATTACK
+    orb_b["script_x"] = orb_b_x
+    orb_b["script_y"] = orb_b_y
+    attack_state["active"] = 1
+    attack_state["slot_a"] = slot_a
+    attack_state["slot_b"] = slot_b
+    attack_state["left_edge_x"] = left_edge_x
+    attack_state["right_edge_x"] = right_edge_x
+    attack_state["left_floor_y"] = left_floor_y
+    attack_state["right_floor_y"] = right_floor_y
+    attack_state["left_lift"] = left_lift
+    attack_state["right_lift"] = right_lift
+    attack_state["body_anchor_x"] = int(wx)
+    attack_state["body_anchor_y"] = int(wy)
+    _begin_monk_attack_phase(
+        attack_state,
+        _MONK_ATTACK_PHASE_SPLIT,
+        orb_a,
+        orb_b,
+        left_edge_x,
+        orb_a_y,
+        right_edge_x,
+        orb_b_y,
+        _MONK_ATTACK_EDGE_SPEED,
+    )
+    return True
+
+
+def _update_monk_attack_states(monk_attack_states, enemy_rows, enemy_states, monk_orb_states, enemy_meta, monk_hover_c_buf, monk_hover_c_stride, monk_hover_c_count, enemy_rows_c_buf, enemy_rows_c_stride, camera_x, view_w, tilemap_idx, tilemap_w, tilemap_h, tile_size, object_solids, map_h_px, monk_frame_w, monk_frame_h):
+    if not monk_attack_states or not enemy_rows or not enemy_states or not monk_orb_states:
+        return
+    attack_enabled = _monk_attack_enabled()
+    ei = 0
+    while ei < len(monk_attack_states) and ei < len(enemy_rows):
+        attack_state = monk_attack_states[ei]
+        if attack_state is None:
+            ei += 1
+            continue
+        row = enemy_rows[ei]
+        state = enemy_states[ei] if ei < len(enemy_states) else None
+        slot_states = monk_orb_states[ei] if ei < len(monk_orb_states) else None
+        meta = enemy_meta[ei] if (enemy_meta is not None and ei < len(enemy_meta)) else None
+        enemy_type = str(meta.get("type", "bow") or "bow") if meta is not None else "bow"
+        if enemy_type != "monk" or state is None or not slot_states:
+            ei += 1
+            continue
+        current_cd = 255
+        if monk_hover_c_buf is not None and ei < monk_hover_c_count:
+            current_cd = int(monk_hover_c_buf[(int(ei) * int(monk_hover_c_stride)) + 8])
+        if not attack_enabled:
+            si = 0
+            while si < len(slot_states):
+                orb_state = slot_states[si]
+                if orb_state is not None and str(orb_state.get("mode", "orbit") or "orbit") == _MONK_ORB_MODE_SCRIPTED_ATTACK:
+                    orb_state["detached_x"] = int(orb_state.get("script_x", 0) or 0)
+                    orb_state["detached_y"] = int(orb_state.get("script_y", 0) or 0)
+                    orb_state["return_radius"] = _MONK_ORB_RADIUS
+                    orb_state["mode"] = "detached"
+                si += 1
+            attack_state["active"] = 0
+            attack_state["phase"] = ""
+            attack_state["timer"] = 0
+            attack_state["prev_cd"] = current_cd if monk_hover_c_buf is not None and ei < monk_hover_c_count else 255
+            ei += 1
+            continue
+        if attack_state.get("active"):
+            _lock_monk_body_for_attack(ei, attack_state, enemy_rows, monk_hover_c_buf, monk_hover_c_stride, monk_hover_c_count, enemy_rows_c_buf, enemy_rows_c_stride, enemy_meta)
+            slot_a = int(attack_state.get("slot_a", -1) or -1)
+            slot_b = int(attack_state.get("slot_b", -1) or -1)
+            if slot_a < 0 or slot_b < 0 or slot_a >= len(slot_states) or slot_b >= len(slot_states):
+                attack_state["active"] = 0
+                ei += 1
+                continue
+            orb_a = slot_states[slot_a]
+            orb_b = slot_states[slot_b]
+            phase = str(attack_state.get("phase", "") or "")
+            if phase == _MONK_ATTACK_PHASE_SPLIT:
+                phase_total = int(attack_state.get("phase_total", 0) or 0)
+                phase_step = phase_total - int(attack_state.get("timer", 0) or 0)
+                orb_a["script_x"] = _lerp_int(attack_state.get("a_start_x", 0), attack_state.get("a_target_x", 0), phase_step, phase_total)
+                orb_a["script_y"] = _lerp_int(attack_state.get("a_start_y", 0), attack_state.get("a_target_y", 0), phase_step, phase_total)
+                orb_b["script_x"] = _lerp_int(attack_state.get("b_start_x", 0), attack_state.get("b_target_x", 0), phase_step, phase_total)
+                orb_b["script_y"] = _lerp_int(attack_state.get("b_start_y", 0), attack_state.get("b_target_y", 0), phase_step, phase_total)
+                timer = int(attack_state.get("timer", 0) or 0)
+                if timer > 0:
+                    attack_state["timer"] = timer - 1
+                else:
+                    _begin_monk_attack_phase(
+                        attack_state,
+                        _MONK_ATTACK_PHASE_DROP,
+                        orb_a,
+                        orb_b,
+                        int(attack_state.get("left_edge_x", 0) or 0),
+                        int(attack_state.get("left_floor_y", 0) or 0) - int(attack_state.get("left_lift", 0) or 0),
+                        int(attack_state.get("right_edge_x", 0) or 0),
+                        int(attack_state.get("right_floor_y", 0) or 0) - int(attack_state.get("right_lift", 0) or 0),
+                        _MONK_ATTACK_DROP_SPEED,
+                    )
+            elif phase == _MONK_ATTACK_PHASE_DROP:
+                phase_total = int(attack_state.get("phase_total", 0) or 0)
+                phase_step = phase_total - int(attack_state.get("timer", 0) or 0)
+                orb_a["script_x"] = _lerp_int(attack_state.get("a_start_x", 0), attack_state.get("a_target_x", 0), phase_step, phase_total)
+                orb_a["script_y"] = _lerp_int(attack_state.get("a_start_y", 0), attack_state.get("a_target_y", 0), phase_step, phase_total)
+                orb_b["script_x"] = _lerp_int(attack_state.get("b_start_x", 0), attack_state.get("b_target_x", 0), phase_step, phase_total)
+                orb_b["script_y"] = _lerp_int(attack_state.get("b_start_y", 0), attack_state.get("b_target_y", 0), phase_step, phase_total)
+                timer = int(attack_state.get("timer", 0) or 0)
+                if timer > 0:
+                    attack_state["timer"] = timer - 1
+                else:
+                    _begin_monk_attack_phase(
+                        attack_state,
+                        _MONK_ATTACK_PHASE_SWEEP,
+                        orb_a,
+                        orb_b,
+                        int(attack_state.get("right_edge_x", 0) or 0),
+                        int(attack_state.get("left_floor_y", 0) or 0),
+                        int(attack_state.get("left_edge_x", 0) or 0),
+                        int(attack_state.get("right_floor_y", 0) or 0) - int(attack_state.get("right_lift", 0) or 0),
+                        _MONK_ATTACK_SWEEP_SPEED,
+                    )
+            elif phase == _MONK_ATTACK_PHASE_SWEEP:
+                phase_total = int(attack_state.get("phase_total", 0) or 0)
+                phase_step = phase_total - int(attack_state.get("timer", 0) or 0)
+                orb_a["script_x"] = _lerp_int(attack_state.get("a_start_x", 0), attack_state.get("a_target_x", 0), phase_step, phase_total)
+                orb_a["script_y"] = _lerp_int(attack_state.get("a_start_y", 0), attack_state.get("a_target_y", 0), phase_step, phase_total)
+                orb_b["script_x"] = _lerp_int(attack_state.get("b_start_x", 0), attack_state.get("b_target_x", 0), phase_step, phase_total)
+                orb_b["script_y"] = _lerp_int(attack_state.get("b_start_y", 0), attack_state.get("b_target_y", 0), phase_step, phase_total)
+                timer = int(attack_state.get("timer", 0) or 0)
+                if timer > 0:
+                    attack_state["timer"] = timer - 1
+                else:
+                    attack_state["phase"] = _MONK_ATTACK_PHASE_PAUSE
+                    attack_state["timer"] = _MONK_ATTACK_PAUSE_FRAMES
+            elif phase == _MONK_ATTACK_PHASE_PAUSE:
+                timer = int(attack_state.get("timer", 0) or 0)
+                if timer > 0:
+                    attack_state["timer"] = timer - 1
+                else:
+                    orb_a["detached_x"] = int(orb_a.get("script_x", 0) or 0)
+                    orb_a["detached_y"] = int(orb_a.get("script_y", 0) or 0)
+                    orb_a["return_radius"] = _MONK_ORB_RADIUS
+                    orb_a["mode"] = "detached"
+                    orb_b["detached_x"] = int(orb_b.get("script_x", 0) or 0)
+                    orb_b["detached_y"] = int(orb_b.get("script_y", 0) or 0)
+                    orb_b["return_radius"] = _MONK_ORB_RADIUS
+                    orb_b["mode"] = "detached"
+                    attack_state["active"] = 0
+                    attack_state["phase"] = ""
+            attack_state["prev_cd"] = current_cd
+            ei += 1
+            continue
+        prev_cd = int(attack_state.get("prev_cd", 255) or 255)
+        if attack_enabled and prev_cd == 255 and current_cd != 255 and current_cd > 0:
+            _start_monk_attack(ei, attack_state, enemy_rows, enemy_states, monk_orb_states, camera_x, view_w, tilemap_idx, tilemap_w, tilemap_h, tile_size, object_solids, map_h_px, monk_frame_w, monk_frame_h)
+        attack_state["prev_cd"] = current_cd
+        ei += 1
 
 
 def _step_monk_orb_state(orb_state, center_x, center_y, base_angle_rad):
@@ -2715,6 +3459,11 @@ def _step_monk_orb_state(orb_state, center_x, center_y, base_angle_rad):
         detached_x = int(orb_state.get("detached_x", 0) or 0)
         detached_y = int(orb_state.get("detached_y", 0) or 0)
         radius_px, angle_rad = _quantize_monk_orb_polar(center_x, center_y, detached_x, detached_y)
+        capture_eps = _MONK_ORB_CAPTURE_LINE_EPS
+        if radius_px > _MONK_ORB_RADIUS:
+            capture_eps += (radius_px - _MONK_ORB_RADIUS) // 12
+        if capture_eps > 24:
+            capture_eps = 24
         rel_x, rel_y = _monk_orb_rel_to_center(center_x, center_y, detached_x, detached_y)
         if math is not None:
             dir_x = math.cos(base_angle_rad)
@@ -2727,7 +3476,7 @@ def _step_monk_orb_state(orb_state, center_x, center_y, base_angle_rad):
             angle_diff = _cyclic_idx_diff(base_angle_idx, angle_idx, _MONK_ORB_TABLE_SIZE)
             along = 1 if radius_px > 0 else 0
             perp = abs(angle_diff) * max(radius_px, 1) * _MONK_ORB_RAD_PER_IDX
-        if along > 0 and perp <= _MONK_ORB_CAPTURE_LINE_EPS:
+        if along > 0 and perp <= capture_eps:
             orb_state["capture_lock"] = _MONK_ORB_CAPTURE_LOCK_FRAMES
             orb_state["mode"] = "captured_return"
             orb_state["return_radius"] = radius_px
@@ -2760,6 +3509,8 @@ def _monk_orb_current_world_pos(wx, wy, ow, oh, anim_counter, slot_i, monk_frame
     base_x, base_y = _monk_orb_slot_world_pos(wx, wy, ow, oh, anim_counter, slot_i, monk_frame_w, monk_frame_h)
     center_x, center_y = _monk_center_world_pos(wx, wy, ow, oh, monk_frame_w, monk_frame_h)
     base_angle_rad = _monk_orb_slot_angle_rad(anim_counter, slot_i)
+    if orb_state is not None and str(orb_state.get("mode", "orbit") or "orbit") in (_MONK_ORB_MODE_SCRIPTED_ATTACK, _MONK_ORB_MODE_SCRIPTED_INTRO):
+        return int(orb_state.get("script_x", base_x) or base_x), int(orb_state.get("script_y", base_y) or base_y)
     mode = _step_monk_orb_state(orb_state, center_x, center_y, base_angle_rad)
     if mode == "orbit":
         return base_x, base_y
@@ -2883,6 +3634,64 @@ def _pack_monk_orb_descriptors(
     return out, stride, count
 
 
+def _pack_monk_encounter_intro_orb_descriptors(monk_encounters, camera_x=0, view_w=320, view_h=240):
+    out = bytearray()
+    stride = 8
+    count = 0
+    if not monk_encounters:
+        return out, stride, count
+    ei = 0
+    while ei < len(monk_encounters):
+        encounter = monk_encounters[ei]
+        if encounter is not None and str(encounter.get("state", "") or "") == _MONK_ENCOUNTER_STATE_INTRO:
+            orbs = encounter.get("orbs") or []
+            oi = 0
+            while oi < len(orbs):
+                orb = orbs[oi]
+                orb_x = int(orb.get("x", 0) or 0)
+                orb_y = int(orb.get("y", 0) or 0)
+                if _aabb_near_view(orb_x, orb_y, _MONK_ORB_W, _MONK_ORB_H, camera_x, view_w, view_h, 48, 32):
+                    _append_i16_le(out, orb_x)
+                    _append_i16_le(out, orb_y)
+                    out.append(_SPECIAL_KIND_MONK_ORB)
+                    out.append(oi & 0xFF)
+                    out.append(0)
+                    out.append(0)
+                    count += 1
+                oi += 1
+        ei += 1
+    return out, stride, count
+
+
+def _pack_monk_encounter_intro_body_descriptors(monk_encounters, camera_x=0, view_w=320, view_h=240, monk_frame_w=32, monk_frame_h=48):
+    out = bytearray()
+    stride = 10
+    count = 0
+    if not monk_encounters:
+        return out, stride, count
+    ei = 0
+    while ei < len(monk_encounters):
+        encounter = monk_encounters[ei]
+        if encounter is not None and str(encounter.get("state", "") or "") == _MONK_ENCOUNTER_STATE_INTRO:
+            body_x = int(encounter.get("body_x", 0) or 0)
+            body_y = int(encounter.get("body_y", 0) or 0)
+            template_row = encounter.get("template_row") or [0, 0, 48, 64]
+            body_w = int(template_row[2])
+            body_h = int(template_row[3])
+            draw_x, draw_y = _monk_enemy_draw_origin(body_x, body_y, body_w, body_h, monk_frame_w, monk_frame_h)
+            if _aabb_near_view(draw_x, draw_y, monk_frame_w, monk_frame_h, camera_x, view_w, view_h, 48, 32):
+                _append_i16_le(out, draw_x)
+                _append_i16_le(out, draw_y)
+                _append_u16_le(out, int(encounter.get("anim_counter", 0) or 0))
+                out.append(_ENEMY_STATE_IDLE & 0xFF)
+                out.append(1)
+                out.append(1)
+                out.append(0)
+                count += 1
+        ei += 1
+    return out, stride, count
+
+
 def _pack_enemy_rows_for_c(rows, meta_rows=None):
     if not rows:
         return bytearray(), _ENEMY_ROW_STRIDE, 0
@@ -2909,6 +3718,64 @@ def _pack_enemy_rows_for_c(rows, meta_rows=None):
         bi += _ENEMY_ROW_STRIDE
         oi += 1
     return out, _ENEMY_ROW_STRIDE, len(rows)
+
+
+def _pack_monk_hover_states_for_c(rows, meta_rows=None, map_w_px=0):
+    if not rows:
+        return bytearray(), _MONK_HOVER_STATE_STRIDE, 0
+    out = bytearray(len(rows) * _MONK_HOVER_STATE_STRIDE)
+    hover_enabled = bool(getattr(config, "MONK_HOVER_ENABLED", True))
+    hover_min_x = int(getattr(config, "MONK_HOVER_MIN_X", 1616))
+    hover_max_x = int(getattr(config, "MONK_HOVER_MAX_X", 1856))
+    hover_min_y = int(getattr(config, "MONK_HOVER_BASE_Y", 96)) - int(getattr(config, "MONK_HOVER_AMP", 8))
+    hover_max_y = int(getattr(config, "MONK_HOVER_BASE_Y", 96)) + int(getattr(config, "MONK_HOVER_AMP", 8))
+    hover_base_y = int(getattr(config, "MONK_HOVER_BASE_Y", 112))
+    hover_phase_step = int(getattr(config, "MONK_HOVER_PHASE_STEP", 2))
+    if hover_phase_step < 1:
+        hover_phase_step = 1
+    hover_retarget_frames = int(getattr(config, "MONK_HOVER_RETARGET_FRAMES", 30))
+    if hover_retarget_frames < 1:
+        hover_retarget_frames = 1
+    hover_speed_q8 = int(getattr(config, "MONK_HOVER_SPEED_Q8", 256))
+    if hover_speed_q8 < 1:
+        hover_speed_q8 = 256
+    if hover_speed_q8 > 4095:
+        hover_speed_q8 = 4095
+    if map_w_px > 0:
+        if hover_min_x < 0:
+            hover_min_x = 0
+        if hover_max_x >= map_w_px:
+            hover_max_x = map_w_px - 1
+        if hover_max_x < hover_min_x:
+            hover_max_x = hover_min_x
+    oi = 0
+    bi = 0
+    while oi < len(rows):
+        row = rows[oi]
+        meta = meta_rows[oi] if (meta_rows is not None and oi < len(meta_rows)) else None
+        enemy_type = str(meta.get("type", "bow") or "bow") if meta is not None else "bow"
+        target_x = int(row[0])
+        target_y = int(row[1])
+        if hover_enabled and enemy_type == "monk":
+            target_x = hover_min_x + ((hover_max_x - hover_min_x) // 2)
+            target_y = hover_base_y
+            phase = (oi * 13) & 0xFFFF
+            _buf_set_i16_le(out, bi + 0, target_x)
+            _buf_set_i16_le(out, bi + 2, target_y)
+            _buf_set_i16_le(out, bi + 4, hover_base_y)
+            _buf_set_i16_le(out, bi + 6, phase)
+            out[bi + 8] = hover_retarget_frames & 0xFF
+            _buf_set_i16_le(out, bi + 9, hover_speed_q8)
+        else:
+            _buf_set_i16_le(out, bi + 0, target_x)
+            _buf_set_i16_le(out, bi + 2, target_y)
+            _buf_set_i16_le(out, bi + 4, int(row[1]))
+            _buf_set_i16_le(out, bi + 6, 0)
+            out[bi + 8] = 0
+            _buf_set_i16_le(out, bi + 9, 0)
+        bi += _MONK_HOVER_STATE_STRIDE
+        oi += 1
+    return out, _MONK_HOVER_STATE_STRIDE, len(rows)
 
 
 def _sync_enemy_rows_from_c(rows, enemy_rows_c_buf, enemy_rows_c_stride):
@@ -3803,6 +4670,8 @@ def _print_profile_summary(
     avg_total_us,
     fps_prof,
 ):
+    if not _runtime_verbose_enabled():
+        return
     print("PROFILE update_us=%d" % avg_update_us)
     print("PROFILE bg_us=%d" % avg_bg_us)
     print("PROFILE world_us=%d" % avg_world_us)
@@ -3971,6 +4840,8 @@ def _emit_step4_profile(
         fps_prof,
     )
     if partial_rect_experiment_disabled:
+        if not _runtime_verbose_enabled():
+            return dirty_us_acc, fallback_us_acc, submit_acc, _zero_profile_counters()
         n_dirty = profile_every
         avg_dirty_us = dirty_us_acc // n_dirty
         avg_fallback_us = fallback_us_acc // n_dirty
@@ -4014,6 +4885,7 @@ def _submit_native_band_frame(
     enemy_rows,
     enemy_states,
     monk_orb_states,
+    monk_encounters,
     enemy_meta,
     enemy_monk_sheet,
     enemy_monk_frame_w,
@@ -4108,6 +4980,20 @@ def _submit_native_band_frame(
         enemy_monk_frame_w,
         enemy_monk_frame_h,
     )
+    intro_orb_desc_buf, intro_orb_desc_stride, intro_orb_desc_count = _pack_monk_encounter_intro_orb_descriptors(
+        monk_encounters,
+        camera_x,
+        sw,
+        sh,
+    )
+    if intro_orb_desc_count > 0:
+        if monk_orb_desc_count <= 0:
+            monk_orb_desc_buf = intro_orb_desc_buf
+            monk_orb_desc_stride = intro_orb_desc_stride
+            monk_orb_desc_count = intro_orb_desc_count
+        else:
+            monk_orb_desc_buf.extend(intro_orb_desc_buf)
+            monk_orb_desc_count += intro_orb_desc_count
     if monk_orb_desc_count > 0:
         if special_desc_count <= 0:
             special_desc_buf = monk_orb_desc_buf
@@ -4155,6 +5041,22 @@ def _submit_native_band_frame(
         enemy_monk_frame_w,
         enemy_monk_frame_h,
     )
+    intro_enemy_desc_buf, intro_enemy_desc_stride, intro_enemy_desc_count = _pack_monk_encounter_intro_body_descriptors(
+        monk_encounters,
+        camera_x,
+        sw,
+        sh,
+        enemy_monk_frame_w,
+        enemy_monk_frame_h,
+    )
+    if intro_enemy_desc_count > 0:
+        if enemy_desc_count <= 0:
+            enemy_desc_buf = intro_enemy_desc_buf
+            enemy_desc_stride = intro_enemy_desc_stride
+            enemy_desc_count = intro_enemy_desc_count
+        else:
+            enemy_desc_buf.extend(intro_enemy_desc_buf)
+            enemy_desc_count += intro_enemy_desc_count
     native_object_count = objects_c_count
     native_enemy_count = enemy_desc_count
     native_overlay_count = overlay_count
@@ -5081,6 +5983,8 @@ def run(max_frames=None):
                 camera_max = 0
             player_x = int(getattr(config, "CAMERA_TEST_PLAYER_START_X", 32))
             player_x = _clamp(player_x, 0, max_player_x)
+            camera_x = 0
+            monk_platform_camera_locked = False
             speed = int(getattr(config, "PLAYER_SPEED_X", 2))
             gravity = int(getattr(config, "PLAYER_GRAVITY", 1))
             if gravity < 0:
@@ -5462,9 +6366,13 @@ def run(max_frames=None):
             enemy_rows = enemy_rt["enemy_rows"]
             enemy_meta = enemy_rt["enemy_meta"]
             enemy_rows_initial = enemy_rt["enemy_rows_initial"]
+            monk_encounters = enemy_rt["monk_encounters"]
             enemy_rows_c_buf = enemy_rt["enemy_rows_c_buf"]
             enemy_rows_c_stride = enemy_rt["enemy_rows_c_stride"]
             enemy_rows_c_count = enemy_rt["enemy_rows_c_count"]
+            monk_hover_c_buf = enemy_rt["monk_hover_c_buf"]
+            monk_hover_c_stride = enemy_rt["monk_hover_c_stride"]
+            monk_hover_c_count = enemy_rt["monk_hover_c_count"]
             enemy_states = enemy_rt["enemy_states"]
             enemy_sheet = enemy_rt["enemy_sheet"]
             enemy_sheet_w = enemy_rt["enemy_sheet_w"]
@@ -5481,6 +6389,8 @@ def run(max_frames=None):
             enemy_monk_orb_atlas_w = enemy_rt["enemy_monk_orb_atlas_w"]
             enemy_monk_orb_atlas_h = enemy_rt["enemy_monk_orb_atlas_h"]
             monk_orb_states = enemy_rt["monk_orb_states"]
+            monk_attack_states = enemy_rt["monk_attack_states"]
+            monk_intro_states = enemy_rt["monk_intro_states"]
             enemy_bullets = enemy_rt["enemy_bullets"]
             enemy_update_native_ready = enemy_rt["enemy_update_native_ready"]
             enemy_render_enabled = enemy_rt["enemy_render_enabled"]
@@ -5908,6 +6818,9 @@ def run(max_frames=None):
                         enemy_rows_c_buf,
                         enemy_rows_c_stride,
                         enemy_rows_c_count,
+                        monk_hover_c_buf,
+                        monk_hover_c_stride,
+                        monk_hover_c_count,
                         object_solids_c_buf,
                         object_solids_c_stride,
                         object_solids_c_count,
@@ -5985,6 +6898,29 @@ def run(max_frames=None):
                     else:
                         player_y, vel_y = enemy_update_out
 
+                    _update_monk_attack_states(
+                        monk_attack_states,
+                        enemy_rows,
+                        enemy_states,
+                        monk_orb_states,
+                        enemy_meta,
+                        monk_hover_c_buf,
+                        monk_hover_c_stride,
+                        monk_hover_c_count,
+                        enemy_rows_c_buf,
+                        enemy_rows_c_stride,
+                        camera_x,
+                        sw,
+                        tilemap_idx,
+                        tilemap_w,
+                        tilemap_h,
+                        tile_size,
+                        object_solids,
+                        map_h_px,
+                        enemy_monk_frame_w,
+                        enemy_monk_frame_h,
+                    )
+
                     player_x, player_y, vel_y, object_solids = _perform_world_swap(
                         swap_triggered,
                         swap_pick_far,
@@ -6010,6 +6946,7 @@ def run(max_frames=None):
                         objects_c_stride,
                         enemy_monk_frame_w,
                         enemy_monk_frame_h,
+                        monk_intro_states,
                     )
                     if swap_triggered:
                         _sync_enemy_rows_c_from_rows(enemy_rows_c_buf, enemy_rows_c_stride, enemy_rows, enemy_meta)
@@ -6096,7 +7033,55 @@ def run(max_frames=None):
                     if death_state == 0:
                         player_center_x = player_x + (player_w // 2)
                         target_camera_x = player_center_x - screen_half
-                        camera_x = _clamp(target_camera_x, 0, camera_max)
+                        if monk_platform_camera_locked:
+                            camera_x = 1600
+                        else:
+                            camera_x = _clamp(target_camera_x, 0, camera_max)
+                            if camera_x >= 1600:
+                                camera_x = 1600
+                                monk_platform_camera_locked = True
+                                if monk_intro_states:
+                                    ei = 0
+                                    while ei < len(monk_intro_states):
+                                        intro_state = monk_intro_states[ei]
+                                        if intro_state is not None and int(intro_state.get("state", _MONK_INTRO_STATE_IDLE) or _MONK_INTRO_STATE_IDLE) == _MONK_INTRO_STATE_IDLE:
+                                            intro_state["armed"] = 1
+                                        ei += 1
+                        if _runtime_verbose_enabled() and camera_x >= 1500 and (frame % 30) == 0:
+                            print("CAMERA_LOCK_DBG camera_x=%d target=%d locked=%d player_x=%d" % (int(camera_x), int(target_camera_x), 1 if monk_platform_camera_locked else 0, int(player_x)))
+                        _update_monk_encounters(
+                            monk_encounters,
+                            enemy_rows,
+                            enemy_meta,
+                            enemy_states,
+                            enemy_rows_c_buf,
+                            enemy_rows_c_stride,
+                            monk_hover_c_buf,
+                            monk_hover_c_stride,
+                            monk_hover_c_count,
+                            monk_orb_states,
+                            camera_x,
+                            sw,
+                        )
+                        if monk_encounters:
+                            ei = 0
+                            while ei < len(monk_encounters):
+                                encounter = monk_encounters[ei]
+                                if encounter is not None:
+                                    new_enemy_rows_c_count = int(encounter.get("enemy_rows_c_count", enemy_rows_c_count) or enemy_rows_c_count)
+                                    if new_enemy_rows_c_count > enemy_rows_c_count:
+                                        enemy_rows_c_count = new_enemy_rows_c_count
+                                    new_monk_hover_c_count = int(encounter.get("monk_hover_c_count", monk_hover_c_count) or monk_hover_c_count)
+                                    if new_monk_hover_c_count > monk_hover_c_count:
+                                        monk_hover_c_count = new_monk_hover_c_count
+                                ei += 1
+                        if monk_platform_camera_locked:
+                            _update_monk_intro_states(
+                                monk_intro_states,
+                                monk_encounters,
+                                camera_x,
+                                sw,
+                            )
                         player_screen_x = player_x - camera_x
                         if use_sprite_player and sprite_draw_mode == "COMPOSE":
                             min_screen_x = 0
@@ -6183,9 +7168,13 @@ def run(max_frames=None):
                             object_solids = _rebuild_object_solids(objects_rows)
                             object_solids_c_count = _sync_object_solids_c_from_list(object_solids_c_buf, object_solids_c_stride, object_solids)
                             death_state = 0
+                            monk_platform_camera_locked = True if camera_x >= 1600 else False
                             player_center_x = player_x + (player_w // 2)
                             target_camera_x = player_center_x - screen_half
-                            camera_x = _clamp(target_camera_x, 0, camera_max)
+                            if monk_platform_camera_locked:
+                                camera_x = 1600
+                            else:
+                                camera_x = _clamp(target_camera_x, 0, camera_max)
                             player_screen_x = player_x - camera_x
                             print("PLAYER_RESPAWN_OK x=%d y=%d" % (player_x, player_y))
                     player_screen_x = -4096
@@ -6275,6 +7264,7 @@ def run(max_frames=None):
                         enemy_rows,
                         enemy_states,
                         monk_orb_states,
+                        monk_encounters,
                         enemy_meta,
                         enemy_monk_sheet,
                         enemy_monk_frame_w,
@@ -6806,11 +7796,12 @@ def run(max_frames=None):
                     dirty_last_rects_count = 2
                     dirty_last_bands_count = 1
                     dirty_last_camera_static = 1 if camera_x == prev_camera_x else 0
-                    if dirty_log_countdown <= 0:
-                        print("FULLSCREEN_BULK_SUBMIT_OK")
-                        dirty_log_countdown = 30
-                    if dirty_log_countdown > 0:
-                        dirty_log_countdown -= 1
+                    if _runtime_verbose_enabled():
+                        if dirty_log_countdown <= 0:
+                            print("FULLSCREEN_BULK_SUBMIT_OK")
+                            dirty_log_countdown = 30
+                        if dirty_log_countdown > 0:
+                            dirty_log_countdown -= 1
 
                 prev_camera_x = camera_x
                 if use_sprite_player:
@@ -6860,24 +7851,25 @@ def run(max_frames=None):
 
                 frame_total_us = ticks_diff(ticks_us(), frame_start_us)
                 prof_total_us += frame_total_us
-                if frame_total_us >= stall_frame_us:
-                    if stall_log_countdown <= 0:
-                        print(
-                            "STALL_FRAME total_us=%d submit_us=%d bg_us_acc=%d world_us_acc=%d sprite_us_acc=%d frame=%d camera_x=%d player_x=%d"
-                            % (
-                                frame_total_us,
-                                us,
-                                prof_bg_us,
-                                prof_world_us,
-                                prof_sprite_us,
-                                frame,
-                                camera_x,
-                                player_x,
+                if _runtime_verbose_enabled():
+                    if frame_total_us >= stall_frame_us:
+                        if stall_log_countdown <= 0:
+                            print(
+                                "STALL_FRAME total_us=%d submit_us=%d bg_us_acc=%d world_us_acc=%d sprite_us_acc=%d frame=%d camera_x=%d player_x=%d"
+                                % (
+                                    frame_total_us,
+                                    us,
+                                    prof_bg_us,
+                                    prof_world_us,
+                                    prof_sprite_us,
+                                    frame,
+                                    camera_x,
+                                    player_x,
+                                )
                             )
-                        )
-                        stall_log_countdown = stall_log_cooldown
-                if stall_log_countdown > 0:
-                    stall_log_countdown -= 1
+                            stall_log_countdown = stall_log_cooldown
+                    if stall_log_countdown > 0:
+                        stall_log_countdown -= 1
 
                 frame += 1
                 if not drew_once:
@@ -6915,14 +7907,15 @@ def run(max_frames=None):
                         )
                     print("CAMERA_TEST_STEP=%d_DRAW_OK" % step_tag)
                     print("CAMERA_TEST_STEP=%d_HOLD" % step_tag)
-                    if coord_hud_enabled and not coord_hud_logged:
-                        print("CAMERA_TOP_HUD_DRAW_OK")
-                        print("CAMERA_TOP_HUD_POS fps_x=4 fps_y=4 coord_x=%d coord_y=4" % top_hud_coord_x)
-                        print("CAMERA_TOP_HUD_VALUE fps=%s coord=%s" % (top_hud_fps_text, coord_hud_text))
-                        coord_hud_logged = True
+                    if _runtime_verbose_enabled():
+                        if coord_hud_enabled and not coord_hud_logged:
+                            print("CAMERA_TOP_HUD_DRAW_OK")
+                            print("CAMERA_TOP_HUD_POS fps_x=4 fps_y=4 coord_x=%d coord_y=4" % top_hud_coord_x)
+                            print("CAMERA_TOP_HUD_VALUE fps=%s coord=%s" % (top_hud_fps_text, coord_hud_text))
+                            coord_hud_logged = True
                     drew_once = True
 
-                if (frame % dbg_every) == 0:
+                if _runtime_verbose_enabled() and (frame % dbg_every) == 0:
                     win_ms = ticks_diff(now, perf_window_start)
                     if win_ms <= 0:
                         win_ms = 1
@@ -6963,7 +7956,7 @@ def run(max_frames=None):
                     print("%s_PERF frame_ms=%.2f fps=%.2f" % (perf_prefix, avg_ms, fps))
                     perf_window_start = now
 
-                if (frame % profile_every) == 0:
+                if _runtime_verbose_enabled() and (frame % profile_every) == 0:
                     dirty_us_acc, fallback_us_acc, submit_acc, profile_counters = _emit_step4_profile(
                         profile_every,
                         prof_update_us,
