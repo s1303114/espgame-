@@ -701,6 +701,9 @@ static const int32_t LGFX_MONK_ORB_W = 16;
 static const int32_t LGFX_MONK_ORB_H = 16;
 static const int32_t LGFX_MONK_ORB_SCALE = 1024;
 static const int32_t LGFX_MONK_ORB_TABLE_SIZE = 60;
+static const int32_t LGFX_MONK_ORB_CLASH_GRAVITY = 1;
+static const int32_t LGFX_MONK_ORB_CLASH_MAX_FALL_SPEED = 12;
+static const int32_t LGFX_MONK_ORB_CLASH_LOST_Y = 320;
 static const int16_t LGFX_MONK_ORB_COS[LGFX_MONK_ORB_TABLE_SIZE] = {
     1024, 1018, 1002, 974, 935, 887, 828, 761, 685, 602,
     512, 416, 316, 213, 107, 0, -107, -213, -316, -416,
@@ -807,16 +810,14 @@ static inline bool lgfx_monk_orb_aabb_overlap(int32_t ax, int32_t ay, int32_t bx
     return ax < (bx + LGFX_MONK_ORB_W) && (ax + LGFX_MONK_ORB_W) > bx && ay < (by + LGFX_MONK_ORB_H) && (ay + LGFX_MONK_ORB_H) > by;
 }
 
-static inline void lgfx_monk_orb_stop_detached(uint8_t *orb, int32_t slot_i) {
-    int32_t x = lgfx_rd_i16(orb + 10);
-    int32_t y = lgfx_rd_i16(orb + 12);
-    orb[0] = 1u;
+static inline void lgfx_monk_orb_set_clash_bounce(uint8_t *orb, int32_t slot_i, int32_t x, int32_t y, int32_t vx, int32_t vy) {
+    orb[0] = 7u;
     orb[1] = (uint8_t)(slot_i & 0xFF);
     orb[2] = 0u;
     orb[3] = 1u;
-    lgfx_wr_i16(orb + 4, x);
-    lgfx_wr_i16(orb + 6, y);
-    lgfx_wr_i16(orb + 8, LGFX_MONK_ORB_RADIUS);
+    lgfx_wr_i16(orb + 4, vx);
+    lgfx_wr_i16(orb + 6, vy);
+    lgfx_wr_i16(orb + 8, 0);
     lgfx_wr_i16(orb + 10, x);
     lgfx_wr_i16(orb + 12, y);
 }
@@ -866,7 +867,7 @@ static mp_obj_t lgfx_update_monk_orbs_native(size_t n_args, const mp_obj_t *args
     for (int32_t oi = 0; oi < orb_count; ++oi) {
         uint8_t *orb = orb_buf + ((size_t)oi * (size_t)orb_stride);
         uint8_t mode = orb[0];
-        if (mode == 0xFFu || mode == 3u) {
+        if (mode == 0xFFu || mode == 3u || mode == 8u) {
             continue;
         }
         int32_t enemy_i = oi / LGFX_MONK_ORB_COUNT;
@@ -968,6 +969,33 @@ static mp_obj_t lgfx_update_monk_orbs_native(size_t n_args, const mp_obj_t *args
             }
             lgfx_wr_i16(orb + 8, radius_px);
             lgfx_monk_orb_pos_from_idx(center_x, center_y, radius_px, angle_idx, &out_x, &out_y);
+        } else if (mode == 7u) {
+            int32_t x = lgfx_rd_i16(orb + 10);
+            int32_t y = lgfx_rd_i16(orb + 12);
+            int32_t vx = lgfx_rd_i16(orb + 4);
+            int32_t vy = lgfx_rd_i16(orb + 6);
+            int32_t timer = lgfx_rd_i16(orb + 8);
+            x += vx;
+            y += vy;
+            timer += 1;
+            vy += LGFX_MONK_ORB_CLASH_GRAVITY;
+            if (vy > LGFX_MONK_ORB_CLASH_MAX_FALL_SPEED) {
+                vy = LGFX_MONK_ORB_CLASH_MAX_FALL_SPEED;
+            }
+            lgfx_wr_i16(orb + 4, vx);
+            lgfx_wr_i16(orb + 6, vy);
+            lgfx_wr_i16(orb + 8, timer);
+            lgfx_wr_i16(orb + 10, x);
+            lgfx_wr_i16(orb + 12, y);
+            if (y > LGFX_MONK_ORB_CLASH_LOST_Y) {
+                orb[0] = 8u;
+                orb[3] = 0u;
+                mp_printf(&mp_plat_print, "MONK_ORB_LOST index=%d x=%d y=%d\n", (int)oi, (int)x, (int)y);
+                updated += 1;
+                continue;
+            }
+            out_x = x;
+            out_y = y;
         } else {
             continue;
         }
@@ -1003,19 +1031,17 @@ static mp_obj_t lgfx_update_monk_orbs_native(size_t n_args, const mp_obj_t *args
             int32_t bx = lgfx_rd_i16(orb_b + 10);
             int32_t by = lgfx_rd_i16(orb_b + 12);
             if (lgfx_monk_orb_aabb_overlap(ax, ay, bx, by)) {
-                orb_a[3] = (uint8_t)(orb_a[3] | 0x80u);
-                orb_b[3] = (uint8_t)(orb_b[3] | 0x80u);
+                int32_t dx = ax - bx;
+                int32_t vx_a = dx >= 0 ? 3 : -3;
+                if (dx == 0) {
+                    vx_a = ((int32_t)orb_a[1] <= (int32_t)orb_b[1]) ? -3 : 3;
+                }
+                lgfx_monk_orb_set_clash_bounce(orb_a, (int32_t)orb_a[1], ax, ay, vx_a, -5);
+                lgfx_monk_orb_set_clash_bounce(orb_b, (int32_t)orb_b[1], bx, by, -vx_a, -5);
+                mp_printf(&mp_plat_print, "MONK_ORB_CLASH a=%d b=%d ax=%d ay=%d bx=%d by=%d\n", (int)ai, (int)bi, (int)ax, (int)ay, (int)bx, (int)by);
+                updated += 2;
+                break;
             }
-        }
-    }
-    for (int32_t oi = 0; oi < orb_count; ++oi) {
-        uint8_t *orb = orb_buf + ((size_t)oi * (size_t)orb_stride);
-        if ((orb[3] & 0x80u) != 0u) {
-            int32_t slot_i = (int32_t)orb[1];
-            lgfx_monk_orb_stop_detached(orb, slot_i);
-            updated += 1;
-        } else {
-            orb[3] = (uint8_t)(orb[3] & 0x7Fu);
         }
     }
     return mp_obj_new_int(updated);
@@ -1126,7 +1152,7 @@ static mp_obj_t lgfx_pack_monk_orb_descriptors_native(size_t n_args, const mp_ob
             }
             const uint8_t *orb = orbs + ((size_t)oi * (size_t)orb_stride);
             uint8_t mode = orb[0];
-            if (mode == 0xFFu || mode == 3u) {
+            if (mode == 0xFFu || mode == 3u || mode == 8u) {
                 continue;
             }
             int32_t orb_x = lgfx_rd_i16(orb + 10);

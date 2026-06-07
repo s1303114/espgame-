@@ -13,8 +13,8 @@
 - live hover base Y：`MONK_HOVER_BASE_Y = 55`
 - monk 區域重生門檻：`MONK_RESPAWN_REINTRO_MIN_X = 1500`
 - 玩家在 monk 區域重生時，會觸發 `MONK_RESPAWN_REINTRO_RESET ...`，live monk slot 會被隱藏並重用，下一輪重新跑 intro
-- monk attack 目前有 type 1 split/drop/sweep 與 type 2 five-orb pulse；type 2 半徑 `28 -> 128 -> 28`，timing 是 `60/40/60`
-- action 色 orb mode `2/4/5` 會傷害玩家；action orb 彼此以 `16x16` hitbox 重疊時會停在當前位置、轉回 detached 公轉色、停止傷害
+- monk attack 目前有 type 1 split/drop/sweep + three-orb-phase dive 與 type 2 pulse；type 1 在 5/4 顆時只用左右兩顆，剩 3 顆 orbit 且另外 2 顆是 `8 lost` 時才加第三顆：上飛到 `Y=0`、追到玩家頭上、下墜到 `Y=160`。type 2 至少三顆 orbit orb 可啟動，`8 lost` 會被忽略；5/4 顆維持同步 `28 -> 128 -> 28` pulse，timing 是 `60/40/60`；只剩 3 顆 orbit + 2 lost 時改成 `0/12/24` frame 三角錯峰雙峰 pulse，最大半徑 hold 與雙峰收尾等待都維持攻擊色
+- action 色 orb mode `2/4/5` 會傷害玩家；action orb 彼此以 `16x16` hitbox 重疊時會進入 `7 clash_bounce`，短暫彈起後掉出世界成為 `8 lost`，不再 render、damage 或被 swap picker 選中
 
 本次抓到的一組板上 profile/FPS（`/tmp/monk_fps_sample.log`，`CAMERA_RUNTIME_VERBOSE=True`）：
 
@@ -207,7 +207,7 @@ live orb state 則已 native 化：
 - `lgfx.update_monk_orbs_native(...)` 更新 `mode/current_x/current_y/return_radius`
 - `lgfx.pack_monk_orb_descriptors_native(...)` 產生 `_SPECIAL_KIND_MONK_ORB` render descriptor
 - `lgfx.pick_swappable_monk_orb_native(...)` 負責 near/far monk orb target picking
-- `lgfx.update_monk_attack_native(...)` 負責 attack type 1 的 split/drop/sweep phase update
+- `lgfx.update_monk_attack_native(...)` 負責 attack type 1 的 split/drop/sweep + three-orb dive，以及 type 2 的同步 pulse / 三顆錯峰雙峰 pulse update
 - Python `_swap_with_monk_orb(...)` 仍負責真正 swap apply，並直接寫回 `monk_orb_c_buf`
 - Python `monk_orb_damage.action_hit_player(...)` 將 mode `2 captured_return`、`4 scripted_attack`、`5 pulse_damage` 視為第二色 damage orb；碰到玩家會沿用既有死亡 / respawn 流程。mode `1 detached` 與 `6 pulse_hold` 是公轉色，不造成傷害
 - 一般 live path 不再每幀把 C buffer sync 回 Python dict；dict 只保留 fallback / intro scripted / debug shadow 用途

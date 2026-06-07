@@ -72,7 +72,7 @@ _BULLET_STATE_STRIDE = 16
 _OBJECT_SOLID_STRIDE = 8
 _MONK_HOVER_STATE_STRIDE = 11
 _MONK_ORB_NATIVE_STRIDE = 16
-_MONK_ATTACK_NATIVE_STRIDE = 16
+_MONK_ATTACK_NATIVE_STRIDE = 24
 _MONK_ORB_NATIVE_MODE_ORBIT = 0
 _MONK_ORB_NATIVE_MODE_DETACHED = 1
 _MONK_ORB_NATIVE_MODE_CAPTURED_RETURN = 2
@@ -80,6 +80,8 @@ _MONK_ORB_NATIVE_MODE_SCRIPTED_INTRO = 3
 _MONK_ORB_NATIVE_MODE_SCRIPTED_ATTACK = 4
 _MONK_ORB_NATIVE_MODE_PULSE_DAMAGE = 5
 _MONK_ORB_NATIVE_MODE_PULSE_HOLD = 6
+_MONK_ORB_NATIVE_MODE_CLASH_BOUNCE = 7
+_MONK_ORB_NATIVE_MODE_LOST = 8
 _MONK_ORB_NATIVE_MODE_UNUSED = 255
 _boot_source_tag = "ROOT"
 _draw_digits_to_buf = None
@@ -1534,6 +1536,10 @@ def _pick_swappable_monk_orb(enemy_rows, enemy_states, enemy_meta, monk_orb_stat
                 si = 0
                 while si < len(slot_states):
                     orb_state = slot_states[si]
+                    mode = str(orb_state.get("mode", "orbit") or "orbit") if orb_state is not None else "lost"
+                    if mode == "clash_bounce" or mode == "lost":
+                        si += 1
+                        continue
                     orb_x, orb_y = _monk_orb_current_world_pos(wx, wy, ow, oh, int(state.get("anim_counter", 0) or 0), si, monk_frame_w, monk_frame_h, orb_state)
                     d2 = _visible_target_distance2(orb_x, orb_y, _MONK_ORB_W, _MONK_ORB_H, player_x, player_y, player_w, player_h, camera_x, band_top, view_w, view_h)
                     if d2 >= 0:
@@ -2973,6 +2979,10 @@ def _monk_orb_native_mode_from_state(orb_state):
         return _MONK_ORB_NATIVE_MODE_SCRIPTED_INTRO
     if mode == _MONK_ORB_MODE_SCRIPTED_ATTACK:
         return _MONK_ORB_NATIVE_MODE_SCRIPTED_ATTACK
+    if mode == "clash_bounce":
+        return _MONK_ORB_NATIVE_MODE_CLASH_BOUNCE
+    if mode == "lost":
+        return _MONK_ORB_NATIVE_MODE_LOST
     return _MONK_ORB_NATIVE_MODE_ORBIT
 
 
@@ -2986,6 +2996,10 @@ def _monk_orb_state_mode_from_native(mode):
         return _MONK_ORB_MODE_SCRIPTED_INTRO
     if mi == _MONK_ORB_NATIVE_MODE_SCRIPTED_ATTACK:
         return _MONK_ORB_MODE_SCRIPTED_ATTACK
+    if mi == _MONK_ORB_NATIVE_MODE_CLASH_BOUNCE:
+        return "clash_bounce"
+    if mi == _MONK_ORB_NATIVE_MODE_LOST:
+        return "lost"
     return "orbit"
 
 
@@ -3046,7 +3060,7 @@ def _monk_orb_c_current_pos(monk_orb_c_buf, monk_orb_c_stride, enemy_i, slot_i):
     if base < 0:
         return None
     mode = int(monk_orb_c_buf[base + 0])
-    if mode == _MONK_ORB_NATIVE_MODE_UNUSED or mode == _MONK_ORB_NATIVE_MODE_SCRIPTED_INTRO:
+    if mode == _MONK_ORB_NATIVE_MODE_UNUSED or mode == _MONK_ORB_NATIVE_MODE_SCRIPTED_INTRO or mode == _MONK_ORB_NATIVE_MODE_LOST:
         return None
     return _buf_get_i16_le(monk_orb_c_buf, base + 10), _buf_get_i16_le(monk_orb_c_buf, base + 12)
 
@@ -3154,6 +3168,8 @@ def _pack_monk_attack_states_for_c(enemy_rows, enemy_meta=None):
         out[base + 1] = _MONK_HOVER_MOVING_CD
         out[base + 2] = 0xFF
         out[base + 3] = 0xFF
+        out[base + 16] = 0xFF
+        out[base + 17] = 0
         out[base + 14] = 0
         ei += 1
     return out, _MONK_ATTACK_NATIVE_STRIDE, count
@@ -3174,6 +3190,8 @@ def _ensure_monk_attack_c_count(monk_attack_c_buf, monk_attack_c_stride, monk_at
         monk_attack_c_buf[base + 12] = 0
         monk_attack_c_buf[base + 13] = 0
         monk_attack_c_buf[base + 14] = 0
+        monk_attack_c_buf[base + 16] = 0xFF
+        monk_attack_c_buf[base + 17] = 0
         monk_attack_c_count += 1
     return monk_attack_c_buf, monk_attack_c_stride, monk_attack_c_count
 
@@ -3185,8 +3203,9 @@ def _monk_attack_c_has_active(monk_attack_c_buf, monk_attack_c_stride, monk_atta
     ei = 0
     while ei < int(monk_attack_c_count):
         base = ei * stride
-        if base >= 0 and (base + _MONK_ATTACK_NATIVE_STRIDE) <= len(monk_attack_c_buf) and int(monk_attack_c_buf[base + 0]) != 0:
-            return True
+        if base >= 0 and (base + _MONK_ATTACK_NATIVE_STRIDE) <= len(monk_attack_c_buf):
+            if int(monk_attack_c_buf[base + 0]) != 0 or int(monk_attack_c_buf[base + 17]) != 0:
+                return True
         ei += 1
     return False
 
@@ -3195,7 +3214,7 @@ def _native_monk_attack_ready():
     return bool(_lgfx is not None and hasattr(_lgfx, "update_monk_attack_native"))
 
 
-def _update_monk_attack_native(monk_attack_c_buf, monk_attack_c_stride, monk_attack_c_count, enemy_rows_c_buf, enemy_rows_c_stride, enemy_rows_c_count, monk_hover_c_buf, monk_hover_c_stride, monk_hover_c_count, monk_orb_c_buf, monk_orb_c_stride, monk_orb_c_count):
+def _update_monk_attack_native(monk_attack_c_buf, monk_attack_c_stride, monk_attack_c_count, enemy_rows_c_buf, enemy_rows_c_stride, enemy_rows_c_count, monk_hover_c_buf, monk_hover_c_stride, monk_hover_c_count, monk_orb_c_buf, monk_orb_c_stride, monk_orb_c_count, player_x=0, player_w=16):
     if not _native_monk_attack_ready():
         return False
     if monk_attack_c_buf is None or enemy_rows_c_buf is None or monk_hover_c_buf is None or monk_orb_c_buf is None:
@@ -3219,6 +3238,8 @@ def _update_monk_attack_native(monk_attack_c_buf, monk_attack_c_stride, monk_att
             monk_orb_c_count,
             _monk_attack_enabled(),
             speed_px,
+            int(player_x),
+            int(player_w),
         )
         return True
     except Exception as exc:
@@ -3648,6 +3669,8 @@ def _reset_monk_for_respawn_reintro(enemy_rt):
                         monk_attack_c_buf[base + 2] = 0xFF
                         monk_attack_c_buf[base + 3] = 0xFF
                         monk_attack_c_buf[base + 14] = 0
+                        monk_attack_c_buf[base + 16] = 0xFF
+                        monk_attack_c_buf[base + 17] = 0
             else:
                 encounter["live_enemy_i"] = -1
             encounter["state"] = _MONK_ENCOUNTER_STATE_INACTIVE
@@ -4224,12 +4247,16 @@ def _pack_monk_orb_descriptors(
                 oi = 0
                 while oi < len(slot_states):
                     orb_state = slot_states[oi]
+                    orb_mode = _monk_orb_native_mode_from_state(orb_state)
+                    if orb_mode == _MONK_ORB_NATIVE_MODE_UNUSED or orb_mode == _MONK_ORB_NATIVE_MODE_LOST:
+                        oi += 1
+                        continue
                     orb_x, orb_y = _monk_orb_current_world_pos(wx, wy, ow, oh, int(state.get("anim_counter", 0) or 0), oi, monk_frame_w, monk_frame_h, orb_state)
                     _append_i16_le(out, orb_x)
                     _append_i16_le(out, orb_y)
                     out.append(_SPECIAL_KIND_MONK_ORB)
                     out.append(oi & 0xFF)
-                    out.append(_monk_orb_native_mode_from_state(orb_state) & 0xFF)
+                    out.append(orb_mode & 0xFF)
                     out.append(0)
                     count += 1
                     oi += 1
@@ -7635,6 +7662,8 @@ def run(max_frames=None):
                             monk_orb_c_buf,
                             monk_orb_c_stride,
                             monk_orb_c_count,
+                            player_x,
+                            player_w,
                         )
                     if not _update_monk_orbs_native(
                         monk_orb_states,
@@ -7672,6 +7701,8 @@ def run(max_frames=None):
                             monk_orb_c_buf,
                             monk_orb_c_stride,
                             monk_orb_c_count,
+                            player_x,
+                            player_w,
                         )
 
                     player_x, player_y, vel_y, object_solids = _perform_world_swap(
