@@ -1369,6 +1369,131 @@ static mp_obj_t lgfx_render_scene_bands_rgb565(size_t n_args, const mp_obj_t *ar
 }
 MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lgfx_render_scene_bands_rgb565_obj, 28, 62, lgfx_render_scene_bands_rgb565);
 
+static int16_t lgfx_band_rd_i16(const uint8_t *p) {
+    uint16_t v = (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+    return (int16_t)v;
+}
+
+static int32_t lgfx_band_visible_target_distance2(
+    int32_t wx,
+    int32_t wy,
+    int32_t ow,
+    int32_t oh,
+    int32_t player_x,
+    int32_t player_y,
+    int32_t player_w,
+    int32_t player_h,
+    int32_t camera_x,
+    int32_t band_top,
+    int32_t view_w,
+    int32_t view_h
+) {
+    int32_t sx0 = wx - camera_x;
+    int32_t sy0 = wy - band_top;
+    int32_t sx1 = sx0 + ow;
+    int32_t sy1 = sy0 + oh;
+    int32_t cx0 = sx0 < 0 ? 0 : sx0;
+    int32_t cy0 = sy0 < 0 ? 0 : sy0;
+    int32_t cx1 = sx1 > view_w ? view_w : sx1;
+    int32_t cy1 = sy1 > view_h ? view_h : sy1;
+    if (cx1 <= cx0 || cy1 <= cy0) {
+        return -1;
+    }
+    int32_t visible_w = cx1 - cx0;
+    int32_t visible_h = cy1 - cy0;
+    int32_t visible_area = visible_w * visible_h;
+    if (visible_w < 10 || visible_h < 10 || visible_area < 128) {
+        return -1;
+    }
+    int32_t px = (player_x - camera_x) + (player_w / 2);
+    int32_t py = (player_y - band_top) + (player_h / 2);
+    int32_t ox = (cx0 + cx1) / 2;
+    int32_t oy = (cy0 + cy1) / 2;
+    int32_t dx = ox - px;
+    int32_t dy = oy - py;
+    return (dx * dx) + (dy * dy);
+}
+
+static mp_obj_t lgfx_pick_swappable_monk_orb_native(size_t n_args, const mp_obj_t *args) {
+    if (n_args != 17) {
+        mp_raise_ValueError(MP_ERROR_TEXT("need 17 args"));
+    }
+    mp_buffer_info_t enemy_rows_info;
+    mp_buffer_info_t monk_orbs_info;
+    mp_get_buffer_raise(args[0], &enemy_rows_info, MP_BUFFER_READ);
+    mp_int_t enemy_row_stride = mp_obj_get_int(args[1]);
+    mp_int_t enemy_count = mp_obj_get_int(args[2]);
+    mp_get_buffer_raise(args[3], &monk_orbs_info, MP_BUFFER_READ);
+    mp_int_t orb_stride = mp_obj_get_int(args[4]);
+    mp_int_t orb_count = mp_obj_get_int(args[5]);
+    mp_int_t player_x = mp_obj_get_int(args[6]);
+    mp_int_t player_y = mp_obj_get_int(args[7]);
+    mp_int_t player_w = mp_obj_get_int(args[8]);
+    mp_int_t player_h = mp_obj_get_int(args[9]);
+    bool pick_far = mp_obj_is_true(args[10]);
+    mp_int_t camera_x = mp_obj_get_int(args[11]);
+    mp_int_t band_top = mp_obj_get_int(args[12]);
+    mp_int_t view_w = mp_obj_get_int(args[13]);
+    mp_int_t view_h = mp_obj_get_int(args[14]);
+    mp_int_t prefer_enemy_i = mp_obj_get_int(args[15]);
+    mp_int_t current_best_d2 = mp_obj_get_int(args[16]);
+    if (enemy_row_stride < 12 || orb_stride < 16 || enemy_count < 0 || orb_count < 0) {
+        mp_raise_ValueError(MP_ERROR_TEXT("invalid monk orb pick dims"));
+    }
+    if (enemy_rows_info.len < (size_t)enemy_count * (size_t)enemy_row_stride) {
+        mp_raise_ValueError(MP_ERROR_TEXT("enemy rows buf too small"));
+    }
+    if (monk_orbs_info.len < (size_t)orb_count * (size_t)orb_stride) {
+        mp_raise_ValueError(MP_ERROR_TEXT("monk orb buf too small"));
+    }
+    const uint8_t *enemy_rows = (const uint8_t *)enemy_rows_info.buf;
+    const uint8_t *orbs = (const uint8_t *)monk_orbs_info.buf;
+    int32_t best_enemy_i = -1;
+    int32_t best_slot_i = -1;
+    int32_t best_d2 = current_best_d2;
+    int32_t enemy_limit = enemy_count;
+    int32_t orb_enemy_limit = orb_count / 5;
+    if (enemy_limit > orb_enemy_limit) {
+        enemy_limit = orb_enemy_limit;
+    }
+    for (int32_t ei = 0; ei < enemy_limit; ++ei) {
+        const uint8_t *row = enemy_rows + ((size_t)ei * (size_t)enemy_row_stride);
+        if (!row[8] || !row[9]) {
+            continue;
+        }
+        for (int32_t si = 0; si < 5; ++si) {
+            int32_t oi = (ei * 5) + si;
+            if (oi < 0 || oi >= orb_count) {
+                continue;
+            }
+            const uint8_t *orb = orbs + ((size_t)oi * (size_t)orb_stride);
+            uint8_t mode = orb[0];
+            if (mode == 0xFFu || mode == 3u || mode == 4u) {
+                continue;
+            }
+            int32_t orb_x = lgfx_band_rd_i16(orb + 10);
+            int32_t orb_y = lgfx_band_rd_i16(orb + 12);
+            int32_t d2 = lgfx_band_visible_target_distance2(orb_x, orb_y, kMonkOrbW, kMonkOrbH, player_x, player_y, player_w, player_h, camera_x, band_top, view_w, view_h);
+            if (d2 < 0) {
+                continue;
+            }
+            bool prefer_over_enemy = (prefer_enemy_i >= 0 && ei == prefer_enemy_i);
+            if (best_enemy_i < 0 || prefer_over_enemy || best_d2 < 0 || (pick_far && d2 > best_d2) || (!pick_far && d2 < best_d2)) {
+                best_enemy_i = ei;
+                best_slot_i = si;
+                best_d2 = d2;
+            }
+        }
+    }
+    mp_obj_t out[3] = {
+        mp_obj_new_int(best_enemy_i),
+        mp_obj_new_int(best_slot_i),
+        mp_obj_new_int(best_d2),
+    };
+    return mp_obj_new_tuple(3, out);
+}
+MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lgfx_pick_swappable_monk_orb_native_obj, 17, 17, lgfx_pick_swappable_monk_orb_native);
+
 } // extern "C"
 
 #endif // !defined(NO_QSTR)

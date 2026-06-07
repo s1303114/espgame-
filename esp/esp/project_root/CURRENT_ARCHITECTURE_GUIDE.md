@@ -1,12 +1,12 @@
 # 目前專案架構（主線）
 
-本文件整理目前板上實際主線。核心原則：internal flash 只做 launcher；遊戲程式與資產全部從 `/sd/game` 載入；每幀狀態由 Python 更新，重型畫面合成、enemy update 與 TFT submit 交給 C++ native API。
+本文件整理目前板上實際主線。核心原則：internal flash 只做 launcher；遊戲程式與資產全部從 `/sd/game` 載入；一般高層遊戲狀態仍由 Python 編排，重型畫面合成、live enemy update 與 TFT submit 交給 C++ native API。monk 目前已不是單一 live enemy，而是 `inactive -> intro_drop -> live` 的 encounter actor。
 
 ## 1. 啟動路徑
 
 - internal flash：`/boot.py`、`/main.py`
 - `main.py` 是 SD-only launcher
-- 唯一正式 SD wiring：`slot=2, width=1, sck=39, miso=40, mosi=38, cs=47, freq=1000000`
+- 唯一正式 SD wiring：`slot=2, width=1, sck=5, mosi=6, miso=7, cs=4, freq=1000000`
 - launcher 會先驗證 `/sd/game/app.py`、`/sd/game/config.py`、`/sd/game/app_camera_test.py` 存在
 - 主入口：`main.py` 先 `exec /sd/game/config.py`，再 `exec /sd/game/app_camera_test.py`
 - `/sd/game/app.py` 只作為 wrapper / 存在性檢查備用，不是正式主執行檔
@@ -46,6 +46,9 @@ Python (`app_camera_test.py`) 負責：
 - B/Y swap
 - camera tracking
 - respawn / checkpoint
+- monk encounter lifecycle
+- monk intro actor update
+- monk intro / live handoff
 - object / overlay / enemy render descriptor 打包
 - 主迴圈 profile 與 fallback 控制
 
@@ -70,6 +73,13 @@ C++ (`lgfx` user module) 負責：
 - bullet overlay compose
 - wire-order DMA submit
 - DMA 前 cache sync
+
+目前 monk 的責任分層是：
+
+- Python：encounter lifecycle、intro drop、intro/live handoff、swap apply、scripted/fallback shadow state
+- C++：live monk hover / waypoint movement、live enemy native update
+- C++：live orb state update、live orb descriptor packing、monk orb swap target picking
+- C++ renderer：intro/live descriptor 最終合成與 submit
 
 ## 4. 渲染主線
 
@@ -106,6 +116,19 @@ enemy update 已搬到 C++：
 - bullet spawn / move / cull / hit
 - 原地更新 enemy / bullet buffer
 
+但要注意：這裡的 `enemy update` 目前主要是指 live enemy set。monk 已拆成兩段：
+
+- `intro_drop` 前：不在 live enemy set
+- `intro_drop` 中：由 Python encounter actor 更新 body/orb 狀態
+- `live` 後：append 到 live enemy rows，再交給 native `static enemy` hover / waypoint 分支
+
+目前已板上驗證：
+
+- 開機時 `ENEMY_COUNT=2`
+- `camera_x >= 1600` 後出現 `MONK_ENCOUNTER_STATE=intro_drop`
+- intro 完成後才出現 `MONK_LIVE_INSTANTIATED`
+- 之後可看到 `MONK_HOVER_DBG ...`，代表 live 後已交由 native hover update 接手
+
 啟動 log：
 
 - `ENEMY_UPDATE_IMPL=C_API`
@@ -119,12 +142,41 @@ enemy update 已搬到 C++：
 - `enemy_states`
 - `enemy_bullets`
 - `object_solids_c_buf`
+- `monk_orb_c_buf`
+
+另外目前 monk 還有兩組關鍵狀態：
+
+- `monk_encounters`
+- `monk_hover_c_buf`
 
 其中：
 
 - `enemy_rows_c_buf` 不再每幀重 pack，只在初始化、swap、respawn、Python fallback 後同步
 - `object_solids_c_buf` 不再每幀重 pack，只在初始化、object gravity 變動、swap、respawn 後同步
 - `enemy_bullets` 先 `ensure_capacity(enemy_max_bullets)`，讓 native update 直接重用 pool
+- `monk_hover_c_buf` 在 monk 進入 live 時會擴充一筆新 row，並同步更新 `monk_hover_c_count`
+- `monk_orb_c_buf` 在 monk 進入 live 時會擴充，live orb 的 authoritative state 目前在這個 buffer
+- `enemy_rows_c_buf` 在 monk `intro -> live` handoff 時也會擴充並同步 `enemy_rows_c_count`
+
+這兩個 count 同步目前已是必要條件，否則會出現 monk 看起來 instantiate 成功，但 native update 根本沒開始處理新 row 的停住問題。
+
+目前 monk encounter 本身則仍主要保存在 Python objects 內，而不是 native packed buffer：
+
+- `state`
+- `intro_state`
+- `body_x/body_y`
+- `body_target_x/body_target_y`
+- `anim_counter`
+- `orbs`
+- `orb_states`
+
+live orb state 則已 native 化：
+
+- `lgfx.update_monk_orbs_native(...)` 更新 `mode/current_x/current_y/return_radius`
+- `lgfx.pack_monk_orb_descriptors_native(...)` 產生 `_SPECIAL_KIND_MONK_ORB` render descriptor
+- `lgfx.pick_swappable_monk_orb_native(...)` 負責 near/far monk orb target picking
+- Python `_swap_with_monk_orb(...)` 仍負責真正 swap apply，並直接寫回 `monk_orb_c_buf`
+- 一般 live path 不再每幀把 C buffer sync 回 Python dict；dict 只保留 fallback / scripted / debug shadow 用途
 
 ## 7. 主要資產
 
@@ -149,7 +201,15 @@ enemy update 已搬到 C++：
 - `OBJECT_COUNT=10`
 - `ENEMY_MODE_ON`
 - `ENEMY_UPDATE_IMPL=C_API`
+- `MONK_ORB_UPDATE_IMPL=C_API`
+- `MONK_ORB_DESC_IMPL=C_API`
 - `BAND_PIPELINE_SUBMIT_OK`
+- `MONK_ENCOUNTER_STATE=intro_drop`
+- `MONK_INTRO_START ...`
+- `MONK_INTRO_DONE ...`
+- `MONK_LIVE_INSTANTIATED ...`
+- `MONK_ENCOUNTER_STATE=live`
+- `MONK_HOVER_DBG ...`
 - `PROFILE update_us=...`
 - `PROFILE submit_us=...`
 - `PROFILE submit_wait_us=...`
@@ -163,18 +223,28 @@ enemy update 已搬到 C++：
 
 ```text
 internal flash boot.py/main.py
- -> mount /sd with slot=2 width=1 sck=39 miso=40 mosi=38 cs=47
+ -> mount /sd with slot=2 width=1 sck=5 mosi=6 miso=7 cs=4
  -> exec /sd/game/config.py
  -> exec /sd/game/app_camera_test.py
  -> Python game state update
- -> native enemy update
+ -> Python monk encounter / intro update
+ -> native live enemy update
  -> native 6-band renderer
  -> wire-order DMA submit
 ```
 
-enemy logic 這條線已壓到次要瓶頸；目前真正大頭仍是 `submit_us`，下一步最佳化應優先集中在 band render / submit 路徑。
+目前 bottleneck 不能再簡化成「只有 submit_us」。monk/orb live 熱路徑已搬到 C++ 後，最近板上 profile 顯示：
+
+- native orb steady-state sample：`update_avg=6509.7us`、`fps_avg=25.76`
+- swap/debug burst sample：`swap_events=31`、`update_avg=8939.7us`、`update_max=12926us`、`fps_avg=23.68`
+
+也就是說，目前 steady-state 已經改善；剩下最顯眼的 update 高點主要來自 swap/debug burst，尤其 `SWAP_*` print 與 Python debug metrics，而不是 live orb update 本身退步。
+
+另外目前 `CAMERA_RUNTIME_VERBOSE = True`，而板上高頻 `MONK_INTRO_DBG`、`MONK_HOVER_DBG`、`SWAP_TARGET_DBG` 也會額外拉低低谷 FPS，所以 profile 仍混有 debug 成本。
 
 ## 10. 本次重新部署與驗證
+
+本文件以下部署紀錄主要反映先前主線整理與 band pipeline 驗證；目前 monk encounter 狀態已比這段紀錄更新。若要理解 monk 現況，應優先以 [MONK_ORB_ARCHITECTURE.md](/workspace/esp/esp/project_root/MONK_ORB_ARCHITECTURE.md) 的 lifecycle 與 handoff 描述為準。
 
 本次已重新部署：
 

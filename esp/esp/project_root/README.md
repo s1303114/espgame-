@@ -13,10 +13,11 @@
 ## 目前重點
 
 - 啟動路徑：`SD-only launcher`
-- 唯一 SD wiring：`slot=2, width=1, sck=39, miso=40, mosi=38, cs=47, freq=1000000`
+- 唯一 SD wiring：`slot=2, width=1, sck=5, mosi=6, miso=7, cs=4, freq=1000000`
 - 渲染主線：`NATIVE_BAND_PIPELINE`
 - band 高度：`48`
 - enemy update：`C_API`
+- live monk orb update / descriptor / swap target picking：`C_API`
 - 資產格式：wire-order RGB565
 - DMA 前會做 cache sync
 
@@ -50,6 +51,8 @@
 - `LAUNCHER_APP_FILE=/sd/game/app_camera_test.py`
 - `OBJECT_COUNT=10`
 - `ENEMY_UPDATE_IMPL=C_API`
+- `MONK_ORB_UPDATE_IMPL=C_API`
+- `MONK_ORB_DESC_IMPL=C_API`
 - `SUBMIT_MODE=NATIVE_BAND_PIPELINE`
 - `BAND_PIPELINE_NATIVE_ON h=48`
 - `CAMERA_TEST_STEP=4_DRAW_OK`

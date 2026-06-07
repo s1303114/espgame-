@@ -27,7 +27,7 @@
 - `main.py` 先驗證 `/sd/game/app.py`、`/sd/game/config.py`、`/sd/game/app_camera_test.py` 存在
 - `main.py` 先 `exec /sd/game/config.py`，再 `exec /sd/game/app_camera_test.py`
 - `/sd/game/app.py` 目前只保留為 wrapper / 存在性檢查備用
-- 正式唯一 SD 掛載 wiring：`slot=2, width=1, sck=39, miso=40, mosi=38, cs=47, freq=1000000`
+- 正式唯一 SD 掛載 wiring：`slot=2, width=1, sck=5, mosi=6, miso=7, cs=4, freq=1000000`
 
 ## 2. 互動與世界邏輯
 

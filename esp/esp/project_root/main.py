@@ -20,11 +20,7 @@ def _safe_mode(reason):
 
 
 def _trace(msg):
-    try:
-        with open("/launcher_trace.txt", "a") as f:
-            f.write(str(msg) + "\n")
-    except Exception:
-        pass
+    pass
 
 
 def _mount_sd():
@@ -47,21 +43,16 @@ def _mount_sd():
         sd = machine.SDCard(
             slot=2,
             width=1,
-            sck=39,
-            miso=40,
-            mosi=38,
-            cs=47,
+            sck=5,
+            mosi=6,
+            miso=7,
+            cs=4,
             freq=1000000,
         )
         os.mount(sd, "/sd")
-        return True, "mounted with slot=2 width=1 sck=39 miso=40 mosi=38 cs=47"
+        return True, "mounted with slot=2 width=1 sck=5 mosi=6 miso=7 cs=4"
     except Exception as exc_slot2:
-        try:
-            os.stat("/sd/game/config.py")
-            os.stat("/sd/game/app_camera_test.py")
-            return True, "reusing existing /sd mount after slot2=%r" % (exc_slot2,)
-        except Exception:
-            return False, "slot2=%r" % (exc_slot2,)
+        return False, "slot2=%r" % (exc_slot2,)
 
 
 def _reset_game_imports():

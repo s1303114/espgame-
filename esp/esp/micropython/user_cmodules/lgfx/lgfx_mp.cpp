@@ -672,6 +672,487 @@ static inline int32_t lgfx_clamp_i32(int32_t v, int32_t lo, int32_t hi) {
     return v;
 }
 
+static inline uint16_t lgfx_rd_u16(const uint8_t *p) {
+    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+}
+
+static inline void lgfx_wr_u16(uint8_t *p, uint32_t v) {
+    uint16_t uv = (uint16_t)(v & 0xFFFFu);
+    p[0] = (uint8_t)(uv & 0xFFu);
+    p[1] = (uint8_t)((uv >> 8) & 0xFFu);
+}
+
+static inline int32_t lgfx_move_toward_i32(int32_t curr_v, int32_t target_v, int32_t speed_px) {
+    int32_t step = speed_px < 1 ? 1 : speed_px;
+    int32_t delta = target_v - curr_v;
+    if (delta > 0) {
+        curr_v += delta < step ? delta : step;
+    } else if (delta < 0) {
+        int32_t mag = -delta;
+        curr_v -= mag < step ? mag : step;
+    }
+    return curr_v;
+}
+
+static const int32_t LGFX_MONK_ORB_COUNT = 5;
+static const int32_t LGFX_MONK_ORB_RADIUS = 28;
+static const int32_t LGFX_MONK_ORB_W = 16;
+static const int32_t LGFX_MONK_ORB_H = 16;
+static const int32_t LGFX_MONK_ORB_SCALE = 1024;
+static const int32_t LGFX_MONK_ORB_TABLE_SIZE = 60;
+static const int16_t LGFX_MONK_ORB_COS[LGFX_MONK_ORB_TABLE_SIZE] = {
+    1024, 1018, 1002, 974, 935, 887, 828, 761, 685, 602,
+    512, 416, 316, 213, 107, 0, -107, -213, -316, -416,
+    -512, -602, -685, -761, -828, -887, -935, -974, -1002, -1018,
+    -1024, -1018, -1002, -974, -935, -887, -828, -761, -685, -602,
+    -512, -416, -316, -213, -107, 0, 107, 213, 316, 416,
+    512, 602, 685, 761, 828, 887, 935, 974, 1002, 1018
+};
+static const int16_t LGFX_MONK_ORB_SIN[LGFX_MONK_ORB_TABLE_SIZE] = {
+    0, 107, 213, 316, 416, 512, 602, 685, 761, 828,
+    887, 935, 974, 1002, 1018, 1024, 1018, 1002, 974, 935,
+    887, 828, 761, 685, 602, 512, 416, 316, 213, 107,
+    0, -107, -213, -316, -416, -512, -602, -685, -761, -828,
+    -887, -935, -974, -1002, -1018, -1024, -1018, -1002, -974, -935,
+    -887, -828, -761, -685, -602, -512, -416, -316, -213, -107
+};
+
+static void lgfx_monk_enemy_draw_origin(
+    int32_t wx,
+    int32_t wy,
+    int32_t ow,
+    int32_t oh,
+    int32_t monk_frame_w,
+    int32_t monk_frame_h,
+    int32_t *draw_x,
+    int32_t *draw_y
+) {
+    int32_t dx = wx;
+    int32_t dy = wy;
+    if (monk_frame_w > 0 && ow != monk_frame_w) {
+        dx = wx + ((ow - monk_frame_w) / 2);
+    }
+    if (monk_frame_h > 0 && oh != monk_frame_h) {
+        dy = wy + (oh - monk_frame_h);
+    }
+    *draw_x = dx;
+    *draw_y = dy;
+}
+
+static void lgfx_monk_orb_slot_world_pos(
+    int32_t wx,
+    int32_t wy,
+    int32_t ow,
+    int32_t oh,
+    int32_t anim_counter,
+    int32_t slot_i,
+    int32_t monk_frame_w,
+    int32_t monk_frame_h,
+    int32_t *orb_x,
+    int32_t *orb_y
+) {
+    int32_t draw_x = wx;
+    int32_t draw_y = wy;
+    lgfx_monk_enemy_draw_origin(wx, wy, ow, oh, monk_frame_w, monk_frame_h, &draw_x, &draw_y);
+    int32_t center_x = draw_x + (monk_frame_w / 2);
+    int32_t center_y = draw_y + (monk_frame_h / 2);
+    int32_t angle_idx = (anim_counter + ((slot_i * LGFX_MONK_ORB_TABLE_SIZE) / LGFX_MONK_ORB_COUNT)) % LGFX_MONK_ORB_TABLE_SIZE;
+    if (angle_idx < 0) {
+        angle_idx += LGFX_MONK_ORB_TABLE_SIZE;
+    }
+    int32_t orb_cx = center_x + ((LGFX_MONK_ORB_COS[angle_idx] * LGFX_MONK_ORB_RADIUS) / LGFX_MONK_ORB_SCALE);
+    int32_t orb_cy = center_y - ((LGFX_MONK_ORB_SIN[angle_idx] * LGFX_MONK_ORB_RADIUS) / LGFX_MONK_ORB_SCALE);
+    *orb_x = orb_cx - (LGFX_MONK_ORB_W / 2);
+    *orb_y = orb_cy - (LGFX_MONK_ORB_H / 2);
+}
+
+static int32_t lgfx_isqrt_i32(int32_t value) {
+    if (value <= 0) {
+        return 0;
+    }
+    int32_t result = 0;
+    int32_t bit = 1 << 30;
+    while (bit > value) {
+        bit >>= 2;
+    }
+    while (bit != 0) {
+        if (value >= result + bit) {
+            value -= result + bit;
+            result = (result >> 1) + bit;
+        } else {
+            result >>= 1;
+        }
+        bit >>= 2;
+    }
+    return result;
+}
+
+static void lgfx_monk_orb_pos_from_idx(int32_t center_x, int32_t center_y, int32_t radius_px, int32_t angle_idx, int32_t *orb_x, int32_t *orb_y) {
+    int32_t idx = angle_idx % LGFX_MONK_ORB_TABLE_SIZE;
+    if (idx < 0) {
+        idx += LGFX_MONK_ORB_TABLE_SIZE;
+    }
+    int32_t orb_cx = center_x + ((LGFX_MONK_ORB_COS[idx] * radius_px) / LGFX_MONK_ORB_SCALE);
+    int32_t orb_cy = center_y - ((LGFX_MONK_ORB_SIN[idx] * radius_px) / LGFX_MONK_ORB_SCALE);
+    *orb_x = orb_cx - (LGFX_MONK_ORB_W / 2);
+    *orb_y = orb_cy - (LGFX_MONK_ORB_H / 2);
+}
+
+static mp_obj_t lgfx_update_monk_orbs_native(size_t n_args, const mp_obj_t *args) {
+    if (n_args != 10) {
+        mp_raise_ValueError(MP_ERROR_TEXT("need 10 args"));
+    }
+
+    mp_buffer_info_t orb_info;
+    mp_buffer_info_t enemy_rows_info;
+    mp_buffer_info_t enemy_states_info;
+    mp_get_buffer_raise(args[0], &orb_info, MP_BUFFER_RW);
+    mp_int_t orb_stride = mp_obj_get_int(args[1]);
+    mp_int_t orb_count = mp_obj_get_int(args[2]);
+    mp_get_buffer_raise(args[3], &enemy_rows_info, MP_BUFFER_READ);
+    mp_int_t enemy_row_stride = mp_obj_get_int(args[4]);
+    mp_int_t enemy_count = mp_obj_get_int(args[5]);
+    mp_get_buffer_raise(args[6], &enemy_states_info, MP_BUFFER_READ);
+    mp_int_t enemy_state_stride = mp_obj_get_int(args[7]);
+    mp_int_t monk_frame_w = mp_obj_get_int(args[8]);
+    mp_int_t monk_frame_h = mp_obj_get_int(args[9]);
+
+    if (orb_stride < 16 || orb_count < 0 || enemy_row_stride < 12 || enemy_state_stride < 8 || enemy_count < 0) {
+        mp_raise_ValueError(MP_ERROR_TEXT("invalid monk orb dims"));
+    }
+    if (orb_info.len < (size_t)orb_stride * (size_t)orb_count) {
+        mp_raise_ValueError(MP_ERROR_TEXT("monk orb buf too small"));
+    }
+    if (enemy_rows_info.len < (size_t)enemy_row_stride * (size_t)enemy_count) {
+        mp_raise_ValueError(MP_ERROR_TEXT("enemy rows buf too small"));
+    }
+    if (enemy_states_info.len < (size_t)enemy_state_stride * (size_t)enemy_count) {
+        mp_raise_ValueError(MP_ERROR_TEXT("enemy states buf too small"));
+    }
+    if (monk_frame_w < 1) {
+        monk_frame_w = 32;
+    }
+    if (monk_frame_h < 1) {
+        monk_frame_h = 48;
+    }
+
+    uint8_t *orb_buf = (uint8_t *)orb_info.buf;
+    const uint8_t *enemy_rows = (const uint8_t *)enemy_rows_info.buf;
+    const uint8_t *enemy_states = (const uint8_t *)enemy_states_info.buf;
+    int32_t updated = 0;
+    for (int32_t oi = 0; oi < orb_count; ++oi) {
+        uint8_t *orb = orb_buf + ((size_t)oi * (size_t)orb_stride);
+        uint8_t mode = orb[0];
+        if (mode == 0xFFu || mode == 3u || mode == 4u) {
+            continue;
+        }
+        int32_t enemy_i = oi / LGFX_MONK_ORB_COUNT;
+        int32_t slot_i = (int32_t)orb[1];
+        if (slot_i < 0 || slot_i >= LGFX_MONK_ORB_COUNT) {
+            slot_i = oi % LGFX_MONK_ORB_COUNT;
+            orb[1] = (uint8_t)slot_i;
+        }
+        if (enemy_i < 0 || enemy_i >= enemy_count) {
+            continue;
+        }
+        const uint8_t *row = enemy_rows + ((size_t)enemy_i * (size_t)enemy_row_stride);
+        const uint8_t *state = enemy_states + ((size_t)enemy_i * (size_t)enemy_state_stride);
+        if (!row[8]) {
+            continue;
+        }
+        int32_t wx = lgfx_rd_i16(row + 0);
+        int32_t wy = lgfx_rd_i16(row + 2);
+        int32_t ow = lgfx_rd_i16(row + 4);
+        int32_t oh = lgfx_rd_i16(row + 6);
+        int32_t anim_counter = lgfx_rd_i16(state + 2);
+        int32_t draw_x = wx;
+        int32_t draw_y = wy;
+        lgfx_monk_enemy_draw_origin(wx, wy, ow, oh, monk_frame_w, monk_frame_h, &draw_x, &draw_y);
+        int32_t center_x = draw_x + (monk_frame_w / 2);
+        int32_t center_y = draw_y + (monk_frame_h / 2);
+        int32_t angle_idx = (anim_counter + ((slot_i * LGFX_MONK_ORB_TABLE_SIZE) / LGFX_MONK_ORB_COUNT)) % LGFX_MONK_ORB_TABLE_SIZE;
+        if (angle_idx < 0) {
+            angle_idx += LGFX_MONK_ORB_TABLE_SIZE;
+        }
+        int32_t out_x = 0;
+        int32_t out_y = 0;
+        if (mode == 0u) {
+            lgfx_monk_orb_pos_from_idx(center_x, center_y, LGFX_MONK_ORB_RADIUS, angle_idx, &out_x, &out_y);
+            lgfx_wr_i16(orb + 8, LGFX_MONK_ORB_RADIUS);
+        } else if (mode == 1u) {
+            int32_t detached_x = lgfx_rd_i16(orb + 4);
+            int32_t detached_y = lgfx_rd_i16(orb + 6);
+            int32_t rel_x = (detached_x + (LGFX_MONK_ORB_W / 2)) - center_x;
+            int32_t rel_y = center_y - (detached_y + (LGFX_MONK_ORB_H / 2));
+            int32_t radius_px = lgfx_isqrt_i32((rel_x * rel_x) + (rel_y * rel_y));
+            int32_t capture_eps = 6;
+            if (radius_px > LGFX_MONK_ORB_RADIUS) {
+                capture_eps += (radius_px - LGFX_MONK_ORB_RADIUS) / 12;
+            }
+            if (capture_eps > 24) {
+                capture_eps = 24;
+            }
+            int32_t along_scaled = (rel_x * LGFX_MONK_ORB_COS[angle_idx]) + (rel_y * LGFX_MONK_ORB_SIN[angle_idx]);
+            int32_t perp_scaled = (rel_x * LGFX_MONK_ORB_SIN[angle_idx]) - (rel_y * LGFX_MONK_ORB_COS[angle_idx]);
+            if (perp_scaled < 0) {
+                perp_scaled = -perp_scaled;
+            }
+            if (along_scaled > 0 && perp_scaled <= (capture_eps * LGFX_MONK_ORB_SCALE)) {
+                mode = 2u;
+                orb[0] = mode;
+                orb[2] = 4u;
+                lgfx_wr_i16(orb + 8, radius_px);
+                lgfx_monk_orb_pos_from_idx(center_x, center_y, radius_px, angle_idx, &out_x, &out_y);
+            } else {
+                out_x = detached_x;
+                out_y = detached_y;
+            }
+        } else if (mode == 2u) {
+            uint8_t capture_lock = orb[2];
+            if (capture_lock > 0) {
+                orb[2] = (uint8_t)(capture_lock - 1u);
+            }
+            int32_t radius_px = lgfx_rd_i16(orb + 8);
+            if (radius_px <= 0) {
+                radius_px = LGFX_MONK_ORB_RADIUS;
+            }
+            if (radius_px <= (LGFX_MONK_ORB_RADIUS + 1)) {
+                radius_px = LGFX_MONK_ORB_RADIUS;
+                orb[0] = 0u;
+            } else {
+                int32_t shrink = (radius_px - LGFX_MONK_ORB_RADIUS) / 20;
+                if (shrink < 1) {
+                    shrink = 1;
+                }
+                radius_px -= shrink;
+                if (radius_px <= (LGFX_MONK_ORB_RADIUS + 1)) {
+                    radius_px = LGFX_MONK_ORB_RADIUS;
+                    orb[0] = 0u;
+                }
+            }
+            lgfx_wr_i16(orb + 8, radius_px);
+            lgfx_monk_orb_pos_from_idx(center_x, center_y, radius_px, angle_idx, &out_x, &out_y);
+        } else {
+            continue;
+        }
+        lgfx_wr_i16(orb + 10, out_x);
+        lgfx_wr_i16(orb + 12, out_y);
+        orb[3] = 1u;
+        updated += 1;
+    }
+    return mp_obj_new_int(updated);
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lgfx_update_monk_orbs_native_obj, 10, 10, lgfx_update_monk_orbs_native);
+
+static bool lgfx_aabb_near_view_early(
+    int32_t wx,
+    int32_t wy,
+    int32_t w,
+    int32_t h,
+    int32_t camera_x,
+    int32_t view_w,
+    int32_t view_h,
+    int32_t margin_x,
+    int32_t margin_y
+) {
+    if (w <= 0 || h <= 0 || view_w <= 0 || view_h <= 0) {
+        return false;
+    }
+    int32_t left = wx;
+    int32_t top = wy;
+    int32_t right = left + w;
+    int32_t bottom = top + h;
+    int32_t view_left = camera_x - margin_x;
+    int32_t view_top = -margin_y;
+    int32_t view_right = camera_x + view_w + margin_x;
+    int32_t view_bottom = view_h + margin_y;
+    return left < view_right && right > view_left && top < view_bottom && bottom > view_top;
+}
+
+static mp_obj_t lgfx_pack_monk_orb_descriptors_native(size_t n_args, const mp_obj_t *args) {
+    if (n_args != 14) {
+        mp_raise_ValueError(MP_ERROR_TEXT("need 14 args"));
+    }
+
+    mp_buffer_info_t out_info;
+    mp_buffer_info_t enemy_rows_info;
+    mp_buffer_info_t monk_orbs_info;
+    mp_get_buffer_raise(args[0], &out_info, MP_BUFFER_RW);
+    mp_int_t out_stride = mp_obj_get_int(args[1]);
+    mp_get_buffer_raise(args[2], &enemy_rows_info, MP_BUFFER_READ);
+    mp_int_t enemy_row_stride = mp_obj_get_int(args[3]);
+    mp_int_t enemy_count = mp_obj_get_int(args[4]);
+    mp_get_buffer_raise(args[5], &monk_orbs_info, MP_BUFFER_READ);
+    mp_int_t orb_stride = mp_obj_get_int(args[6]);
+    mp_int_t orb_count = mp_obj_get_int(args[7]);
+    mp_int_t camera_x = mp_obj_get_int(args[8]);
+    mp_int_t view_w = mp_obj_get_int(args[9]);
+    mp_int_t view_h = mp_obj_get_int(args[10]);
+    mp_int_t monk_frame_w = mp_obj_get_int(args[11]);
+    mp_int_t monk_frame_h = mp_obj_get_int(args[12]);
+    mp_int_t max_out_count = mp_obj_get_int(args[13]);
+
+    if (out_stride < 8 || enemy_row_stride < 12 || orb_stride < 16 || enemy_count < 0 || orb_count < 0 || max_out_count < 0) {
+        mp_raise_ValueError(MP_ERROR_TEXT("invalid monk orb desc dims"));
+    }
+    if (enemy_rows_info.len < (size_t)enemy_count * (size_t)enemy_row_stride) {
+        mp_raise_ValueError(MP_ERROR_TEXT("enemy rows buf too small"));
+    }
+    if (monk_orbs_info.len < (size_t)orb_count * (size_t)orb_stride) {
+        mp_raise_ValueError(MP_ERROR_TEXT("monk orb buf too small"));
+    }
+    if (out_info.len < (size_t)max_out_count * (size_t)out_stride) {
+        mp_raise_ValueError(MP_ERROR_TEXT("monk orb desc out too small"));
+    }
+    if (view_w <= 0 || view_h <= 0) {
+        return MP_OBJ_NEW_SMALL_INT(0);
+    }
+    if (monk_frame_w < 1) {
+        monk_frame_w = 32;
+    }
+    if (monk_frame_h < 1) {
+        monk_frame_h = 48;
+    }
+
+    uint8_t *out = (uint8_t *)out_info.buf;
+    const uint8_t *enemy_rows = (const uint8_t *)enemy_rows_info.buf;
+    const uint8_t *orbs = (const uint8_t *)monk_orbs_info.buf;
+    int32_t count = 0;
+    int32_t per_enemy_orbs = LGFX_MONK_ORB_COUNT;
+    int32_t enemy_limit = enemy_count;
+    int32_t orb_enemy_limit = orb_count / per_enemy_orbs;
+    if (enemy_limit > orb_enemy_limit) {
+        enemy_limit = orb_enemy_limit;
+    }
+
+    for (int32_t ei = 0; ei < enemy_limit && count < max_out_count; ++ei) {
+        const uint8_t *row = enemy_rows + ((size_t)ei * (size_t)enemy_row_stride);
+        if (!row[8]) {
+            continue;
+        }
+        int32_t wx = lgfx_rd_i16(row + 0);
+        int32_t wy = lgfx_rd_i16(row + 2);
+        int32_t ow = lgfx_rd_i16(row + 4);
+        int32_t oh = lgfx_rd_i16(row + 6);
+        int32_t draw_x = wx;
+        int32_t draw_y = wy;
+        lgfx_monk_enemy_draw_origin(wx, wy, ow, oh, monk_frame_w, monk_frame_h, &draw_x, &draw_y);
+        int32_t orb_extent = LGFX_MONK_ORB_RADIUS + (LGFX_MONK_ORB_W / 2);
+        if (!lgfx_aabb_near_view_early(draw_x - orb_extent, draw_y - orb_extent, monk_frame_w + (orb_extent * 2), monk_frame_h + (orb_extent * 2), camera_x, view_w, view_h, 48, 32)) {
+            continue;
+        }
+        for (int32_t si = 0; si < per_enemy_orbs && count < max_out_count; ++si) {
+            int32_t oi = (ei * per_enemy_orbs) + si;
+            if (oi < 0 || oi >= orb_count) {
+                continue;
+            }
+            const uint8_t *orb = orbs + ((size_t)oi * (size_t)orb_stride);
+            uint8_t mode = orb[0];
+            if (mode == 0xFFu || mode == 3u || mode == 4u) {
+                continue;
+            }
+            int32_t orb_x = lgfx_rd_i16(orb + 10);
+            int32_t orb_y = lgfx_rd_i16(orb + 12);
+            if (!lgfx_aabb_near_view_early(orb_x, orb_y, LGFX_MONK_ORB_W, LGFX_MONK_ORB_H, camera_x, view_w, view_h, 48, 32)) {
+                continue;
+            }
+            uint8_t *dst = out + ((size_t)count * (size_t)out_stride);
+            lgfx_wr_i16(dst + 0, orb_x);
+            lgfx_wr_i16(dst + 2, orb_y);
+            dst[4] = 2u;
+            dst[5] = (uint8_t)(si & 0xFF);
+            dst[6] = 0u;
+            dst[7] = 0u;
+            count += 1;
+        }
+    }
+    return mp_obj_new_int(count);
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lgfx_pack_monk_orb_descriptors_native_obj, 14, 14, lgfx_pack_monk_orb_descriptors_native);
+
+static mp_obj_t lgfx_update_monk_intro_native(size_t n_args, const mp_obj_t *args) {
+    if (n_args != 7) {
+        mp_raise_ValueError(MP_ERROR_TEXT("need 7 args"));
+    }
+
+    mp_buffer_info_t intro_info;
+    mp_get_buffer_raise(args[0], &intro_info, MP_BUFFER_RW);
+    mp_int_t stride = mp_obj_get_int(args[1]);
+    mp_int_t count = mp_obj_get_int(args[2]);
+    mp_int_t drop_speed = mp_obj_get_int(args[3]);
+    mp_int_t monk_frame_w = mp_obj_get_int(args[4]);
+    mp_int_t monk_frame_h = mp_obj_get_int(args[5]);
+    mp_int_t orb_count = mp_obj_get_int(args[6]);
+
+    if (stride < 64 || count < 0 || orb_count < 0 || orb_count > LGFX_MONK_ORB_COUNT) {
+        mp_raise_ValueError(MP_ERROR_TEXT("invalid monk intro dims"));
+    }
+    if (intro_info.len < (size_t)stride * (size_t)count) {
+        mp_raise_ValueError(MP_ERROR_TEXT("monk intro buf too small"));
+    }
+    if (drop_speed < 1) {
+        drop_speed = 1;
+    }
+    if (monk_frame_w < 1) {
+        monk_frame_w = 32;
+    }
+    if (monk_frame_h < 1) {
+        monk_frame_h = 48;
+    }
+
+    uint8_t *buf = (uint8_t *)intro_info.buf;
+    int32_t changed = 0;
+    for (int32_t i = 0; i < count; ++i) {
+        uint8_t *row = buf + ((size_t)i * (size_t)stride);
+        uint8_t state = row[0];
+        if (state != 1u) {
+            continue;
+        }
+        int32_t body_x = lgfx_rd_i16(row + 4);
+        int32_t body_y = lgfx_rd_i16(row + 6);
+        int32_t body_w = lgfx_rd_i16(row + 8);
+        int32_t body_h = lgfx_rd_i16(row + 10);
+        int32_t target_x = lgfx_rd_i16(row + 12);
+        int32_t target_y = lgfx_rd_i16(row + 14);
+        int32_t target_bottom_y = lgfx_rd_i16(row + 16);
+        int32_t anim_counter = (int32_t)lgfx_rd_u16(row + 18);
+        if (body_w <= 0) {
+            body_w = 48;
+        }
+        if (body_h <= 0) {
+            body_h = 64;
+        }
+        int32_t body_bottom_y = body_y + body_h;
+        body_bottom_y = lgfx_move_toward_i32(body_bottom_y, target_bottom_y, drop_speed);
+        body_y = body_bottom_y - body_h;
+        body_x = target_x;
+        anim_counter += 1;
+        if (anim_counter > 30000) {
+            anim_counter = 0;
+        }
+        lgfx_wr_i16(row + 4, body_x);
+        lgfx_wr_i16(row + 6, body_y);
+        lgfx_wr_u16(row + 18, (uint32_t)anim_counter);
+
+        for (int32_t slot_i = 0; slot_i < orb_count; ++slot_i) {
+            int32_t orb_x = 0;
+            int32_t orb_y = 0;
+            lgfx_monk_orb_slot_world_pos(body_x, body_y, body_w, body_h, anim_counter, slot_i, monk_frame_w, monk_frame_h, &orb_x, &orb_y);
+            size_t orb_base = 20u + ((size_t)slot_i * 4u);
+            if (orb_base + 4u <= (size_t)stride) {
+                lgfx_wr_i16(row + orb_base + 0, orb_x);
+                lgfx_wr_i16(row + orb_base + 2, orb_y);
+            }
+        }
+        if (body_y == target_y) {
+            row[0] = 2u;
+        }
+        changed += 1;
+    }
+    return mp_obj_new_int(changed);
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lgfx_update_monk_intro_native_obj, 7, 7, lgfx_update_monk_intro_native);
+
 static bool lgfx_aabb_near_view(
     int32_t wx,
     int32_t wy,
@@ -1988,6 +2469,10 @@ static const mp_rom_map_elem_t lgfx_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_band_pipeline_tail_wait), MP_ROM_PTR(&lgfx_band_pipeline_tail_wait_obj) },
     { MP_ROM_QSTR(MP_QSTR_render_scene_bands_rgb565), MP_ROM_PTR(&lgfx_render_scene_bands_rgb565_obj) },
     { MP_ROM_QSTR(MP_QSTR_update_enemies_native), MP_ROM_PTR(&lgfx_update_enemies_native_obj) },
+    { MP_ROM_QSTR(MP_QSTR_update_monk_intro_native), MP_ROM_PTR(&lgfx_update_monk_intro_native_obj) },
+    { MP_ROM_QSTR(MP_QSTR_update_monk_orbs_native), MP_ROM_PTR(&lgfx_update_monk_orbs_native_obj) },
+    { MP_ROM_QSTR(MP_QSTR_pack_monk_orb_descriptors_native), MP_ROM_PTR(&lgfx_pack_monk_orb_descriptors_native_obj) },
+    { MP_ROM_QSTR(MP_QSTR_pick_swappable_monk_orb_native), MP_ROM_PTR(&lgfx_pick_swappable_monk_orb_native_obj) },
     { MP_ROM_QSTR(MP_QSTR_compose_tilemap_rgb565), MP_ROM_PTR(&lgfx_compose_tilemap_rgb565_obj) },
     { MP_ROM_QSTR(MP_QSTR_compose_colorkey_rgb565), MP_ROM_PTR(&lgfx_compose_colorkey_rgb565_obj) },
     { MP_ROM_QSTR(MP_QSTR_compose_objects_atlas_rgb565), MP_ROM_PTR(&lgfx_compose_objects_atlas_rgb565_obj) },
@@ -2032,6 +2517,10 @@ static const mp_rom_map_elem_t lgfx_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_band_pipeline_tail_wait), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_render_scene_bands_rgb565), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_update_enemies_native), MP_ROM_INT(0) },
+    { MP_ROM_QSTR(MP_QSTR_update_monk_intro_native), MP_ROM_INT(0) },
+    { MP_ROM_QSTR(MP_QSTR_update_monk_orbs_native), MP_ROM_INT(0) },
+    { MP_ROM_QSTR(MP_QSTR_pack_monk_orb_descriptors_native), MP_ROM_INT(0) },
+    { MP_ROM_QSTR(MP_QSTR_pick_swappable_monk_orb_native), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_compose_tilemap_rgb565), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_compose_colorkey_rgb565), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_compose_objects_atlas_rgb565), MP_ROM_INT(0) },

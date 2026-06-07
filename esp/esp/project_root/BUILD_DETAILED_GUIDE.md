@@ -152,7 +152,7 @@ LOCAL_ROOT=/tmp/esp-mp-local ./build_local_tmp.sh
 
 ### 7.2 不清 cache 的增量重編
 
-改完 `lgfx_mp.cpp` 後，直接重跑：
+改完 `lgfx_mp.cpp`、`lgfx_band.cpp`、`lgfx_shared.hpp` 等 user cmodule 檔案後，直接重跑：
 
 ```bash
 cd /workspace/esp/esp/project_root
@@ -174,6 +174,14 @@ make -j6 BOARD=ESP32_GENERIC_S3 BOARD_VARIANT=SPIRAM_OCT_NOBT USER_C_MODULES=/tm
 ```
 
 重點是「所有改過的檔案都要同步」。這次已實際踩到一個陷阱：只同步 `lgfx_band.cpp` / `lgfx_shared.hpp`，漏掉 `lgfx_mp.cpp`，會導致 firmware 雖然刷進新的 native band renderer，但板上 `lgfx` 模組仍然沒有匯出 `render_scene_bands_rgb565`，開機就會一直走 `BAND_PIPELINE_NATIVE_FALLBACK`。
+
+目前 monk/orb native API 已分散在多個檔案：
+
+- `lgfx_mp.cpp`：module export table、部分 gameplay/update API
+- `lgfx_band.cpp`：native band renderer，以及 `pick_swappable_monk_orb_native`
+- `lgfx_shared.hpp`：跨 translation unit export declaration
+
+不要把後續所有 gameplay API 都塞回 `lgfx_mp.cpp`。ESP32S3 build 已遇過 `dangerous relocation: l32r: literal target out of range` link error；將新 API 分到 `lgfx_band.cpp` 或未來新拆的 `lgfx_gameplay.cpp` 比較安全。
 
 這種情況先不要猜 qstr 壞掉，先直接在板上檢查：
 
@@ -247,6 +255,8 @@ pgrep -af "makeqstrdefs|ninja all|idf.py|make -j|cc1"
 - `/sd/game/app.py` 目前只作為 wrapper / 存在性檢查備用，不是正式主執行檔。
 - 沒有 SD 卡、或上述必要檔案缺失時，會進入 safe mode，不會跑內部 flash 舊遊戲。
 
+重要：`main.py` 不應在 SD 掛載失敗後復用 internal flash 裡既有的 `/sd/game` 目錄。若 log 出現 `reusing existing /sd mount after slot2=...`，代表 launcher 仍可能跑到 internal fallback，必須先更新 internal flash 上的新版 `main.py`。新版行為應是 SD 掛載失敗就輸出 `SD mount failed: slot2=...`，然後進入 `SAFE MODE`。
+
 ### 10.1 更新內部 flash launcher
 
 `mpremote fs cp` 不支援一行把兩個來源分別寫到兩個目標，請逐檔複製：
@@ -278,7 +288,7 @@ try:
 except Exception as e:
     print('PRE_UMOUNT_SKIP', e)
 try:
-    os.mount(machine.SDCard(slot=2, width=1, sck=39, miso=40, mosi=38, cs=47, freq=1000000), '/sd')
+    os.mount(machine.SDCard(slot=2, width=1, sck=5, mosi=6, miso=7, cs=4, freq=1000000), '/sd')
     print('SD_MOUNTED_SLOT2_ACTUAL')
 except Exception as e1:
     print('SD_MOUNT_SLOT2_ERR', e1)
@@ -286,9 +296,30 @@ except Exception as e1:
 "
 ```
 
-看到 `SD_MOUNTED_SLOT2_ACTUAL` 才算真的把外接 SD 掛上去。這是目前板子實際使用的 pin mapping：`slot=2, width=1, sck=39, miso=40, mosi=38, cs=47, freq=1000000`。
+看到 `SD_MOUNTED_SLOT2_ACTUAL` 才算真的把外接 SD 掛上去。這是目前板子實際使用的 pin mapping：`slot=2, width=1, sck=5, mosi=6, miso=7, cs=4, freq=1000000`。
 
-目前正式唯一 SD 路徑就是 internal flash launcher [main.py](/workspace/esp/esp/project_root/main.py) 這組 wiring：`slot=2, width=1, sck=39, miso=40, mosi=38, cs=47, freq=1000000`。文件、手動部署、boot 掛載都必須使用同一組設定；不要再保留或混用舊 pin 範例。
+目前正式唯一 SD 路徑就是 internal flash launcher [main.py](/workspace/esp/esp/project_root/main.py) 這組 wiring：`slot=2, width=1, sck=5, mosi=6, miso=7, cs=4, freq=1000000`。文件、手動部署、boot 掛載都必須使用同一組設定；不要再保留或混用舊 pin 範例。
+
+若這一步失敗並看到 `OSError(16)`，先不要把檔案再複製到 `/sd/game`，因為那可能只是 internal flash 裡的同名目錄。已實測過的修復順序：
+
+1. 確認板上 internal flash 已更新新版 [main.py](/workspace/esp/esp/project_root/main.py)，不再有 `reusing existing /sd mount after slot2=...` fallback。
+2. 檢查 `/` 與 `/sd` 的容量是否不同：若兩者 `os.statvfs()` 完全一樣，現在的 `/sd` 不是外接 SD。
+3. 檢查硬體腳位衝突。目前 SD 使用 `sck=5, mosi=6, miso=7, cs=4`；若按鍵、搖桿或其他模組也實體接在 GPIO 5/6/7/4，必須改線或改設定，不能和 SD 共用。舊 wiring 曾使用 GPIO 39/40/38，會與目前 `BTN_A_PIN=39`、`BTN_B_PIN=40`、`BTN_X_PIN=38` 重疊，已改為這組新 SD 腳位避開。
+4. 移開衝突硬體後，對板子做完整斷電重上電，再重新執行強制掛載命令。
+
+可用下面命令判斷 `/sd` 是否真的是外接 SD：
+
+```bash
+/tmp/mpvenv/bin/mpremote connect /dev/ttyACM0 exec "import os
+print('ROOT_STATVFS', os.statvfs('/'))
+try:
+    print('SD_STATVFS', os.statvfs('/sd'))
+except Exception as e:
+    print('SD_STATVFS_ERR', repr(e))
+"
+```
+
+若 `ROOT_STATVFS` 與 `SD_STATVFS` 相同，就表示還在 internal flash，不是真 SD 卡。
 
 ### 10.2.2 用同一個 session 逐檔同步
 
@@ -332,7 +363,7 @@ try:
     os.umount('/sd')
 except Exception:
     pass
-os.mount(machine.SDCard(slot=2, width=1, sck=39, miso=40, mosi=38, cs=47, freq=1000000), '/sd')
+os.mount(machine.SDCard(slot=2, width=1, sck=5, mosi=6, miso=7, cs=4, freq=1000000), '/sd')
 with open('/sd/game/app_camera_test.py', 'r') as f:
     s = f.read()
 with open('/sd/game/config.py', 'r') as f:
@@ -353,7 +384,7 @@ try:
     os.umount('/sd')
 except Exception:
     pass
-os.mount(machine.SDCard(slot=2, width=1, sck=39, miso=40, mosi=38, cs=47, freq=1000000), '/sd')
+os.mount(machine.SDCard(slot=2, width=1, sck=5, mosi=6, miso=7, cs=4, freq=1000000), '/sd')
 s = open('/sd/game/picture/object/objects.csv', 'r').read()
 print('HAS_MUSHROOM', 'mushroom,decor,1168,160,16,16' in s)
 print('HAS_BOX', 'box,decor,1392,96,32,32' in s)
@@ -369,7 +400,7 @@ try:
     os.umount('/sd')
 except Exception:
     pass
-os.mount(machine.SDCard(slot=2, width=1, sck=39, miso=40, mosi=38, cs=47, freq=1000000), '/sd')
+os.mount(machine.SDCard(slot=2, width=1, sck=5, mosi=6, miso=7, cs=4, freq=1000000), '/sd')
 app = open('/sd/game/app_camera_test.py', 'r').read()
 print('APP_HAS_NATIVE_OVERLAY_PACK', '_pack_special_render_overlays' in app)
 print('APP_CALLS_NATIVE_OVERLAY', 'overlay_desc_buf,' in app)"
@@ -401,11 +432,12 @@ print('APP_CALLS_NATIVE_OVERLAY', 'overlay_desc_buf,' in app)"
 若要確認目前載入來源，優先看開機 log：
 
 ```text
+SD mount: mounted with slot=2 width=1 sck=5 mosi=6 miso=7 cs=4
 LOADER_SRC_PATH=/sd/game/app_camera_test.py
 LAUNCHER_APP_FILE=/sd/game/app_camera_test.py
 ```
 
-這兩行是目前主線最直接的來源證據，因為 launcher 直接 `exec` 的 module 是 `app_camera_test`。
+這三行合在一起才是目前主線最直接的來源證據。只有 `LOADER_SRC_PATH=/sd/game/app_camera_test.py` 不足以證明外接 SD 已掛載，因為 internal flash 也可能殘留 `/sd/game` 同名目錄。
 
 若要在 REPL 裡再次確認，按 `Ctrl-C` 中斷後輸入：
 
@@ -527,7 +559,7 @@ try:
 except Exception as e:
     print('PRE_UMOUNT_SKIP', e)
 try:
-    os.mount(machine.SDCard(slot=2, width=1, sck=39, miso=40, mosi=38, cs=47, freq=1000000), '/sd')
+    os.mount(machine.SDCard(slot=2, width=1, sck=5, mosi=6, miso=7, cs=4, freq=1000000), '/sd')
     print('SD_MOUNTED_SLOT2_ACTUAL')
 except Exception as e1:
     print('SD_MOUNT_SLOT2_ERR', e1)
