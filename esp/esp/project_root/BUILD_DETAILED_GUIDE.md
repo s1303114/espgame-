@@ -108,6 +108,14 @@ make -j6 BOARD=ESP32_GENERIC_S3 BOARD_VARIANT=SPIRAM_OCT_NOBT USER_C_MODULES=${L
 - `Generated .../micropython.bin`
 - `micropython.bin binary size ...`
 
+### 4.4 Flash / partition 目標
+
+目前 `ESP32_GENERIC_S3` + `SPIRAM_OCT_NOBT` build 以板上 16MB flash 為目標：
+
+- Flash size default：`micropython/ports/esp32/boards/ESP32_GENERIC_S3/sdkconfig.board` 設為 `CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y` 與 `CONFIG_ESPTOOLPY_FLASHSIZE="16MB"`。
+- Partition CSV：`micropython/ports/esp32/partitions-4MiBplus.csv` 的 `factory` app 從 `0x10000` 開始，size 是 `0x3F0000`（4032K）。
+- MicroPython VFS 會使用最後一個 partition 之後到實體 flash 結尾的剩餘空間；目前主線只要求 internal flash 放 `boot.py` / `main.py`，遊戲仍跑 `/sd/game`。
+
 ## 5. 燒錄流程
 
 編譯成功後：
@@ -117,6 +125,14 @@ cd /tmp/esp-mp-local/micropython/ports/esp32
 source /opt/esp/idf/export.sh
 idf.py -B build-ESP32_GENERIC_S3-SPIRAM_OCT_NOBT -p /dev/ttyACM0 flash
 ```
+
+如果 partition table layout 有變更，例如調整 `factory` app size，請用整片 erase 後重新燒錄，避免舊 internal VFS 位在新 app partition 範圍內造成 `The filesystem appears to be corrupted`：
+
+```bash
+idf.py -B build-ESP32_GENERIC_S3-SPIRAM_OCT_NOBT -p /dev/ttyACM0 erase-flash flash
+```
+
+整片 erase 會清掉 internal flash filesystem；燒錄後要重新部署第 10.1 節的 `boot.py` / `main.py` launcher。
 
 成功訊號：
 

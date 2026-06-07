@@ -7,6 +7,7 @@
 extern "C" {
 #include "py/obj.h"
 #include "py/runtime.h"
+#include "py/mphal.h"
 }
 
 #include "lgfx_shared.hpp"
@@ -256,9 +257,19 @@ static void compose_objects_band(
 }
 
 static constexpr int32_t kMonkOrbSrcX = 96;
-static constexpr int32_t kMonkOrbSrcY = 16;
+static constexpr int32_t kMonkOrbOrbitSrcY = 16;
+static constexpr int32_t kMonkOrbActionSrcY = 32;
 static constexpr int32_t kMonkOrbW = 16;
 static constexpr int32_t kMonkOrbH = 16;
+static constexpr int32_t kMonkOrbRadius = 28;
+static constexpr int32_t kMonkOrbPulseRadius = 128;
+static constexpr int32_t kMonkOrbPulseExpandFrames = 60;
+static constexpr int32_t kMonkOrbPulseHoldFrames = 40;
+static constexpr int32_t kMonkOrbPulseShrinkFrames = 60;
+
+static inline bool monk_orb_mode_uses_action_sprite(int32_t mode) {
+    return mode == 2 || mode == 4 || mode == 5;
+}
 
 static void compose_monk_orb_sprite_band(
     uint8_t *dst,
@@ -268,6 +279,7 @@ static void compose_monk_orb_sprite_band(
     int32_t band_top,
     int32_t wx,
     int32_t wy,
+    int32_t orb_mode,
     const uint8_t *orb_atlas,
     int32_t orb_atlas_w,
     int32_t orb_atlas_h,
@@ -288,7 +300,7 @@ static void compose_monk_orb_sprite_band(
         orb_atlas_w,
         orb_atlas_h,
         kMonkOrbSrcX,
-        kMonkOrbSrcY,
+        monk_orb_mode_uses_action_sprite(orb_mode) ? kMonkOrbActionSrcY : kMonkOrbOrbitSrcY,
         kMonkOrbW,
         kMonkOrbH,
         transparent_key
@@ -496,6 +508,7 @@ static void compose_special_objects_band(
         int16_t wy = (int16_t)((uint16_t)sb[2] | ((uint16_t)sb[3] << 8));
         int32_t kind = (int32_t)sb[4];
         int32_t frame_index = (int32_t)sb[5];
+        int32_t aux0 = (int32_t)sb[6];
         const uint8_t *sheet = nullptr;
         int32_t frame_w = 0;
         int32_t frame_h = 0;
@@ -529,6 +542,7 @@ static void compose_special_objects_band(
                 band_top,
                 wx,
                 wy,
+                aux0,
                 orb_atlas,
                 orb_atlas_w,
                 orb_atlas_h,
@@ -1374,6 +1388,14 @@ static int16_t lgfx_band_rd_i16(const uint8_t *p) {
     return (int16_t)v;
 }
 
+static void lgfx_band_wr_i16(uint8_t *p, int32_t v) {
+    if (v < -32768) v = -32768;
+    if (v > 32767) v = 32767;
+    uint16_t uv = (uint16_t)((int16_t)v);
+    p[0] = (uint8_t)(uv & 0xFFu);
+    p[1] = (uint8_t)((uv >> 8) & 0xFFu);
+}
+
 static int32_t lgfx_band_visible_target_distance2(
     int32_t wx,
     int32_t wy,
@@ -1468,7 +1490,7 @@ static mp_obj_t lgfx_pick_swappable_monk_orb_native(size_t n_args, const mp_obj_
             }
             const uint8_t *orb = orbs + ((size_t)oi * (size_t)orb_stride);
             uint8_t mode = orb[0];
-            if (mode == 0xFFu || mode == 3u || mode == 4u) {
+            if (mode == 0xFFu || mode == 3u) {
                 continue;
             }
             int32_t orb_x = lgfx_band_rd_i16(orb + 10);
@@ -1493,6 +1515,499 @@ static mp_obj_t lgfx_pick_swappable_monk_orb_native(size_t n_args, const mp_obj_
     return mp_obj_new_tuple(3, out);
 }
 MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lgfx_pick_swappable_monk_orb_native_obj, 17, 17, lgfx_pick_swappable_monk_orb_native);
+
+static inline int32_t lgfx_attack_abs_i32(int32_t v) {
+    return v < 0 ? -v : v;
+}
+
+static inline int32_t lgfx_attack_move_toward_i32(int32_t curr_v, int32_t target_v, int32_t speed_px) {
+    int32_t step = speed_px < 1 ? 1 : speed_px;
+    int32_t delta = target_v - curr_v;
+    if (delta > 0) {
+        curr_v += delta < step ? delta : step;
+    } else if (delta < 0) {
+        int32_t mag = -delta;
+        curr_v -= mag < step ? mag : step;
+    }
+    return curr_v;
+}
+
+static inline int32_t lgfx_attack_dir_i32(uint8_t dir_byte, int32_t fallback_dir) {
+    int32_t dir = (int32_t)(int8_t)dir_byte;
+    if (dir > 0) {
+        return 1;
+    }
+    if (dir < 0) {
+        return -1;
+    }
+    return fallback_dir >= 0 ? 1 : -1;
+}
+
+static inline int32_t lgfx_attack_move_dir_to_limit_i32(int32_t curr_v, int32_t target_v, int32_t dir, int32_t speed_px) {
+    int32_t step = speed_px < 1 ? 1 : speed_px;
+    if (dir > 0) {
+        if (curr_v >= target_v) {
+            return curr_v;
+        }
+        int32_t next_v = curr_v + step;
+        return next_v > target_v ? target_v : next_v;
+    }
+    if (curr_v <= target_v) {
+        return curr_v;
+    }
+    int32_t next_v = curr_v - step;
+    return next_v < target_v ? target_v : next_v;
+}
+
+static inline bool lgfx_attack_reached_dir_i32(int32_t curr_v, int32_t target_v, int32_t dir) {
+    return dir > 0 ? (curr_v >= target_v) : (curr_v <= target_v);
+}
+
+static inline void lgfx_attack_set_scripted_orb(uint8_t *orb, int32_t slot_i, int32_t x, int32_t y) {
+    orb[0] = 4u;
+    orb[1] = (uint8_t)(slot_i & 0xFF);
+    orb[2] = 0u;
+    orb[3] = 1u;
+    lgfx_band_wr_i16(orb + 4, x);
+    lgfx_band_wr_i16(orb + 6, y);
+    lgfx_band_wr_i16(orb + 8, kMonkOrbRadius);
+    lgfx_band_wr_i16(orb + 10, x);
+    lgfx_band_wr_i16(orb + 12, y);
+}
+
+static inline void lgfx_attack_set_detached_orb(uint8_t *orb, int32_t slot_i, int32_t x, int32_t y) {
+    orb[0] = 1u;
+    orb[1] = (uint8_t)(slot_i & 0xFF);
+    orb[2] = 0u;
+    orb[3] = 1u;
+    lgfx_band_wr_i16(orb + 4, x);
+    lgfx_band_wr_i16(orb + 6, y);
+    lgfx_band_wr_i16(orb + 8, kMonkOrbRadius);
+    lgfx_band_wr_i16(orb + 10, x);
+    lgfx_band_wr_i16(orb + 12, y);
+}
+
+static inline void lgfx_attack_set_orbit_orb(uint8_t *orb, int32_t slot_i) {
+    orb[0] = 0u;
+    orb[1] = (uint8_t)(slot_i & 0xFF);
+    orb[2] = 0u;
+    orb[3] = 1u;
+    lgfx_band_wr_i16(orb + 8, kMonkOrbRadius);
+}
+
+static inline int32_t lgfx_pulse_radius_for_step(int32_t start_radius, int32_t target_radius, int32_t step, int32_t total) {
+    if (total <= 0) {
+        return target_radius;
+    }
+    if (step < 0) step = 0;
+    if (step > total) step = total;
+    return start_radius + (((target_radius - start_radius) * step) / total);
+}
+
+static inline void lgfx_pulse_set_orb_radius(uint8_t *orb, int32_t slot_i, uint8_t mode, int32_t radius_px) {
+    if (radius_px < kMonkOrbRadius) radius_px = kMonkOrbRadius;
+    if (radius_px > kMonkOrbPulseRadius) radius_px = kMonkOrbPulseRadius;
+    orb[0] = mode;
+    orb[1] = (uint8_t)(slot_i & 0xFF);
+    orb[2] = 0u;
+    orb[3] = 1u;
+    lgfx_band_wr_i16(orb + 8, radius_px);
+}
+
+static mp_obj_t lgfx_update_monk_attack_native(size_t n_args, const mp_obj_t *args) {
+    if (n_args != 14) {
+        mp_raise_ValueError(MP_ERROR_TEXT("need 14 args"));
+    }
+
+    mp_buffer_info_t attack_info;
+    mp_buffer_info_t enemy_rows_info;
+    mp_buffer_info_t monk_hover_info;
+    mp_buffer_info_t monk_orbs_info;
+    mp_get_buffer_raise(args[0], &attack_info, MP_BUFFER_RW);
+    mp_int_t attack_stride = mp_obj_get_int(args[1]);
+    mp_int_t attack_count = mp_obj_get_int(args[2]);
+    mp_get_buffer_raise(args[3], &enemy_rows_info, MP_BUFFER_READ);
+    mp_int_t enemy_row_stride = mp_obj_get_int(args[4]);
+    mp_int_t enemy_count = mp_obj_get_int(args[5]);
+    mp_get_buffer_raise(args[6], &monk_hover_info, MP_BUFFER_RW);
+    mp_int_t monk_hover_stride = mp_obj_get_int(args[7]);
+    mp_int_t monk_hover_count = mp_obj_get_int(args[8]);
+    mp_get_buffer_raise(args[9], &monk_orbs_info, MP_BUFFER_RW);
+    mp_int_t orb_stride = mp_obj_get_int(args[10]);
+    mp_int_t orb_count = mp_obj_get_int(args[11]);
+    bool attack_enabled = mp_obj_is_true(args[12]);
+    mp_int_t speed_px = mp_obj_get_int(args[13]);
+
+    if (attack_stride < 16 || enemy_row_stride < 12 || monk_hover_stride < 9 || orb_stride < 16 || attack_count < 0 || enemy_count < 0 || monk_hover_count < 0 || orb_count < 0) {
+        mp_raise_ValueError(MP_ERROR_TEXT("invalid monk attack dims"));
+    }
+    if (attack_info.len < (size_t)attack_stride * (size_t)attack_count) {
+        mp_raise_ValueError(MP_ERROR_TEXT("monk attack buf too small"));
+    }
+    if (enemy_rows_info.len < (size_t)enemy_row_stride * (size_t)enemy_count) {
+        mp_raise_ValueError(MP_ERROR_TEXT("enemy rows buf too small"));
+    }
+    if (monk_hover_info.len < (size_t)monk_hover_stride * (size_t)monk_hover_count) {
+        mp_raise_ValueError(MP_ERROR_TEXT("monk hover buf too small"));
+    }
+    if (monk_orbs_info.len < (size_t)orb_stride * (size_t)orb_count) {
+        mp_raise_ValueError(MP_ERROR_TEXT("monk orb buf too small"));
+    }
+    if (speed_px < 1) {
+        speed_px = 6;
+    }
+
+    uint8_t *attack = (uint8_t *)attack_info.buf;
+    const uint8_t *enemy_rows = (const uint8_t *)enemy_rows_info.buf;
+    uint8_t *monk_hover = (uint8_t *)monk_hover_info.buf;
+    uint8_t *orbs = (uint8_t *)monk_orbs_info.buf;
+    const uint8_t moving_cd = 0xFFu;
+    const int32_t per_enemy_orbs = 5;
+    const int32_t left_x = 1600;
+    const int32_t right_x = 1904;
+    const int32_t left_y = 160;
+    const int32_t right_y = 144;
+    int32_t changed = 0;
+    int32_t limit = attack_count;
+    if (limit > enemy_count) limit = enemy_count;
+    if (limit > monk_hover_count) limit = monk_hover_count;
+    int32_t orb_enemy_limit = orb_count / per_enemy_orbs;
+    if (limit > orb_enemy_limit) limit = orb_enemy_limit;
+
+    for (int32_t ei = 0; ei < limit; ++ei) {
+        uint8_t *atk = attack + ((size_t)ei * (size_t)attack_stride);
+        const uint8_t *row = enemy_rows + ((size_t)ei * (size_t)enemy_row_stride);
+        uint8_t *hover = monk_hover + ((size_t)ei * (size_t)monk_hover_stride);
+        uint8_t phase = atk[0];
+        uint8_t prev_cd = atk[1];
+        uint8_t current_cd = hover[8];
+        int32_t slot_left = (int32_t)(int8_t)atk[2];
+        int32_t slot_right = (int32_t)(int8_t)atk[3];
+        int32_t pulse_step = (int32_t)atk[2];
+        int32_t pulse_attack_index = (int32_t)atk[15];
+
+        if (!row[8] || !row[11]) {
+            if (phase >= 4u && phase <= 6u) {
+                for (int32_t si = 0; si < per_enemy_orbs; ++si) {
+                    uint8_t *orb = orbs + ((size_t)((ei * per_enemy_orbs) + si) * (size_t)orb_stride);
+                    if (orb[0] == 5u || orb[0] == 6u) lgfx_attack_set_orbit_orb(orb, si);
+                }
+            }
+            atk[0] = 0u;
+            atk[1] = current_cd;
+            atk[2] = 0xFFu;
+            atk[3] = 0xFFu;
+            atk[12] = 0u;
+            atk[13] = 0u;
+            continue;
+        }
+
+        if (!attack_enabled) {
+            if (phase != 0u) {
+                if (phase >= 4u && phase <= 6u) {
+                    for (int32_t si = 0; si < per_enemy_orbs; ++si) {
+                        uint8_t *orb = orbs + ((size_t)((ei * per_enemy_orbs) + si) * (size_t)orb_stride);
+                        if (orb[0] == 5u || orb[0] == 6u) lgfx_attack_set_orbit_orb(orb, si);
+                    }
+                }
+                if (slot_left >= 0 && slot_left < per_enemy_orbs) {
+                    uint8_t *orb = orbs + ((size_t)((ei * per_enemy_orbs) + slot_left) * (size_t)orb_stride);
+                    if (orb[0] == 4u) lgfx_attack_set_detached_orb(orb, slot_left, lgfx_band_rd_i16(orb + 10), lgfx_band_rd_i16(orb + 12));
+                }
+                if (slot_right >= 0 && slot_right < per_enemy_orbs) {
+                    uint8_t *orb = orbs + ((size_t)((ei * per_enemy_orbs) + slot_right) * (size_t)orb_stride);
+                    if (orb[0] == 4u) lgfx_attack_set_detached_orb(orb, slot_right, lgfx_band_rd_i16(orb + 10), lgfx_band_rd_i16(orb + 12));
+                }
+            }
+            atk[0] = 0u;
+            atk[1] = current_cd;
+            atk[2] = 0xFFu;
+            atk[3] = 0xFFu;
+            atk[12] = 0u;
+            atk[13] = 0u;
+            continue;
+        }
+
+        if (phase == 0u && prev_cd == moving_cd && current_cd > 0u && current_cd != moving_cd) {
+            uint8_t cadence = atk[14];
+            atk[14] = (uint8_t)((cadence + 1u) & 0x01u);
+            if ((cadence & 0x01u) != 0u) {
+                mp_printf(&mp_plat_print, "MONK_ATTACK_NATIVE_SKIP enemy=%d cadence=%d\n", (int)ei, (int)cadence);
+                atk[1] = current_cd;
+                continue;
+            }
+            if (pulse_attack_index != 0) {
+                bool can_pulse = true;
+                for (int32_t si = 0; si < per_enemy_orbs; ++si) {
+                    uint8_t *orb = orbs + ((size_t)((ei * per_enemy_orbs) + si) * (size_t)orb_stride);
+                    if (orb[0] != 0u) {
+                        can_pulse = false;
+                        break;
+                    }
+                }
+                if (can_pulse) {
+                    atk[15] = 0u;
+                    atk[0] = 4u;
+                    atk[2] = 0u;
+                    atk[3] = 0xFFu;
+                    atk[12] = 0u;
+                    atk[13] = 0u;
+                    for (int32_t si = 0; si < per_enemy_orbs; ++si) {
+                        uint8_t *orb = orbs + ((size_t)((ei * per_enemy_orbs) + si) * (size_t)orb_stride);
+                        lgfx_pulse_set_orb_radius(orb, si, 5u, kMonkOrbRadius);
+                    }
+                    mp_printf(&mp_plat_print, "MONK_ATTACK_NATIVE_PULSE_START enemy=%d radius=%d target=%d expand=%d hold=%d shrink=%d\n",
+                        (int)ei,
+                        (int)kMonkOrbRadius,
+                        (int)kMonkOrbPulseRadius,
+                        (int)kMonkOrbPulseExpandFrames,
+                        (int)kMonkOrbPulseHoldFrames,
+                        (int)kMonkOrbPulseShrinkFrames);
+                    phase = 4u;
+                    slot_left = -1;
+                    slot_right = -1;
+                    changed += 1;
+                } else {
+                    mp_printf(&mp_plat_print, "MONK_ATTACK_NATIVE_PULSE_SKIP enemy=%d reason=orbs_not_orbit\n", (int)ei);
+                    atk[1] = current_cd;
+                    continue;
+                }
+            }
+            if (phase != 0u) {
+                atk[1] = current_cd;
+                continue;
+            }
+            int32_t best_left_slot = -1;
+            int32_t best_right_slot = -1;
+            int32_t best_left_x = 0;
+            int32_t best_right_x = 0;
+            for (int32_t si = 0; si < per_enemy_orbs; ++si) {
+                uint8_t *orb = orbs + ((size_t)((ei * per_enemy_orbs) + si) * (size_t)orb_stride);
+                if (orb[0] != 0u) continue;
+                int32_t x = lgfx_band_rd_i16(orb + 10);
+                if (best_left_slot < 0 || x < best_left_x) {
+                    best_left_slot = si;
+                    best_left_x = x;
+                }
+                if (best_right_slot < 0 || x > best_right_x) {
+                    best_right_slot = si;
+                    best_right_x = x;
+                }
+            }
+            if (best_left_slot >= 0 && best_right_slot >= 0 && best_left_slot != best_right_slot) {
+                uint8_t *left_orb = orbs + ((size_t)((ei * per_enemy_orbs) + best_left_slot) * (size_t)orb_stride);
+                uint8_t *right_orb = orbs + ((size_t)((ei * per_enemy_orbs) + best_right_slot) * (size_t)orb_stride);
+                int32_t ly = lgfx_band_rd_i16(left_orb + 12);
+                int32_t ry = lgfx_band_rd_i16(right_orb + 12);
+                atk[0] = 1u;
+                atk[2] = (uint8_t)best_left_slot;
+                atk[3] = (uint8_t)best_right_slot;
+                atk[12] = (uint8_t)(int8_t)-1;
+                atk[13] = (uint8_t)(int8_t)1;
+                lgfx_band_wr_i16(atk + 4, left_x);
+                lgfx_band_wr_i16(atk + 6, right_x);
+                lgfx_band_wr_i16(atk + 8, ly);
+                lgfx_band_wr_i16(atk + 10, ry);
+                lgfx_attack_set_scripted_orb(left_orb, best_left_slot, lgfx_band_rd_i16(left_orb + 10), ly);
+                lgfx_attack_set_scripted_orb(right_orb, best_right_slot, lgfx_band_rd_i16(right_orb + 10), ry);
+                mp_printf(&mp_plat_print, "MONK_ATTACK_NATIVE_START enemy=%d left_slot=%d right_slot=%d lx=%d ly=%d rx=%d ry=%d\n",
+                    (int)ei,
+                    (int)best_left_slot,
+                    (int)best_right_slot,
+                    (int)lgfx_band_rd_i16(left_orb + 10),
+                    (int)ly,
+                    (int)lgfx_band_rd_i16(right_orb + 10),
+                    (int)ry);
+                phase = 1u;
+                slot_left = best_left_slot;
+                slot_right = best_right_slot;
+                atk[15] = 1u;
+                changed += 1;
+            }
+        }
+
+        if (phase >= 4u && phase <= 6u) {
+            int32_t pulse_active_count = 0;
+            for (int32_t si = 0; si < per_enemy_orbs; ++si) {
+                uint8_t *orb = orbs + ((size_t)((ei * per_enemy_orbs) + si) * (size_t)orb_stride);
+                if (orb[0] == 5u || orb[0] == 6u) {
+                    pulse_active_count += 1;
+                }
+            }
+            if (pulse_active_count <= 0) {
+                atk[0] = 0u;
+                atk[2] = 0xFFu;
+                atk[3] = 0xFFu;
+                atk[12] = 0u;
+                atk[13] = 0u;
+                mp_printf(&mp_plat_print, "MONK_ATTACK_NATIVE_PULSE_EMPTY enemy=%d\n", (int)ei);
+                changed += 1;
+            } else if (phase == 4u) {
+                pulse_step += 1;
+                int32_t radius_px = lgfx_pulse_radius_for_step(kMonkOrbRadius, kMonkOrbPulseRadius, pulse_step, kMonkOrbPulseExpandFrames);
+                for (int32_t si = 0; si < per_enemy_orbs; ++si) {
+                    uint8_t *orb = orbs + ((size_t)((ei * per_enemy_orbs) + si) * (size_t)orb_stride);
+                    if (orb[0] == 5u || orb[0] == 6u) lgfx_pulse_set_orb_radius(orb, si, 5u, radius_px);
+                }
+                if (pulse_step >= kMonkOrbPulseExpandFrames) {
+                    atk[0] = 5u;
+                    atk[2] = 0u;
+                    for (int32_t si = 0; si < per_enemy_orbs; ++si) {
+                        uint8_t *orb = orbs + ((size_t)((ei * per_enemy_orbs) + si) * (size_t)orb_stride);
+                        if (orb[0] == 5u || orb[0] == 6u) lgfx_pulse_set_orb_radius(orb, si, 6u, kMonkOrbPulseRadius);
+                    }
+                    mp_printf(&mp_plat_print, "MONK_ATTACK_NATIVE_PULSE_PHASE enemy=%d phase=hold\n", (int)ei);
+                } else {
+                    atk[2] = (uint8_t)pulse_step;
+                }
+                changed += 1;
+            } else if (phase == 5u) {
+                pulse_step += 1;
+                for (int32_t si = 0; si < per_enemy_orbs; ++si) {
+                    uint8_t *orb = orbs + ((size_t)((ei * per_enemy_orbs) + si) * (size_t)orb_stride);
+                    if (orb[0] == 5u || orb[0] == 6u) lgfx_pulse_set_orb_radius(orb, si, 6u, kMonkOrbPulseRadius);
+                }
+                if (pulse_step >= kMonkOrbPulseHoldFrames) {
+                    atk[0] = 6u;
+                    atk[2] = 0u;
+                    for (int32_t si = 0; si < per_enemy_orbs; ++si) {
+                        uint8_t *orb = orbs + ((size_t)((ei * per_enemy_orbs) + si) * (size_t)orb_stride);
+                        if (orb[0] == 5u || orb[0] == 6u) lgfx_pulse_set_orb_radius(orb, si, 5u, kMonkOrbPulseRadius);
+                    }
+                    mp_printf(&mp_plat_print, "MONK_ATTACK_NATIVE_PULSE_PHASE enemy=%d phase=shrink\n", (int)ei);
+                } else {
+                    atk[2] = (uint8_t)pulse_step;
+                }
+                changed += 1;
+            } else if (phase == 6u) {
+                pulse_step += 1;
+                int32_t radius_px = lgfx_pulse_radius_for_step(kMonkOrbPulseRadius, kMonkOrbRadius, pulse_step, kMonkOrbPulseShrinkFrames);
+                for (int32_t si = 0; si < per_enemy_orbs; ++si) {
+                    uint8_t *orb = orbs + ((size_t)((ei * per_enemy_orbs) + si) * (size_t)orb_stride);
+                    if (orb[0] == 5u || orb[0] == 6u) lgfx_pulse_set_orb_radius(orb, si, 5u, radius_px);
+                }
+                if (pulse_step >= kMonkOrbPulseShrinkFrames) {
+                    for (int32_t si = 0; si < per_enemy_orbs; ++si) {
+                        uint8_t *orb = orbs + ((size_t)((ei * per_enemy_orbs) + si) * (size_t)orb_stride);
+                        if (orb[0] == 5u || orb[0] == 6u) lgfx_attack_set_orbit_orb(orb, si);
+                    }
+                    atk[0] = 0u;
+                    atk[2] = 0xFFu;
+                    atk[3] = 0xFFu;
+                    atk[12] = 0u;
+                    atk[13] = 0u;
+                    mp_printf(&mp_plat_print, "MONK_ATTACK_NATIVE_PULSE_DONE enemy=%d\n", (int)ei);
+                } else {
+                    atk[2] = (uint8_t)pulse_step;
+                }
+                changed += 1;
+            }
+        }
+
+        if (phase != 0u && slot_left >= 0 && slot_left < per_enemy_orbs && slot_right >= 0 && slot_right < per_enemy_orbs) {
+            uint8_t *left_orb = orbs + ((size_t)((ei * per_enemy_orbs) + slot_left) * (size_t)orb_stride);
+            uint8_t *right_orb = orbs + ((size_t)((ei * per_enemy_orbs) + slot_right) * (size_t)orb_stride);
+            bool left_active = left_orb[0] == 4u;
+            bool right_active = right_orb[0] == 4u;
+            if (!left_active && !right_active) {
+                atk[0] = 0u;
+                atk[2] = 0xFFu;
+                atk[3] = 0xFFu;
+                atk[12] = 0u;
+                atk[13] = 0u;
+                atk[1] = current_cd;
+                changed += 1;
+                continue;
+            }
+            int32_t lx = lgfx_band_rd_i16(left_orb + 10);
+            int32_t ly = lgfx_band_rd_i16(left_orb + 12);
+            int32_t rx = lgfx_band_rd_i16(right_orb + 10);
+            int32_t ry = lgfx_band_rd_i16(right_orb + 12);
+            int32_t target_lx = lgfx_band_rd_i16(atk + 4);
+            int32_t target_rx = lgfx_band_rd_i16(atk + 6);
+            int32_t target_ly = lgfx_band_rd_i16(atk + 8);
+            int32_t target_ry = lgfx_band_rd_i16(atk + 10);
+
+            if (phase == 1u) {
+                int32_t left_dir = lgfx_attack_dir_i32(atk[12], -1);
+                int32_t right_dir = lgfx_attack_dir_i32(atk[13], 1);
+                if (left_active) {
+                    lx = lgfx_attack_move_dir_to_limit_i32(lx, target_lx, left_dir, speed_px);
+                    lgfx_attack_set_scripted_orb(left_orb, slot_left, lx, ly);
+                }
+                if (right_active) {
+                    rx = lgfx_attack_move_dir_to_limit_i32(rx, target_rx, right_dir, speed_px);
+                    lgfx_attack_set_scripted_orb(right_orb, slot_right, rx, ry);
+                }
+                bool left_reached = !left_active || lgfx_attack_reached_dir_i32(lx, target_lx, left_dir);
+                bool right_reached = !right_active || lgfx_attack_reached_dir_i32(rx, target_rx, right_dir);
+                if (left_reached && right_reached) {
+                    atk[0] = 2u;
+                    lgfx_band_wr_i16(atk + 8, left_y);
+                    lgfx_band_wr_i16(atk + 10, right_y);
+                    mp_printf(&mp_plat_print, "MONK_ATTACK_NATIVE_PHASE enemy=%d phase=drop left_slot=%d right_slot=%d\n",
+                        (int)ei,
+                        (int)slot_left,
+                        (int)slot_right);
+                }
+                changed += 1;
+            } else if (phase == 2u) {
+                if (left_active) {
+                    ly = lgfx_attack_move_toward_i32(ly, target_ly, speed_px);
+                    lgfx_attack_set_scripted_orb(left_orb, slot_left, lx, ly);
+                }
+                if (right_active) {
+                    ry = lgfx_attack_move_toward_i32(ry, target_ry, speed_px);
+                    lgfx_attack_set_scripted_orb(right_orb, slot_right, rx, ry);
+                }
+                bool left_reached = !left_active || lgfx_attack_abs_i32(ly - target_ly) == 0;
+                bool right_reached = !right_active || lgfx_attack_abs_i32(ry - target_ry) == 0;
+                if (left_reached && right_reached) {
+                    atk[0] = 3u;
+                    atk[12] = (uint8_t)(int8_t)1;
+                    atk[13] = (uint8_t)(int8_t)-1;
+                    lgfx_band_wr_i16(atk + 4, right_x);
+                    lgfx_band_wr_i16(atk + 6, left_x);
+                    mp_printf(&mp_plat_print, "MONK_ATTACK_NATIVE_PHASE enemy=%d phase=sweep left_slot=%d right_slot=%d\n",
+                        (int)ei,
+                        (int)slot_left,
+                        (int)slot_right);
+                }
+                changed += 1;
+            } else if (phase == 3u) {
+                int32_t left_dir = lgfx_attack_dir_i32(atk[12], 1);
+                int32_t right_dir = lgfx_attack_dir_i32(atk[13], -1);
+                if (left_active) {
+                    lx = lgfx_attack_move_dir_to_limit_i32(lx, target_lx, left_dir, speed_px);
+                    lgfx_attack_set_scripted_orb(left_orb, slot_left, lx, ly);
+                }
+                if (right_active) {
+                    rx = lgfx_attack_move_dir_to_limit_i32(rx, target_rx, right_dir, speed_px);
+                    lgfx_attack_set_scripted_orb(right_orb, slot_right, rx, ry);
+                }
+                bool left_reached = !left_active || lgfx_attack_reached_dir_i32(lx, target_lx, left_dir);
+                bool right_reached = !right_active || lgfx_attack_reached_dir_i32(rx, target_rx, right_dir);
+                if (left_reached && right_reached) {
+                    if (left_active) lgfx_attack_set_detached_orb(left_orb, slot_left, lx, ly);
+                    if (right_active) lgfx_attack_set_detached_orb(right_orb, slot_right, rx, ry);
+                    atk[0] = 0u;
+                    atk[2] = 0xFFu;
+                    atk[3] = 0xFFu;
+                    atk[12] = 0u;
+                    atk[13] = 0u;
+                    mp_printf(&mp_plat_print, "MONK_ATTACK_NATIVE_DONE enemy=%d left_slot=%d right_slot=%d\n",
+                        (int)ei,
+                        (int)slot_left,
+                        (int)slot_right);
+                }
+                changed += 1;
+            }
+        }
+        atk[1] = current_cd;
+    }
+    return mp_obj_new_int(changed);
+}
+MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lgfx_update_monk_attack_native_obj, 14, 14, lgfx_update_monk_attack_native);
 
 } // extern "C"
 

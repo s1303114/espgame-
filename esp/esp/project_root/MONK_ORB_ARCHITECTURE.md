@@ -2,6 +2,34 @@
 
 本文件說明目前 `monk encounter + monk orb + monk body movement` 在 runtime 內的實際架構、狀態機與資料流。
 
+## 0. 最新現況快照（2026-06-07）
+
+目前 monk 是 `encounter actor + live enemy slot` 的混合架構，不是開場就存在的普通 live enemy。intro 前只有 Python encounter template；intro 完成後才接到 live enemy row 與 native buffers。玩家在 monk 區域 respawn 時，現有 live monk slot 會被隱藏並重用，清掉 orb/attack state 後重新跑 intro，不會重複 append 新 monk。
+
+目前板上 tuning：
+
+- `MONK_INTRO_DROP_SPEED = 3`
+- `MONK_INTRO_TARGET_Y = 56`
+- `MONK_INTRO_START_OFFSET_Y = 96`
+- `MONK_HOVER_BASE_Y = 55`
+- `MONK_HOVER_MIN_X = 1616`
+- `MONK_HOVER_MAX_X = 1887`
+- `MONK_RESPAWN_REINTRO_MIN_X = 1500`
+
+目前 native 狀態：
+
+- intro drop update 優先使用 `lgfx.update_monk_intro_native(...)`，Python 保留 fallback / orchestration
+- live body hover 使用 native enemy update 的 static monk branch
+- live orb update / descriptor / picker 使用 C++ native API
+- monk attack controller 使用 native `lgfx.update_monk_attack_native(...)`
+- type 1 attack：兩顆 orb split/drop/sweep
+- type 2 attack：五顆 orb pulse，半徑 `28 -> 128 -> 28`，timing `60/40/60`
+- action modes `2 captured_return`、`4 scripted_attack`、`5 pulse_damage` 造成玩家死亡
+- mode `1 detached`、`6 pulse_hold` 使用公轉色，不傷害玩家
+- action orb 彼此 `16x16` hitbox 重疊時會停在當前 `current_x/current_y`，轉成 detached 公轉色，之後等待射線捕捉回 orbit
+
+本次抓到一組板上 FPS sample：`PROFILE total_us=39474`、`PROFILE fps=25.33`，同段 log 後續 sample 約 `24.4-25.4 fps`。
+
 ## 1. 範圍
 
 目前要分成三條線看：
@@ -9,12 +37,16 @@
 - `monk encounter lifecycle`：主要在 MicroPython runtime 內處理
 - `live monk orb`：熱路徑已搬到 C++ native buffer / native API
 - `monk body movement`：位置更新已搬到 C++ native enemy update
+- `monk intro drop`：update 優先走 C++ native API，Python 保留 fallback / lifecycle orchestration
+- `live monk attack`：type 1 / type 2 attack state update 已搬到 C++ native API
 
 也就是說，現在 monk 已不是單一 Python-only actor，而是：
 
-- Python 維護 encounter / intro / swap apply / scripted fallback 高階語義
+- Python 維護 encounter / intro / swap apply / respawn reintro / scripted fallback 高階語義
+- C++ 維護 intro body/orb drop update
 - C++ 維護 monk 本體每幀 movement
 - C++ 維護 live orb state update、descriptor packing、swap target picking
+- C++ 維護 live attack phase state 與 attack orb scripted movement
 - C++ band renderer 只畫最後 descriptors
 
 其中 `encounter lifecycle` 仍然不進 native enemy AI；live orb 則已是 native packed buffer 主導。它們的實際落點如下：
@@ -49,6 +81,7 @@ monk body movement 的 native 落點：
 - C++ update：`lgfx.update_monk_orbs_native(...)`
 - C++ descriptor packing：`lgfx.pack_monk_orb_descriptors_native(...)`
 - C++ swap target picking：`lgfx.pick_swappable_monk_orb_native(...)`
+- C++ attack update：`lgfx.update_monk_attack_native(...)`
 - Python fallback：`_pack_monk_orb_descriptors(...)`、`_pick_swappable_monk_orb(...)`
 
 ## 2. 核心概念
@@ -78,6 +111,7 @@ monk body movement 的 native 落點：
 - detached 後的 world-space 固定位置
 - captured return 的幾何回收
 - swap target 的可選取語義
+- attack 期間兩顆 scripted orb 的 native current position
 
 目前 encounter state 有三種：
 
@@ -102,11 +136,16 @@ monk body movement 的 native 落點：
 - 當自己的那條射線旋轉掃過它時吸附回線上
 - 吸附後沿線朝中心縮回正常公轉半徑
 
-目前狀態機有三種 mode：
+目前 live orb native mode：
 
-- `orbit`
-- `detached`
-- `captured_return`
+- `0 orbit`
+- `1 detached`
+- `2 captured_return`
+- `3 scripted_intro`
+- `4 scripted_attack`
+- `5 pulse_damage`
+- `6 pulse_hold`
+- `255 unused`
 
 ## 3. 正常公轉
 
@@ -170,7 +209,11 @@ live modes 對應：
 - `2`：captured_return
 - `3`：scripted_intro
 - `4`：scripted_attack
+- `5`：pulse_damage
+- `6`：pulse_hold
 - `255`：unused
+
+目前同一個 mode byte 也決定 sprite row 與 damage：`0 orbit` / `1 detached` / `3 scripted_intro` / `6 pulse_hold` 維持目前公轉顏色；`2 captured_return`、`4 scripted_attack`、`5 pulse_damage` 使用第二色，碰到玩家會死亡。
 
 一般 live path 現在不再每幀把 C buffer sync 回 Python dict；Python dict 只保留 fallback、debug、scripted mode shadow 用途。
 
@@ -201,7 +244,38 @@ Python shadow 每顆 orb 目前保存：
 - `_MONK_ORB_MODE_SCRIPTED_INTRO`
 - `_MONK_ORB_MODE_SCRIPTED_ATTACK`
 
-其中 intro 已經在主線啟用；attack controller 仍預設關閉。
+其中 intro 與 attack type 1 都已在主線啟用。`scripted_attack` 的 authoritative position 在 `monk_orb_c_buf.current_x/current_y`，Python dict 只保留 shadow/fallback/debug 欄位。
+
+attack controller 另有一組 native buffer：
+
+- `monk_attack_c_buf`
+- `_MONK_ATTACK_NATIVE_STRIDE = 16`
+
+每筆 attack row：
+
+- `0`: `phase`，`0 idle`、`1 split`、`2 drop`、`3 sweep`、`4 pulse_expand`、`5 pulse_hold`、`6 pulse_shrink`
+- `1`: `prev_hover_cd`
+- `2`: left attack slot，idle 時 `0xFF`；pulse phase 時是 phase step counter
+- `3`: right attack slot，idle 時 `0xFF`
+- `4..5`: left target X
+- `6..7`: right target X
+- `8..9`: left target Y
+- `10..11`: right target Y
+- `12`: left horizontal direction，signed byte
+- `13`: right horizontal direction，signed byte
+- `14`: attack cadence toggle；waypoint interval 交替觸發，`0` 表示這次可攻擊，`1` 表示這次 skip
+- `15`: attack type turn；`0` 表示下一次可攻擊機會用 type 1，`1` 表示下一次可攻擊機會嘗試 type 2 pulse
+
+monk 區域 respawn reintro 不會重建整組 enemy runtime。`_reset_monk_for_respawn_reintro(enemy_rt)` 會就地處理現有 live monk slot：
+
+- 將 live monk row visible 設為 `0`
+- reset 該 enemy state
+- 將該 monk 的 `monk_orb_states` 清為 `None`
+- 將對應 `monk_orb_c_buf` entries 設為 mode `255 unused`
+- 將對應 `monk_attack_c_buf` phase 清回 idle
+- encounter 回到 `inactive`，intro state 設為 `idle + armed`
+
+下一次 `camera_x >= 1600` 時會重新進入 `intro_drop`；intro 完成後 `_instantiate_live_monk_from_encounter(...)` 會復用該 live slot，不再 append 新 row。
 
 另外 encounter 本身目前還會保存：
 
@@ -242,6 +316,7 @@ Python shadow 每顆 orb 目前保存：
   - `detached_y`
 - orb 不主動追線
 - 等自己的那條線轉到它附近
+- 使用公轉色 sprite，不造成傷害
 
 ### 5.3 `captured_return`
 
@@ -250,6 +325,46 @@ Python shadow 每顆 orb 目前保存：
 - orb 只沿著線 inward return
 - 半徑由 `return_radius` 向 `_MONK_ORB_RADIUS` 收斂
 - 到達正常公轉半徑後切回 `orbit`
+- 使用第二色 sprite，16x16 hitbox 碰到玩家會死亡
+
+### 5.4 `scripted_attack`
+
+- attack type 1 期間使用
+- 只由 `lgfx.update_monk_attack_native(...)` 推進
+- `lgfx.update_monk_orbs_native(...)` 對 mode `4` 只保留目前 `current_x/current_y`，不重新計算公轉位置
+- descriptor packing、swap target picking、swap candidate distance 都必須讀 `monk_orb_c_buf.current_x/current_y`
+- Python shadow 不可把 `scripted_attack` 視為需要 render fallback 的 scripted mode，否則畫面會切回 stale Python orbit/script position
+- 使用第二色 sprite，16x16 hitbox 碰到玩家會死亡
+
+### 5.5 `pulse_damage` / `pulse_hold`
+
+- attack type 2 期間使用
+- 5 顆 orb 必須全在 `orbit` 才會啟動；若有任一顆 detached / captured_return / scripted_attack，這次 type 2 不發動，下一個可攻擊機會仍會再嘗試 type 2
+- 5 顆 orb 保持在各自旋轉射線上，角度照一般公轉走，只改半徑
+- 半徑流程：`28 -> 128` 花 60 frame，`128` 停 40 frame，`128 -> 28` 花 60 frame
+- expand / shrink 使用 mode `5 pulse_damage`，第二色 sprite，碰到玩家會死亡
+- hold 使用 mode `6 pulse_hold`，公轉色 sprite，不造成傷害
+- pulse 期間若其中一顆被 swap，該顆進入一般 `detached -> captured_return -> orbit` 流程；其他仍在 pulse 的 orb 不取消，繼續目前 expand / hold / shrink phase
+- 完成後全部回到 mode `0 orbit`、半徑 `28`
+
+### 5.6 第二色 damage
+
+第二色 orb damage 目前由小型 Python helper module 處理：
+
+- `sd_game_template/game/monk_orb_damage.py`
+- runtime import 名稱：`monk_orb_damage`
+- main loop 在玩家 movement / collision settle 後呼叫 `monk_orb_damage.action_hit_player(...)`
+
+此 helper 直接掃描 `monk_orb_c_buf`：
+
+- stride 仍為 `_MONK_ORB_NATIVE_STRIDE = 16`
+- mode `2 captured_return`、`4 scripted_attack`、`5 pulse_damage` 視為可傷害玩家
+- hitbox 使用 orb 的 `current_x/current_y` 與固定 `16x16`
+- 命中時回傳 `(orb_index, mode, x, y)`，主迴圈會印 `PLAYER_KILLED_BY_MONK_ORB ...`，再把玩家導入既有 `PLAYER_DEAD_WAIT_RESPAWN` 流程
+
+攻擊色 orb 之間也會用同一個 `16x16` hitbox 做重疊判定。若任兩顆 mode `2 captured_return`、`4 scripted_attack`、`5 pulse_damage` 的 hitbox 重疊，重疊到的 orb 會停在各自當前 `current_x/current_y`，轉成 mode `1 detached`，因此變回公轉色且不再傷害玩家。之後照既有 detached 規則等待射線捕捉，進 `captured_return` 回 orbit。若是在 type 2 pulse 中發生，只有重疊到的 orb 離開 pulse，其他 pulse orb 繼續目前 phase。
+
+設計原因：`app_camera_test.py` 已接近 MicroPython bytecode 上限。曾將完整 damage scan helper 直接放入主檔，板上啟動會出現 `RuntimeError: bytecode overflow`；因此新增 runtime 行為應優先拆小 module，主迴圈只留短呼叫。
 
 ## 6. 吸附條件
 
@@ -308,7 +423,7 @@ Python fallback 座標 helper 仍保留：
 - swap target picking 直接讀 `monk_orb_c_buf.current_x/current_y`
 - swap apply 優先讀 / 寫 `monk_orb_c_buf`
 
-只有 fallback、scripted mode 或 debug shadow 需要 Python dict 座標同步。
+只有 fallback、`scripted_intro` 或 debug shadow 需要 Python dict 座標同步。`scripted_attack` 已 native 化，render descriptor 必須繼續走 C API。
 
 ## 8. 與 swap 的接法
 
@@ -342,12 +457,15 @@ Python 仍負責真正 swap apply，不把 full world swap 搬進 C++。
 交換後會：
 
 - 玩家移到 orb 當前位置
-- orb native buffer 寫入：
-  - `detached_x`
-  - `detached_y`
-- `current_x/current_y`
-- `mode = detached`
-- `return_radius` 設回 baseline，等待之後被捕捉
+- 若 orb 不是 attack orb：orb native buffer 寫入 `detached_x/detached_y/current_x/current_y`，`mode = detached`，`return_radius` 設回 baseline，等待之後被捕捉
+- 若 orb 是 attack orb：orb native buffer 寫入新的 `current_x/current_y`，但 `mode` 保持 `scripted_attack`，attack state 的 slot 不變
+
+attack swap continuation 的實際語義：
+
+- phase 1 split：被玩家交換後，該 orb 從交換後位置繼續沿原本水平方向移動
+- phase 2 drop：被玩家交換後，繼續朝指定 Y 收斂；若交換後已越過指定 Y，則往回移到指定 Y
+- phase 3 sweep：被玩家交換後，繼續沿原本 sweep 水平方向移動
+- phase done：兩顆 attack orb 進 `detached` 回收模式，與一般被玩家交換後一樣等待 orb ring 捕捉
 
 目前還有兩個重要語義修正已落地：
 
@@ -367,10 +485,27 @@ live orb 主要入口：
 
 1. 讀 `enemy_rows_c_buf` 與 `monk_orb_c_buf`
 2. 直接使用 native `current_x/current_y`
-3. 產生 `_SPECIAL_KIND_MONK_ORB` descriptors（8 bytes：`x i16, y i16, kind, slot, 0, 0`）
+3. 產生 `_SPECIAL_KIND_MONK_ORB` descriptors（8 bytes：`x i16, y i16, kind, slot, mode, 0`）
 4. 交給 native band renderer
 
-Python `_pack_monk_orb_descriptors(...)` 仍保留為 fallback。scripted intro / scripted attack mode 若尚未完全 native 化，會優先走 fallback。
+Python `_pack_monk_orb_descriptors(...)` 仍保留為 fallback。現在只有 `scripted_intro` 會優先走 fallback；`scripted_attack` 已完全走 native descriptor。
+
+目前重要約定：
+
+- `scripted_intro` 仍可觸發 Python descriptor fallback
+- `scripted_attack` 不可觸發 Python descriptor fallback，必須繼續用 `lgfx.pack_monk_orb_descriptors_native(...)`
+- descriptor byte 6 必須保存 native mode，native renderer 依此選擇公轉色或第二色
+- 否則被 swap 的 attack orb 會看起來停住，另一顆 attack orb 會看起來回到 stale Python 公轉位置
+
+目前 monk orb atlas source：
+
+- `OBJECTS_ATLAS_RGB565_PATH = "game/picture/object/object_altes_wire.rgb565"`
+- `ENEMY_MONK_ORB_ATLAS_RGB565_PATH = "game/picture/object/object_altes_wire.rgb565"`
+- 公轉 / detached / intro sprite：`(96,16,16,16)`
+- captured_return / scripted_attack / pulse_damage sprite：`(96,32,16,16)`
+- pulse_hold sprite：`(96,16,16,16)`
+
+因 object atlas 與 monk orb atlas path / size 相同，runtime 會重用同一份已載入 bytes，避免 RAM 中存在兩份 256x256 RGB565 atlas。
 
 因此 live orb path 現在是：C++ 更新 state/current，C++ 產生 descriptor，C++ renderer 畫 descriptor；Python 只處理高階 lifecycle / swap apply。
 
@@ -425,7 +560,7 @@ Python `_pack_monk_orb_descriptors(...)` 仍保留為 fallback。scripted intro 
 
 - `MONK_HOVER_MIN_X = 1616`
 - `MONK_HOVER_MAX_X = 1887`
-- `MONK_HOVER_BASE_Y = 71`
+- `MONK_HOVER_BASE_Y = 55`
 - `MONK_HOVER_AMP = 39`
 - `MONK_HOVER_PHASE_STEP = 1`
 - `MONK_HOVER_WAVE_AMP_X = 0`
@@ -497,9 +632,11 @@ Python `_pack_monk_orb_descriptors(...)` 仍保留為 fallback。scripted intro 
 
 目前 live monk/orb 相關 native API：
 
+- `lgfx.update_monk_intro_native(...)`
 - `lgfx.update_monk_orbs_native(...)`
 - `lgfx.pack_monk_orb_descriptors_native(...)`
 - `lgfx.pick_swappable_monk_orb_native(...)`
+- `lgfx.update_monk_attack_native(...)`
 
 板上啟動驗證應看到：
 
@@ -511,9 +648,25 @@ Python `_pack_monk_orb_descriptors(...)` 仍保留為 fallback。scripted intro 
 ```python
 import lgfx
 print(hasattr(lgfx, "update_monk_orbs_native"))
+print(hasattr(lgfx, "update_monk_intro_native"))
 print(hasattr(lgfx, "pack_monk_orb_descriptors_native"))
 print(hasattr(lgfx, "pick_swappable_monk_orb_native"))
+print(hasattr(lgfx, "update_monk_attack_native"))
 ```
+
+attack swap 驗證 marker：
+
+- `MONK_ATTACK_NATIVE_START ...`
+- `MONK_ATTACK_NATIVE_PHASE ... phase=drop`
+- `MONK_ATTACK_NATIVE_PHASE ... phase=sweep`
+- `MONK_ATTACK_NATIVE_SKIP ...`
+- `SWAP_MONK_ORB_ATTACK_CONTINUE ...`
+- `MONK_ATTACK_NATIVE_DONE ...`
+- `PLAYER_KILLED_BY_MONK_ORB ...`
+- `PLAYER_DEAD_WAIT_RESPAWN ...`
+- `MONK_RESPAWN_REINTRO_RESET ...`
+
+最近已驗證：`MONK_ORB_DESC_IMPL=C_API`、`SWAP_MONK_ORB_ATTACK_CONTINUE` 出現後，attack 仍會繼續進入 drop/sweep/DONE，且沒有 `MONK_ATTACK_NATIVE_FAIL` / `MONK_ORB_DESC_NATIVE_FAIL`。攻擊 cadence 已改為 waypoint interval 一次攻擊、一次 skip，板上 log 出現 `MONK_ATTACK_NATIVE_START ...` -> `MONK_ATTACK_NATIVE_DONE ...` -> `MONK_ATTACK_NATIVE_SKIP ...` -> 下一次 `MONK_ATTACK_NATIVE_START ...`。第二色 orb damage 也已在板上 log 出現 `PLAYER_KILLED_BY_MONK_ORB index=11 mode=2 ...`，並接續 `PLAYER_DEAD_WAIT_RESPAWN checkpoint=1 camera_target=0`。
 
 最近 profile 紀錄：
 
@@ -536,6 +689,21 @@ swap burst sample：
 - 無 `Traceback`
 - 無 `SAFE MODE`
 - 無 `MONK_ORB_PICK_NATIVE_FAIL`
+
+2026-06-07 重新抓的一組 profile/FPS sample：
+
+- log：`/tmp/monk_fps_sample.log`
+- `SUBMIT_MODE=NATIVE_BAND_PIPELINE`
+- `BAND_PIPELINE_NATIVE_ON h=48`
+- `MONK_ORB_UPDATE_IMPL=C_API`
+- `MONK_ORB_DESC_IMPL=C_API`
+- `PROFILE update_us=7062`
+- `PROFILE submit_us=31582`
+- `PROFILE submit_wait_us=17010`
+- `PROFILE submit_dma_wait_us=16906`
+- `PROFILE total_us=39474`
+- `PROFILE fps=25.33`
+- 後續 sample 約在 `24.4-25.4 fps`
 
 這代表目前高點主要是 swap/debug burst，不是 live orb steady-state update 退步。
 
@@ -621,10 +789,11 @@ swap burst sample：
 目前已板上驗證的關鍵訊號：
 
 - `MONK_ENCOUNTER_STATE=intro_drop`
-- `MONK_INTRO_START encounter=0 x=1744 y=72`
-- `MONK_INTRO_DONE encounter=0 x=1744 y=72`
-- `MONK_LIVE_INSTANTIATED idx=... x=1744 y=72`
+- `MONK_INTRO_START encounter=0 x=1744 y=56`
+- `MONK_INTRO_DONE encounter=0 x=1744 y=56`
+- `MONK_LIVE_INSTANTIATED idx=... x=1744 y=56`
 - `MONK_ENCOUNTER_STATE=live`
+- `MONK_RESPAWN_REINTRO_RESET player_x=...`（monk 區域 respawn 時）
 
 也就是說，monk 現在不再是「開場就藏在 live enemy set 裡」，而是完整的延遲 encounter actor。
 

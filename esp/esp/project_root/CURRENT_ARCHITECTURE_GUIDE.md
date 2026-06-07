@@ -2,6 +2,30 @@
 
 本文件整理目前板上實際主線。核心原則：internal flash 只做 launcher；遊戲程式與資產全部從 `/sd/game` 載入；一般高層遊戲狀態仍由 Python 編排，重型畫面合成、live enemy update 與 TFT submit 交給 C++ native API。monk 目前已不是單一 live enemy，而是 `inactive -> intro_drop -> live` 的 encounter actor。
 
+## 0. 最新現況快照（2026-06-07）
+
+目前板上主線仍是 SD-only runtime：internal flash 只放 `/boot.py`、`/main.py`，正式遊戲從 `/sd/game/config.py` 與 `/sd/game/app_camera_test.py` 啟動。正式 renderer 是 `ROWS_SAFE_PROGRESSIVE` + `NATIVE_BAND_PIPELINE`，band 高度 `48`，wire-order submit 開啟。
+
+目前 monk/orb 最新行為：
+
+- intro drop 速度：`MONK_INTRO_DROP_SPEED = 3`
+- intro body 目標 Y：`MONK_INTRO_TARGET_Y = 56`
+- live hover base Y：`MONK_HOVER_BASE_Y = 55`
+- monk 區域重生門檻：`MONK_RESPAWN_REINTRO_MIN_X = 1500`
+- 玩家在 monk 區域重生時，會觸發 `MONK_RESPAWN_REINTRO_RESET ...`，live monk slot 會被隱藏並重用，下一輪重新跑 intro
+- monk attack 目前有 type 1 split/drop/sweep 與 type 2 five-orb pulse；type 2 半徑 `28 -> 128 -> 28`，timing 是 `60/40/60`
+- action 色 orb mode `2/4/5` 會傷害玩家；action orb 彼此以 `16x16` hitbox 重疊時會停在當前位置、轉回 detached 公轉色、停止傷害
+
+本次抓到的一組板上 profile/FPS（`/tmp/monk_fps_sample.log`，`CAMERA_RUNTIME_VERBOSE=True`）：
+
+- `PROFILE update_us=7062`
+- `PROFILE submit_us=31582`
+- `PROFILE submit_wait_us=17010`
+- `PROFILE submit_dma_wait_us=16906`
+- `PROFILE total_us=39474`
+- `PROFILE fps=25.33`
+- 同一段 log 後續 sample 約在 `24.4-25.4 fps`
+
 ## 1. 啟動路徑
 
 - internal flash：`/boot.py`、`/main.py`
@@ -47,8 +71,9 @@ Python (`app_camera_test.py`) 負責：
 - camera tracking
 - respawn / checkpoint
 - monk encounter lifecycle
-- monk intro actor update
+- monk intro actor high-level trigger / handoff（intro drop update 已優先走 native API，Python 保留 fallback / orchestration）
 - monk intro / live handoff
+- monk-area respawn reintro reset
 - object / overlay / enemy render descriptor 打包
 - 主迴圈 profile 與 fallback 控制
 
@@ -76,9 +101,11 @@ C++ (`lgfx` user module) 負責：
 
 目前 monk 的責任分層是：
 
-- Python：encounter lifecycle、intro drop、intro/live handoff、swap apply、scripted/fallback shadow state
+- Python：encounter lifecycle orchestration、intro/live handoff、monk-area respawn reintro、swap apply、scripted/fallback shadow state
 - C++：live monk hover / waypoint movement、live enemy native update
+- C++：monk intro drop state update（Python 仍保留 fallback）
 - C++：live orb state update、live orb descriptor packing、monk orb swap target picking
+- C++：live monk attack phase update、attack orb scripted movement
 - C++ renderer：intro/live descriptor 最終合成與 submit
 
 ## 4. 渲染主線
@@ -143,11 +170,13 @@ enemy update 已搬到 C++：
 - `enemy_bullets`
 - `object_solids_c_buf`
 - `monk_orb_c_buf`
+- `monk_attack_c_buf`
 
-另外目前 monk 還有兩組關鍵狀態：
+另外目前 monk 還有三組關鍵狀態：
 
 - `monk_encounters`
 - `monk_hover_c_buf`
+- `monk_attack_c_buf`
 
 其中：
 
@@ -156,7 +185,10 @@ enemy update 已搬到 C++：
 - `enemy_bullets` 先 `ensure_capacity(enemy_max_bullets)`，讓 native update 直接重用 pool
 - `monk_hover_c_buf` 在 monk 進入 live 時會擴充一筆新 row，並同步更新 `monk_hover_c_count`
 - `monk_orb_c_buf` 在 monk 進入 live 時會擴充，live orb 的 authoritative state 目前在這個 buffer
+- `monk_attack_c_buf` 在 monk 進入 live 後按 enemy count 擴充，保存 attack phase、左右 attack slot、phase target、水平移動方向與 waypoint interval attack cadence toggle
 - `enemy_rows_c_buf` 在 monk `intro -> live` handoff 時也會擴充並同步 `enemy_rows_c_count`
+- monk 區域 respawn reintro 不再 append 新 live monk；它會隱藏並重用現有 live monk slot，清掉該 slot 的 orb/attack state，再讓 encounter 回到 `inactive` + intro armed
+- `monk_orb_damage.py` 是小型 Python helper module，掃描 `monk_orb_c_buf` 的第二色 modes；主檔 `app_camera_test.py` 已接近 MicroPython bytecode 上限，新增 runtime 行為優先拆 helper module
 
 這兩個 count 同步目前已是必要條件，否則會出現 monk 看起來 instantiate 成功，但 native update 根本沒開始處理新 row 的停住問題。
 
@@ -175,8 +207,11 @@ live orb state 則已 native 化：
 - `lgfx.update_monk_orbs_native(...)` 更新 `mode/current_x/current_y/return_radius`
 - `lgfx.pack_monk_orb_descriptors_native(...)` 產生 `_SPECIAL_KIND_MONK_ORB` render descriptor
 - `lgfx.pick_swappable_monk_orb_native(...)` 負責 near/far monk orb target picking
+- `lgfx.update_monk_attack_native(...)` 負責 attack type 1 的 split/drop/sweep phase update
 - Python `_swap_with_monk_orb(...)` 仍負責真正 swap apply，並直接寫回 `monk_orb_c_buf`
-- 一般 live path 不再每幀把 C buffer sync 回 Python dict；dict 只保留 fallback / scripted / debug shadow 用途
+- Python `monk_orb_damage.action_hit_player(...)` 將 mode `2 captured_return`、`4 scripted_attack`、`5 pulse_damage` 視為第二色 damage orb；碰到玩家會沿用既有死亡 / respawn 流程。mode `1 detached` 與 `6 pulse_hold` 是公轉色，不造成傷害
+- 一般 live path 不再每幀把 C buffer sync 回 Python dict；dict 只保留 fallback / intro scripted / debug shadow 用途
+- attack orb swap 時，`monk_orb_c_buf` 保持 `scripted_attack` mode，render descriptor 仍必須走 native C API，不能因 Python shadow 有 `scripted_attack` 而 fallback
 
 ## 7. 主要資產
 
@@ -185,7 +220,8 @@ live orb state 則已 native 化：
 - far bg：`/sd/game/picture/backgound/bg_far_wire.rgb565`
 - tilemap CSV：`/sd/game/Tilemap/map_tilemap.csv`
 - tileset：`/sd/game/Tilemap/tilemap_all_wire.rgb565`
-- object atlas：`/sd/game/picture/object/objects_atlas_wire.rgb565`
+- object / monk orb atlas：`/sd/game/picture/object/object_altes_wire.rgb565`
+- legacy object atlas path currently may still exist on SD：`/sd/game/picture/object/objects_atlas_wire.rgb565`
 - object animations：`/sd/game/picture/object/object_animations.json`
 - enemy CSV：`/sd/game/picture/enemy/enemies.csv`
 - enemy sheet：`/sd/game/picture/enemy/enemy_bow_animation_wire.rgb565`
@@ -203,7 +239,14 @@ live orb state 則已 native 化：
 - `ENEMY_UPDATE_IMPL=C_API`
 - `MONK_ORB_UPDATE_IMPL=C_API`
 - `MONK_ORB_DESC_IMPL=C_API`
+- `MONK_ATTACK_NATIVE_START ...`
+- `MONK_ATTACK_NATIVE_PHASE ...`
+- `MONK_ATTACK_NATIVE_SKIP ...`
+- `SWAP_MONK_ORB_ATTACK_CONTINUE ...`
+- `MONK_ATTACK_NATIVE_DONE ...`
+- `PLAYER_KILLED_BY_MONK_ORB ...`
 - `BAND_PIPELINE_SUBMIT_OK`
+- `MONK_RESPAWN_REINTRO_RESET ...`
 - `MONK_ENCOUNTER_STATE=intro_drop`
 - `MONK_INTRO_START ...`
 - `MONK_INTRO_DONE ...`
@@ -237,6 +280,7 @@ internal flash boot.py/main.py
 
 - native orb steady-state sample：`update_avg=6509.7us`、`fps_avg=25.76`
 - swap/debug burst sample：`swap_events=31`、`update_avg=8939.7us`、`update_max=12926us`、`fps_avg=23.68`
+- 2026-06-07 sample：`update_us=7062`、`submit_us=31582`、`total_us=39474`、`fps=25.33`
 
 也就是說，目前 steady-state 已經改善；剩下最顯眼的 update 高點主要來自 swap/debug burst，尤其 `SWAP_*` print 與 Python debug metrics，而不是 live orb update 本身退步。
 
@@ -304,14 +348,13 @@ internal flash boot.py/main.py
 - launcher `SAFE MODE`
 - 啟動階段 `Traceback`
 
-本次啟動後首個 profile window 觀察值：
+2026-06-07 最新 profile window 觀察值：
 
-- `PROFILE update_us=7022`
-- `PROFILE submit_us=40429`
-- `PROFILE submit_compose_us=12172`
-- `PROFILE submit_wait_us=19822`
-- `PROFILE submit_dma_wait_us=19748`
-- `PROFILE total_us=48467`
-- `PROFILE fps=20.63`
+- `PROFILE update_us=7062`
+- `PROFILE submit_us=31582`
+- `PROFILE submit_wait_us=17010`
+- `PROFILE submit_dma_wait_us=16906`
+- `PROFILE total_us=39474`
+- `PROFILE fps=25.33`
 
-這代表目前 SD 上最新 runtime 已可正常進入正式 `ROWS_SAFE_PROGRESSIVE` 主線；目前 bottleneck 結論不變，仍優先指向 native band submit / DMA wait，而不是這次 Python 控制流整理本身。
+這代表目前 SD 上最新 runtime 已可正常進入正式 `ROWS_SAFE_PROGRESSIVE` 主線；這組 sample 仍主要受 native band submit / DMA wait 與 verbose debug 成本影響。

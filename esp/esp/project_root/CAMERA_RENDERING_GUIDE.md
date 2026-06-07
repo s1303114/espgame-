@@ -151,7 +151,7 @@ enemy native update 目前使用常駐 packed buffer，不再每幀重建。
 - `8`: `visible`
 - `9`: `swappable`
 - `10`: `default_facing_sign`
-- `11`: reserved
+- `11`: `static_enemy`，monk hover/waypoint 與 native attack 會用這個欄位判斷是否走 static monk path
 
 ### 6.2 Enemy states
 
@@ -279,6 +279,16 @@ enemy update 搬到 C++ 並改成 persistent buffer 後，敵人區實測大致�
 
 - `render_scene_bands_rgb565(...)`
 - `update_enemies_native(...)`
+- `update_monk_orbs_native(...)`
+- `pack_monk_orb_descriptors_native(...)`
+- `pick_swappable_monk_orb_native(...)`
+- `update_monk_attack_native(...)`
+
+monk attack orb render 的重要約定：`scripted_attack` 期間 descriptor 必須繼續走 native `pack_monk_orb_descriptors_native(...)`，直接讀 `monk_orb_c_buf.current_x/current_y`。只有 `scripted_intro` 需要 Python descriptor fallback；attack 若 fallback 到 Python shadow，畫面會使用 stale orbit/script position。
+
+monk orb descriptor 的第 6 byte 目前保存 native mode。native renderer 用它選顏色：`0 orbit` / `3 scripted_intro` 使用公轉 sprite；`1 detached` / `2 captured_return` / `4 scripted_attack` 使用第二色 sprite。source atlas 為 `object_altes_wire.rgb565`：公轉 / intro 取 `(96,16,16,16)`，detached / return / attack 取 `(96,32,16,16)`。
+
+`OBJECTS_ATLAS_RGB565_PATH` 與 `ENEMY_MONK_ORB_ATLAS_RGB565_PATH` 目前都指向 `game/picture/object/object_altes_wire.rgb565`。`_load_enemy_runtime_assets(...)` 在路徑與尺寸相同時重用已載入的 object atlas bytes，因此 RAM 不持有第二份 256x256 RGB565 atlas。
 
 ## 10. 板上檢查點
 
@@ -293,6 +303,7 @@ enemy update 搬到 C++ 並改成 persistent buffer 後，敵人區實測大致�
 - `SUBMIT_MODE=NATIVE_BAND_PIPELINE`
 - `BAND_PIPELINE_NATIVE_ON h=48`
 - `BAND_PIPELINE_SUBMIT_OK`
+- `PLAYER_KILLED_BY_MONK_ORB ...`
 - `PROFILE update_us=...`
 - `PROFILE submit_us=...`
 - `PROFILE submit_wait_us=...`
