@@ -252,7 +252,7 @@ enemy update 搬到 C++ 並改成 persistent buffer 後，敵人區實測大致�
 - far 背景：`/sd/game/picture/backgound/bg_far_wire.rgb565`
 - tilemap atlas：`/sd/game/Tilemap/tilemap_all_wire.rgb565`
 - tilemap CSV：`/sd/game/Tilemap/map_tilemap.csv`
-- object atlas：`/sd/game/picture/object/objects_atlas_wire.rgb565`
+- object atlas：`/sd/game/picture/object/object_altes_wire.rgb565`
 - object animations：`/sd/game/picture/object/object_animations.json`
 - enemy CSV：`/sd/game/picture/enemy/enemies.csv`
 - enemy sheet：`/sd/game/picture/enemy/enemy_bow_animation_wire.rgb565`

@@ -355,18 +355,19 @@ cd /workspace/esp/esp/project_root
 - `sd_game_template/game/app.py`
 - `sd_game_template/game/app_camera_test.py`
 - `sd_game_template/game/config.py`
-- `sd_game_template/game/sd_config.py`（若使用 SD 專用入口且語法檢查通過）
 
 若只改 object 資產，最小同步集合是：
 
 - `sd_game_template/game/picture/object/objects.csv`
-- `sd_game_template/game/picture/object/objects_atlas_wire.rgb565`
+- `sd_game_template/game/picture/object/object_altes_wire.rgb565`
+
+目前 `config.py` 的 `OBJECTS_ATLAS_RGB565_PATH` 指向 `game/picture/object/object_altes_wire.rgb565`，這是 runtime 實際載入的 object atlas。
 
 建議仍然使用同一個已掛載 session：
 
 ```bash
 /tmp/mpvenv/bin/mpremote resume fs cp sd_game_template/game/picture/object/objects.csv :/sd/game/picture/object/objects.csv
-/tmp/mpvenv/bin/mpremote resume fs cp sd_game_template/game/picture/object/objects_atlas_wire.rgb565 :/sd/game/picture/object/objects_atlas_wire.rgb565
+/tmp/mpvenv/bin/mpremote resume fs cp sd_game_template/game/picture/object/object_altes_wire.rgb565 :/sd/game/picture/object/object_altes_wire.rgb565
 ```
 
 ### 10.2.3 重掛載驗證是否真的寫入外接 SD
@@ -405,7 +406,7 @@ s = open('/sd/game/picture/object/objects.csv', 'r').read()
 print('HAS_MUSHROOM', 'mushroom,decor,1168,160,16,16' in s)
 print('HAS_BOX', 'box,decor,1392,96,32,32' in s)
 print('HAS_MINECART', 'minecart,decor,1360,160,32,32' in s)
-print('ATLAS_SIZE', os.stat('/sd/game/picture/object/objects_atlas_wire.rgb565')[6])"
+print('ATLAS_SIZE', os.stat('/sd/game/picture/object/object_altes_wire.rgb565')[6])"
 ```
 
 若要驗證 native overlay 版本是否真的上到外接 SD，可以把 readback 改成檢查：
@@ -491,7 +492,7 @@ SD 卡根目錄應有：
   picture/backgound/bg_far_wire.rgb565
   picture/object/objects.csv
   picture/object/object_animations.json
-  picture/object/objects_atlas_wire.rgb565
+  picture/object/object_altes_wire.rgb565
   picture/enemy/enemies.csv
   picture/enemy/enemy_bow_animation_wire.rgb565
   picture/player/player_wire.rgb565

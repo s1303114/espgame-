@@ -273,13 +273,53 @@ static constexpr int32_t kMonkOrbPulseStaggerDelay = 12;
 static constexpr int32_t kMonkOrbPulseStaggerMaxDelay = 24;
 static constexpr int32_t kMonkAttackDiveTopY = 0;
 static constexpr int32_t kMonkAttackDiveDropY = 160;
+static constexpr int32_t kMonkOrbFinalMode = 9;
+static constexpr int32_t kMonkOrbFinalPhaseOrbit = 7;
+static constexpr int32_t kMonkOrbFinalPhaseLock = 8;
+static constexpr int32_t kMonkOrbFinalPhaseRush = 9;
+static constexpr int32_t kMonkOrbFinalPhaseReturn = 10;
+static constexpr int32_t kMonkOrbFinalPhaseEject = 11;
+static constexpr int32_t kMonkOrbFinalPhaseDeath = 12;
+static constexpr int32_t kMonkOrbPlayerOrbitMode = 10;
+static constexpr int32_t kMonkOrbFinalOrbitRadius = 44;
+static constexpr int32_t kMonkOrbPlayerOrbitRadius = 36;
+static constexpr int32_t kMonkOrbFinalPrepareFrames = 48;
+static constexpr int32_t kMonkOrbFinalDeathFrames = 12;
+static constexpr int32_t kMonkOrbFinalDeathAnimFrames = 12;
+static constexpr int32_t kMonkOrbFinalRushSpeed = 12;
+static constexpr int32_t kMonkOrbFinalReturnSpeed = 12;
+static constexpr int32_t kMonkOrbFinalDefaultMonkSpeedQ8 = 512;
+static constexpr uint8_t kMonkOrbFinalSwapPending = 1;
+static constexpr uint8_t kMonkHoverStateFinalLocked = 0xFE;
+static constexpr int32_t kMonkOrbFinalTableSize = 60;
+static constexpr int32_t kMonkOrbFinalScale = 1024;
+static const int16_t kMonkOrbFinalCos[kMonkOrbFinalTableSize] = {
+    1024, 1018, 1002, 974, 935, 887, 828, 761, 685, 602,
+    512, 416, 316, 213, 107, 0, -107, -213, -316, -416,
+    -512, -602, -685, -761, -828, -887, -935, -974, -1002, -1018,
+    -1024, -1018, -1002, -974, -935, -887, -828, -761, -685, -602,
+    -512, -416, -316, -213, -107, 0, 107, 213, 316, 416,
+    512, 602, 685, 761, 828, 887, 935, 974, 1002, 1018,
+};
+static const int16_t kMonkOrbFinalSin[kMonkOrbFinalTableSize] = {
+    0, 107, 213, 316, 416, 512, 602, 685, 761, 828,
+    887, 935, 974, 1002, 1018, 1024, 1018, 1002, 974, 935,
+    887, 828, 761, 685, 602, 512, 416, 316, 213, 107,
+    0, -107, -213, -316, -416, -512, -602, -685, -761, -828,
+    -887, -935, -974, -1002, -1018, -1024, -1018, -1002, -974, -935,
+    -887, -828, -761, -685, -602, -512, -416, -316, -213, -107,
+};
 
 static inline bool monk_orb_mode_uses_action_sprite(int32_t mode) {
-    return mode == 2 || mode == 4 || mode == 5;
+    return mode == 2 || mode == 4 || mode == 5 || mode == kMonkOrbFinalMode;
 }
 
 static inline bool monk_orb_mode_is_pickable(int32_t mode) {
-    return mode != 0xFF && mode != 3 && mode != 7 && mode != 8;
+    return mode != 0xFF && mode != 3 && mode != 7 && mode != 8 && mode != kMonkOrbPlayerOrbitMode;
+}
+
+static inline int32_t lgfx_band_abs_i32(int32_t v) {
+    return v < 0 ? -v : v;
 }
 
 static void compose_monk_orb_sprite_band(
@@ -379,8 +419,22 @@ static void compose_enemy_band(
             if (dx >= dst_w || (dx + enemy_monk_frame_w) <= 0 || dy >= dst_h || (dy + enemy_monk_frame_h) <= 0) {
                 continue;
             }
+            bool monk_death = enemy_state == kMonkOrbFinalPhaseDeath;
             int32_t monk_frame_idx = (anim_counter / enemy_monk_frame_hold) % enemy_monk_frame_count;
+            if (monk_death) {
+                int32_t death_anim_frames = kMonkOrbFinalDeathAnimFrames;
+                if (death_anim_frames < enemy_monk_frame_count) {
+                    death_anim_frames = enemy_monk_frame_count;
+                }
+                int32_t death_step = anim_counter;
+                if (death_step < 0) death_step = 0;
+                if (death_step >= death_anim_frames) death_step = death_anim_frames - 1;
+                monk_frame_idx = (death_step * enemy_monk_frame_count) / death_anim_frames;
+                if (monk_frame_idx < 0) monk_frame_idx = 0;
+                if (monk_frame_idx >= enemy_monk_frame_count) monk_frame_idx = enemy_monk_frame_count - 1;
+            }
             int32_t src_x = monk_frame_idx * enemy_monk_frame_w;
+            int32_t src_y = monk_death ? enemy_monk_frame_h : 0;
             compose_atlas_region_band(
                 dst,
                 dst_w,
@@ -391,9 +445,9 @@ static void compose_enemy_band(
                 wy,
                 enemy_monk_sheet,
                 enemy_monk_frame_w * enemy_monk_frame_count,
-                enemy_monk_frame_h,
+                enemy_monk_frame_h * (monk_death ? 2 : 1),
                 src_x,
-                0,
+                src_y,
                 enemy_monk_frame_w,
                 enemy_monk_frame_h,
                 enemy_key
@@ -520,6 +574,7 @@ static void compose_special_objects_band(
         int32_t kind = (int32_t)sb[4];
         int32_t frame_index = (int32_t)sb[5];
         int32_t aux0 = (int32_t)sb[6];
+        int32_t aux1 = (int32_t)sb[7];
         const uint8_t *sheet = nullptr;
         int32_t frame_w = 0;
         int32_t frame_h = 0;
@@ -559,6 +614,80 @@ static void compose_special_objects_band(
                 orb_atlas_h,
                 special_key
             );
+            continue;
+        } else if (kind == 3) {
+            int32_t sx = (int32_t)wx;
+            int32_t sy = (int32_t)wy;
+            int32_t ex = sx + (int32_t)((int8_t)frame_index);
+            int32_t ey = sy + (int32_t)((int8_t)aux0);
+            int32_t thickness = aux1 < 1 ? 1 : aux1;
+            if (thickness > 6) thickness = 6;
+            int32_t min_x = sx < ex ? sx : ex;
+            int32_t max_x = sx > ex ? sx : ex;
+            int32_t min_y = sy < ey ? sy : ey;
+            int32_t max_y = sy > ey ? sy : ey;
+            min_x -= thickness;
+            max_x += thickness;
+            min_y -= thickness;
+            max_y += thickness;
+            if (max_x < camera_x || min_x >= (camera_x + dst_w) || max_y < band_top || min_y >= (band_top + dst_h)) {
+                continue;
+            }
+            int32_t steps = lgfx_band_abs_i32(ex - sx);
+            int32_t dy_abs = lgfx_band_abs_i32(ey - sy);
+            if (dy_abs > steps) steps = dy_abs;
+            if (steps < 1) steps = 1;
+            int32_t half = thickness / 2;
+            for (int32_t step = 0; step <= steps; ++step) {
+                int32_t px = sx + (((ex - sx) * step) / steps) - camera_x;
+                int32_t py = sy + (((ey - sy) * step) / steps) - band_top;
+                for (int32_t ty = 0; ty < thickness; ++ty) {
+                    int32_t yy = py + ty - half;
+                    if (yy < 0 || yy >= dst_h) continue;
+                    for (int32_t tx = 0; tx < thickness; ++tx) {
+                        int32_t xx = px + tx - half;
+                        if (xx < 0 || xx >= dst_w) continue;
+                        size_t off = (((size_t)yy * (size_t)dst_w) + (size_t)xx) * 2u;
+                        dst[off] = 0u;
+                        dst[off + 1] = 0u;
+                    }
+                }
+            }
+            continue;
+        } else if (kind == 4) {
+            int32_t frame_w = frame_index;
+            int32_t frame_h = aux0;
+            int32_t thickness = aux1 < 1 ? 2 : aux1;
+            if (thickness > 6) thickness = 6;
+            if (frame_w <= 0 || frame_h <= 0) {
+                continue;
+            }
+            int32_t dx = (int32_t)wx - camera_x;
+            int32_t dy = (int32_t)wy - band_top;
+            if (dx >= dst_w || (dx + frame_w) <= 0 || dy >= dst_h || (dy + frame_h) <= 0) {
+                continue;
+            }
+            int32_t top0 = dy;
+            int32_t top1 = dy + thickness;
+            int32_t bottom0 = dy + frame_h - thickness;
+            int32_t bottom1 = dy + frame_h;
+            int32_t left0 = dx;
+            int32_t left1 = dx + thickness;
+            int32_t right0 = dx + frame_w - thickness;
+            int32_t right1 = dx + frame_w;
+            for (int32_t yy = top0; yy < bottom1; ++yy) {
+                if (yy < 0 || yy >= dst_h) continue;
+                bool y_border = (yy >= top0 && yy < top1) || (yy >= bottom0 && yy < bottom1);
+                for (int32_t xx = left0; xx < right1; ++xx) {
+                    if (xx < 0 || xx >= dst_w) continue;
+                    if (!y_border && !((xx >= left0 && xx < left1) || (xx >= right0 && xx < right1))) {
+                        continue;
+                    }
+                    size_t off = (((size_t)yy * (size_t)dst_w) + (size_t)xx) * 2u;
+                    dst[off] = 0x07u;
+                    dst[off + 1] = 0xE0u;
+                }
+            }
             continue;
         } else {
             continue;
@@ -1447,6 +1576,247 @@ static int32_t lgfx_band_visible_target_distance2(
     return (dx * dx) + (dy * dy);
 }
 
+static inline int32_t lgfx_band_rd_i32(const uint8_t *p) {
+    uint32_t uv = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+    return (int32_t)uv;
+}
+
+static inline void lgfx_band_wr_i32(uint8_t *p, int32_t v) {
+    uint32_t uv = (uint32_t)v;
+    p[0] = (uint8_t)(uv & 0xFFu);
+    p[1] = (uint8_t)((uv >> 8) & 0xFFu);
+    p[2] = (uint8_t)((uv >> 16) & 0xFFu);
+    p[3] = (uint8_t)((uv >> 24) & 0xFFu);
+}
+
+static inline bool lgfx_swap_preview_candidate_better(bool pick_far, int32_t d2, int32_t best_d2) {
+    return best_d2 < 0 || (pick_far ? (d2 > best_d2) : (d2 < best_d2));
+}
+
+static inline void lgfx_swap_preview_consider(
+    bool pick_far,
+    int32_t kind,
+    int32_t index,
+    int32_t slot,
+    int32_t x,
+    int32_t y,
+    int32_t w,
+    int32_t h,
+    int32_t d2,
+    int32_t *best_kind,
+    int32_t *best_index,
+    int32_t *best_slot,
+    int32_t *best_x,
+    int32_t *best_y,
+    int32_t *best_w,
+    int32_t *best_h,
+    int32_t *best_d2
+) {
+    if (d2 < 0 || !lgfx_swap_preview_candidate_better(pick_far, d2, *best_d2)) {
+        return;
+    }
+    *best_kind = kind;
+    *best_index = index;
+    *best_slot = slot;
+    *best_x = x;
+    *best_y = y;
+    *best_w = w;
+    *best_h = h;
+    *best_d2 = d2;
+}
+
+static inline bool lgfx_swap_preview_same_target(int32_t kind, int32_t index, int32_t slot, int32_t other_kind, int32_t other_index, int32_t other_slot) {
+    return kind == other_kind && index == other_index && slot == other_slot;
+}
+
+static inline void lgfx_swap_preview_write_state(uint8_t *state, bool active, bool valid, bool pick_far, int32_t kind, int32_t index, int32_t slot, int32_t x, int32_t y, int32_t w, int32_t h, int32_t d2) {
+    state[0] = active ? 1u : 0u;
+    state[1] = valid ? 1u : 0u;
+    state[2] = pick_far ? 1u : 0u;
+    state[3] = (uint8_t)(kind & 0xFF);
+    lgfx_band_wr_i16(state + 4, index);
+    lgfx_band_wr_i16(state + 6, slot);
+    lgfx_band_wr_i16(state + 8, x);
+    lgfx_band_wr_i16(state + 10, y);
+    lgfx_band_wr_i16(state + 12, w);
+    lgfx_band_wr_i16(state + 14, h);
+    lgfx_band_wr_i32(state + 16, d2);
+    uint16_t age = (uint16_t)state[20] | ((uint16_t)state[21] << 8);
+    if (valid) {
+        if (age < 0xFFFFu) age += 1u;
+    } else {
+        age = 0u;
+    }
+    state[20] = (uint8_t)(age & 0xFFu);
+    state[21] = (uint8_t)((age >> 8) & 0xFFu);
+    state[22] = 0u;
+    state[23] = 0u;
+}
+
+static mp_obj_t lgfx_update_swap_preview_native(size_t n_args, const mp_obj_t *args) {
+    if (n_args != 23) {
+        mp_raise_ValueError(MP_ERROR_TEXT("need 23 args"));
+    }
+    mp_buffer_info_t state_info;
+    mp_buffer_info_t object_info;
+    mp_buffer_info_t enemy_rows_info;
+    mp_buffer_info_t bullet_info;
+    mp_buffer_info_t monk_orbs_info;
+    mp_get_buffer_raise(args[0], &state_info, MP_BUFFER_RW);
+    mp_get_buffer_raise(args[1], &object_info, MP_BUFFER_READ);
+    mp_int_t object_stride = mp_obj_get_int(args[2]);
+    mp_int_t object_count = mp_obj_get_int(args[3]);
+    mp_get_buffer_raise(args[4], &enemy_rows_info, MP_BUFFER_READ);
+    mp_int_t enemy_row_stride = mp_obj_get_int(args[5]);
+    mp_int_t enemy_count = mp_obj_get_int(args[6]);
+    mp_get_buffer_raise(args[7], &bullet_info, MP_BUFFER_READ);
+    mp_int_t bullet_stride = mp_obj_get_int(args[8]);
+    mp_int_t bullet_count = mp_obj_get_int(args[9]);
+    mp_get_buffer_raise(args[10], &monk_orbs_info, MP_BUFFER_READ);
+    mp_int_t orb_stride = mp_obj_get_int(args[11]);
+    mp_int_t orb_count = mp_obj_get_int(args[12]);
+    mp_int_t player_x = mp_obj_get_int(args[13]);
+    mp_int_t player_y = mp_obj_get_int(args[14]);
+    mp_int_t player_w = mp_obj_get_int(args[15]);
+    mp_int_t player_h = mp_obj_get_int(args[16]);
+    bool pick_far = mp_obj_is_true(args[17]);
+    mp_int_t camera_x = mp_obj_get_int(args[18]);
+    mp_int_t band_top = mp_obj_get_int(args[19]);
+    mp_int_t view_w = mp_obj_get_int(args[20]);
+    mp_int_t view_h = mp_obj_get_int(args[21]);
+    mp_int_t hysteresis_px = mp_obj_get_int(args[22]);
+
+    if (state_info.len < 24u) {
+        mp_raise_ValueError(MP_ERROR_TEXT("swap preview state too small"));
+    }
+    if (object_count < 0 || enemy_count < 0 || bullet_count < 0 || orb_count < 0) {
+        mp_raise_ValueError(MP_ERROR_TEXT("invalid swap preview counts"));
+    }
+    if (object_count > 0 && (object_stride < 10 || object_info.len < (size_t)object_count * (size_t)object_stride)) {
+        mp_raise_ValueError(MP_ERROR_TEXT("swap object buf too small"));
+    }
+    if (enemy_count > 0 && (enemy_row_stride < 12 || enemy_rows_info.len < (size_t)enemy_count * (size_t)enemy_row_stride)) {
+        mp_raise_ValueError(MP_ERROR_TEXT("enemy rows buf too small"));
+    }
+    if (bullet_count > 0 && (bullet_stride < 16 || bullet_info.len < (size_t)bullet_count * (size_t)bullet_stride)) {
+        mp_raise_ValueError(MP_ERROR_TEXT("bullet buf too small"));
+    }
+    if (orb_count > 0 && (orb_stride < 16 || monk_orbs_info.len < (size_t)orb_count * (size_t)orb_stride)) {
+        mp_raise_ValueError(MP_ERROR_TEXT("monk orb buf too small"));
+    }
+    uint8_t *state = (uint8_t *)state_info.buf;
+    const uint8_t *objects = (const uint8_t *)object_info.buf;
+    const uint8_t *enemy_rows = (const uint8_t *)enemy_rows_info.buf;
+    const uint8_t *bullets = (const uint8_t *)bullet_info.buf;
+    const uint8_t *orbs = (const uint8_t *)monk_orbs_info.buf;
+
+    int32_t curr_kind = state[1] ? (int32_t)state[3] : 0;
+    int32_t curr_index = state[1] ? lgfx_band_rd_i16(state + 4) : -1;
+    int32_t curr_slot = state[1] ? lgfx_band_rd_i16(state + 6) : -1;
+    bool current_same_mode = state[1] && ((state[2] != 0u) == pick_far);
+    int32_t current_kind = 0;
+    int32_t current_index = -1;
+    int32_t current_slot = -1;
+    int32_t current_x = 0;
+    int32_t current_y = 0;
+    int32_t current_w = 0;
+    int32_t current_h = 0;
+    int32_t current_d2 = -1;
+
+    int32_t best_kind = 0;
+    int32_t best_index = -1;
+    int32_t best_slot = -1;
+    int32_t best_x = 0;
+    int32_t best_y = 0;
+    int32_t best_w = 0;
+    int32_t best_h = 0;
+    int32_t best_d2 = -1;
+
+    for (int32_t i = 0; i < object_count; ++i) {
+        const uint8_t *row = objects + ((size_t)i * (size_t)object_stride);
+        if (!row[8] || !row[9]) continue;
+        int32_t x = lgfx_band_rd_i16(row + 0);
+        int32_t y = lgfx_band_rd_i16(row + 2);
+        int32_t w = lgfx_band_rd_i16(row + 4);
+        int32_t h = lgfx_band_rd_i16(row + 6);
+        int32_t d2 = lgfx_band_visible_target_distance2(x, y, w, h, player_x, player_y, player_w, player_h, camera_x, band_top, view_w, view_h);
+        if (d2 < 0) continue;
+        if (current_same_mode && lgfx_swap_preview_same_target(1, i, -1, curr_kind, curr_index, curr_slot)) {
+            current_kind = 1; current_index = i; current_slot = -1; current_x = x; current_y = y; current_w = w; current_h = h; current_d2 = d2;
+        }
+        lgfx_swap_preview_consider(pick_far, 1, i, -1, x, y, w, h, d2, &best_kind, &best_index, &best_slot, &best_x, &best_y, &best_w, &best_h, &best_d2);
+    }
+    for (int32_t i = 0; i < enemy_count; ++i) {
+        const uint8_t *row = enemy_rows + ((size_t)i * (size_t)enemy_row_stride);
+        if (!row[8] || !row[9] || row[11]) continue;
+        int32_t x = lgfx_band_rd_i16(row + 0);
+        int32_t y = lgfx_band_rd_i16(row + 2);
+        int32_t w = lgfx_band_rd_i16(row + 4);
+        int32_t h = lgfx_band_rd_i16(row + 6);
+        int32_t d2 = lgfx_band_visible_target_distance2(x, y, w, h, player_x, player_y, player_w, player_h, camera_x, band_top, view_w, view_h);
+        if (d2 < 0) continue;
+        if (current_same_mode && lgfx_swap_preview_same_target(2, i, -1, curr_kind, curr_index, curr_slot)) {
+            current_kind = 2; current_index = i; current_slot = -1; current_x = x; current_y = y; current_w = w; current_h = h; current_d2 = d2;
+        }
+        lgfx_swap_preview_consider(pick_far, 2, i, -1, x, y, w, h, d2, &best_kind, &best_index, &best_slot, &best_x, &best_y, &best_w, &best_h, &best_d2);
+    }
+    for (int32_t i = 0; i < bullet_count; ++i) {
+        const uint8_t *row = bullets + ((size_t)i * (size_t)bullet_stride);
+        if (lgfx_band_rd_i16(row + 12) == 0) continue;
+        int32_t x = lgfx_band_rd_i16(row + 0);
+        int32_t y = lgfx_band_rd_i16(row + 2);
+        int32_t w = lgfx_band_rd_i16(row + 8);
+        int32_t h = lgfx_band_rd_i16(row + 10);
+        int32_t d2 = lgfx_band_visible_target_distance2(x, y, w, h, player_x, player_y, player_w, player_h, camera_x, band_top, view_w, view_h);
+        if (d2 < 0) continue;
+        if (current_same_mode && lgfx_swap_preview_same_target(3, i, -1, curr_kind, curr_index, curr_slot)) {
+            current_kind = 3; current_index = i; current_slot = -1; current_x = x; current_y = y; current_w = w; current_h = h; current_d2 = d2;
+        }
+        lgfx_swap_preview_consider(pick_far, 3, i, -1, x, y, w, h, d2, &best_kind, &best_index, &best_slot, &best_x, &best_y, &best_w, &best_h, &best_d2);
+    }
+    int32_t enemy_limit = enemy_count;
+    int32_t orb_enemy_limit = orb_count / 5;
+    if (enemy_limit > orb_enemy_limit) enemy_limit = orb_enemy_limit;
+    for (int32_t ei = 0; ei < enemy_limit; ++ei) {
+        const uint8_t *row = enemy_rows + ((size_t)ei * (size_t)enemy_row_stride);
+        if (!row[8] || !row[9]) continue;
+        for (int32_t si = 0; si < 5; ++si) {
+            int32_t oi = (ei * 5) + si;
+            if (oi < 0 || oi >= orb_count) continue;
+            const uint8_t *orb = orbs + ((size_t)oi * (size_t)orb_stride);
+            uint8_t mode = orb[0];
+            if (!monk_orb_mode_is_pickable((int32_t)mode)) continue;
+            int32_t x = lgfx_band_rd_i16(orb + 10);
+            int32_t y = lgfx_band_rd_i16(orb + 12);
+            int32_t d2 = lgfx_band_visible_target_distance2(x, y, kMonkOrbW, kMonkOrbH, player_x, player_y, player_w, player_h, camera_x, band_top, view_w, view_h);
+            if (d2 < 0) continue;
+            if (current_same_mode && lgfx_swap_preview_same_target(4, ei, si, curr_kind, curr_index, curr_slot)) {
+                current_kind = 4; current_index = ei; current_slot = si; current_x = x - 1; current_y = y - 1; current_w = kMonkOrbW + 2; current_h = kMonkOrbH + 2; current_d2 = d2;
+            }
+            lgfx_swap_preview_consider(pick_far, 4, ei, si, x - 1, y - 1, kMonkOrbW + 2, kMonkOrbH + 2, d2, &best_kind, &best_index, &best_slot, &best_x, &best_y, &best_w, &best_h, &best_d2);
+        }
+    }
+
+    if (current_kind != 0) {
+        int32_t hysteresis_d2 = (int32_t)hysteresis_px * (int32_t)hysteresis_px;
+        bool switch_target = false;
+        if (best_kind != 0 && !lgfx_swap_preview_same_target(best_kind, best_index, best_slot, current_kind, current_index, current_slot)) {
+            switch_target = pick_far ? (best_d2 > current_d2 + hysteresis_d2) : (best_d2 + hysteresis_d2 < current_d2);
+        }
+        if (!switch_target) {
+            lgfx_swap_preview_write_state(state, true, true, pick_far, current_kind, current_index, current_slot, current_x, current_y, current_w, current_h, current_d2);
+            return mp_obj_new_int(current_kind);
+        }
+    }
+    if (best_kind != 0) {
+        lgfx_swap_preview_write_state(state, true, true, pick_far, best_kind, best_index, best_slot, best_x, best_y, best_w, best_h, best_d2);
+        return mp_obj_new_int(best_kind);
+    }
+    lgfx_swap_preview_write_state(state, true, false, pick_far, 0, -1, -1, 0, 0, 0, 0, -1);
+    return MP_OBJ_NEW_SMALL_INT(0);
+}
+MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lgfx_update_swap_preview_native_obj, 23, 23, lgfx_update_swap_preview_native);
+
 static mp_obj_t lgfx_pick_swappable_monk_orb_native(size_t n_args, const mp_obj_t *args) {
     if (n_args != 17) {
         mp_raise_ValueError(MP_ERROR_TEXT("need 17 args"));
@@ -1531,6 +1901,28 @@ static inline int32_t lgfx_attack_abs_i32(int32_t v) {
     return v < 0 ? -v : v;
 }
 
+static inline int32_t lgfx_attack_isqrt_i32(int32_t v) {
+    if (v <= 0) {
+        return 0;
+    }
+    uint32_t value = (uint32_t)v;
+    uint32_t result = 0;
+    uint32_t bit = 1u << 30;
+    while (bit > value) {
+        bit >>= 2;
+    }
+    while (bit != 0u) {
+        if (value >= result + bit) {
+            value -= result + bit;
+            result = (result >> 1) + bit;
+        } else {
+            result >>= 1;
+        }
+        bit >>= 2;
+    }
+    return (int32_t)result;
+}
+
 static inline int32_t lgfx_attack_move_toward_i32(int32_t curr_v, int32_t target_v, int32_t speed_px) {
     int32_t step = speed_px < 1 ? 1 : speed_px;
     int32_t delta = target_v - curr_v;
@@ -1604,6 +1996,385 @@ static inline void lgfx_attack_set_orbit_orb(uint8_t *orb, int32_t slot_i) {
     orb[2] = 0u;
     orb[3] = 1u;
     lgfx_band_wr_i16(orb + 8, kMonkOrbRadius);
+}
+
+static inline void lgfx_attack_set_final_orb(uint8_t *orb, int32_t slot_i, int32_t x, int32_t y) {
+    orb[0] = (uint8_t)kMonkOrbFinalMode;
+    orb[1] = (uint8_t)(slot_i & 0xFF);
+    orb[2] = 0u;
+    orb[3] = 1u;
+    lgfx_band_wr_i16(orb + 4, x);
+    lgfx_band_wr_i16(orb + 6, y);
+    lgfx_band_wr_i16(orb + 8, kMonkOrbFinalOrbitRadius);
+    lgfx_band_wr_i16(orb + 10, x);
+    lgfx_band_wr_i16(orb + 12, y);
+}
+
+static inline void lgfx_attack_set_player_orbit_orb(uint8_t *orb, int32_t slot_i, int32_t x, int32_t y, int32_t angle_step) {
+    orb[0] = (uint8_t)kMonkOrbPlayerOrbitMode;
+    orb[1] = (uint8_t)(slot_i & 0xFF);
+    orb[2] = 0u;
+    orb[3] = (uint8_t)(angle_step & 0xFF);
+    lgfx_band_wr_i16(orb + 4, x);
+    lgfx_band_wr_i16(orb + 6, y);
+    lgfx_band_wr_i16(orb + 8, kMonkOrbPlayerOrbitRadius);
+    lgfx_band_wr_i16(orb + 10, x);
+    lgfx_band_wr_i16(orb + 12, y);
+}
+
+static inline bool lgfx_final_orb_hits_monk(uint8_t *row, int32_t orb_x, int32_t orb_y) {
+    int32_t monk_x = lgfx_band_rd_i16(row + 0);
+    int32_t monk_y = lgfx_band_rd_i16(row + 2);
+    int32_t monk_w = lgfx_band_rd_i16(row + 4);
+    int32_t monk_h = lgfx_band_rd_i16(row + 6);
+    if (monk_w < 1) monk_w = 32;
+    if (monk_h < 1) monk_h = 48;
+    return orb_x < (monk_x + monk_w)
+        && (orb_x + kMonkOrbW) > monk_x
+        && orb_y < (monk_y + monk_h)
+        && (orb_y + kMonkOrbH) > monk_y;
+}
+
+static inline bool lgfx_final_orb_swept_hits_monk(uint8_t *row, int32_t from_x, int32_t from_y, int32_t to_x, int32_t to_y) {
+    if (lgfx_final_orb_hits_monk(row, to_x, to_y)) {
+        return true;
+    }
+    if (lgfx_final_orb_hits_monk(row, from_x, from_y)) {
+        return false;
+    }
+    int32_t dx = to_x - from_x;
+    int32_t dy = to_y - from_y;
+    int32_t steps = lgfx_band_abs_i32(dx);
+    int32_t y_steps = lgfx_band_abs_i32(dy);
+    if (y_steps > steps) {
+        steps = y_steps;
+    }
+    steps = (steps + 7) / 8;
+    if (steps < 2) {
+        return false;
+    }
+    for (int32_t step = 1; step < steps; ++step) {
+        int32_t x = from_x + ((dx * step) / steps);
+        int32_t y = from_y + ((dy * step) / steps);
+        if (lgfx_final_orb_hits_monk(row, x, y)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static inline void lgfx_final_pos_from_center_for_radius(
+    int32_t center_x,
+    int32_t center_y,
+    int32_t angle_step,
+    int32_t radius_px,
+    int32_t *orb_x,
+    int32_t *orb_y
+) {
+    int32_t idx = angle_step % kMonkOrbFinalTableSize;
+    if (idx < 0) {
+        idx += kMonkOrbFinalTableSize;
+    }
+    if (radius_px < 0) {
+        radius_px = 0;
+    }
+    int32_t cx = center_x + ((kMonkOrbFinalCos[idx] * radius_px) / kMonkOrbFinalScale);
+    int32_t cy = center_y - ((kMonkOrbFinalSin[idx] * radius_px) / kMonkOrbFinalScale);
+    *orb_x = cx - (kMonkOrbW / 2);
+    *orb_y = cy - (kMonkOrbH / 2);
+}
+
+static inline int32_t lgfx_final_angle_for_center(
+    int32_t center_x,
+    int32_t center_y,
+    int32_t orb_x,
+    int32_t orb_y
+) {
+    int32_t rel_x = (orb_x + (kMonkOrbW / 2)) - center_x;
+    int32_t rel_y = center_y - (orb_y + (kMonkOrbH / 2));
+    int32_t best_idx = 0;
+    int32_t best_dot = -2147483647;
+    for (int32_t idx = 0; idx < kMonkOrbFinalTableSize; ++idx) {
+        int32_t dot = (rel_x * kMonkOrbFinalCos[idx]) + (rel_y * kMonkOrbFinalSin[idx]);
+        if (idx == 0 || dot > best_dot) {
+            best_dot = dot;
+            best_idx = idx;
+        }
+    }
+    return best_idx;
+}
+
+static inline int32_t lgfx_final_angle_for_pos(
+    int32_t player_x,
+    int32_t player_y,
+    int32_t player_w,
+    int32_t player_h,
+    int32_t orb_x,
+    int32_t orb_y
+) {
+    return lgfx_final_angle_for_center(player_x + (player_w / 2), player_y + (player_h / 2), orb_x, orb_y);
+}
+
+static inline int32_t lgfx_final_random_angle_step(int32_t enemy_i, int32_t slot_i, int32_t total_step, int32_t orb_x, int32_t orb_y) {
+    uint32_t seed = (uint32_t)esp_timer_get_time();
+    seed ^= ((uint32_t)(enemy_i + 1) * 1103515245u);
+    seed ^= ((uint32_t)(slot_i + 17) * 2654435761u);
+    seed ^= ((uint32_t)(orb_x & 0xFFFF) << 16) ^ (uint32_t)(orb_y & 0xFFFF);
+    seed ^= (uint32_t)(total_step * 2246822519u);
+    seed ^= seed << 13;
+    seed ^= seed >> 17;
+    seed ^= seed << 5;
+    return (int32_t)(seed % (uint32_t)kMonkOrbFinalTableSize);
+}
+
+static inline int32_t lgfx_final_step_toward(int32_t value, int32_t target, int32_t step) {
+    if (value < target) {
+        int32_t next = value + step;
+        return next > target ? target : next;
+    }
+    if (value > target) {
+        int32_t next = value - step;
+        return next < target ? target : next;
+    }
+    return value;
+}
+
+static inline void lgfx_final_write_monk_pos(uint8_t *row, int32_t wx, int32_t wy) {
+    lgfx_band_wr_i16(row + 0, wx);
+    lgfx_band_wr_i16(row + 2, wy);
+}
+
+static inline int32_t lgfx_final_speed_px_from_hover(uint8_t *hover) {
+    int32_t speed_q8 = hover != nullptr ? lgfx_band_rd_i16(hover + 9) : kMonkOrbFinalDefaultMonkSpeedQ8;
+    if (speed_q8 <= 0) speed_q8 = kMonkOrbFinalDefaultMonkSpeedQ8;
+    int32_t speed_px = (speed_q8 + 128) / 256;
+    return speed_px < 1 ? 1 : speed_px;
+}
+
+static inline void lgfx_final_lock_monk_waypoint(uint8_t *row, uint8_t *hover, int32_t center_x, int32_t center_y) {
+    if (hover == nullptr) {
+        return;
+    }
+    int32_t ow = lgfx_band_rd_i16(row + 4);
+    int32_t oh = lgfx_band_rd_i16(row + 6);
+    if (ow < 1) ow = 32;
+    if (oh < 1) oh = 48;
+    int32_t target_x = center_x - (ow / 2);
+    int32_t target_y = center_y - (oh / 2);
+    lgfx_band_wr_i16(hover + 0, target_x);
+    lgfx_band_wr_i16(hover + 2, target_y);
+    lgfx_band_wr_i16(hover + 4, target_y);
+    hover[8] = kMonkHoverStateFinalLocked;
+}
+
+static inline bool lgfx_final_move_linear(int32_t *x, int32_t *y, int32_t target_x, int32_t target_y, int32_t speed_px) {
+    if (speed_px < 1) speed_px = 1;
+    int32_t dx = target_x - *x;
+    int32_t dy = target_y - *y;
+    int32_t dist_sq = (dx * dx) + (dy * dy);
+    int32_t dist = lgfx_attack_isqrt_i32(dist_sq);
+    if (dist <= speed_px || dist <= 0) {
+        *x = target_x;
+        *y = target_y;
+        return true;
+    }
+    int32_t step_x = (dx * speed_px) / dist;
+    int32_t step_y = (dy * speed_px) / dist;
+    if (step_x == 0 && dx != 0) step_x = dx > 0 ? 1 : -1;
+    if (step_y == 0 && dy != 0) step_y = dy > 0 ? 1 : -1;
+    *x += step_x;
+    *y += step_y;
+    return false;
+}
+
+static inline void lgfx_final_update_player_orbit_orb(
+    uint8_t *orb,
+    int32_t slot_i,
+    int32_t player_x,
+    int32_t player_y,
+    int32_t player_w,
+    int32_t player_h
+) {
+    int32_t angle_step = ((int32_t)orb[3] + 1) % kMonkOrbFinalTableSize;
+    int32_t center_x = player_x + (player_w / 2);
+    int32_t center_y = player_y + (player_h / 2);
+    int32_t target_x = 0;
+    int32_t target_y = 0;
+    lgfx_final_pos_from_center_for_radius(center_x, center_y, angle_step, kMonkOrbPlayerOrbitRadius, &target_x, &target_y);
+    lgfx_attack_set_player_orbit_orb(orb, slot_i, target_x, target_y, angle_step);
+}
+
+static inline void lgfx_final_lock_monk_pos(uint8_t *row, uint8_t *hover, int32_t wx, int32_t wy, int32_t center_x, int32_t center_y) {
+    lgfx_final_write_monk_pos(row, wx, wy);
+    if (hover != nullptr) {
+        lgfx_final_lock_monk_waypoint(row, hover, center_x, center_y);
+    }
+}
+
+static inline bool lgfx_final_glide_monk(
+    uint8_t *row,
+    uint8_t *hover,
+    uint8_t *atk,
+    int32_t target_center_x,
+    int32_t target_center_y,
+    int32_t *center_x,
+    int32_t *center_y
+) {
+    int32_t ow = lgfx_band_rd_i16(row + 4);
+    int32_t oh = lgfx_band_rd_i16(row + 6);
+    if (ow < 1) ow = 32;
+    if (oh < 1) oh = 48;
+    int32_t target_x = target_center_x - (ow / 2);
+    int32_t target_y = target_center_y - (oh / 2);
+    int32_t curr_x = lgfx_band_rd_i16(row + 0);
+    int32_t curr_y = lgfx_band_rd_i16(row + 2);
+    int32_t start_x = curr_x;
+    int32_t start_y = curr_y;
+    uint16_t glide_frame = 0;
+    if (atk != nullptr) {
+        start_x = lgfx_band_rd_i16(atk + 26);
+        start_y = lgfx_band_rd_i16(atk + 28);
+        glide_frame = (uint16_t)atk[30] | ((uint16_t)atk[31] << 8);
+    }
+    int32_t dx = target_x - start_x;
+    int32_t dy = target_y - start_y;
+    int32_t dist = lgfx_attack_isqrt_i32((dx * dx) + (dy * dy));
+    int32_t next_x = target_x;
+    int32_t next_y = target_y;
+    if (dist > 0) {
+        if (glide_frame < 0xFFFFu) glide_frame = (uint16_t)(glide_frame + 1u);
+        int32_t speed_q8 = hover != nullptr ? lgfx_band_rd_i16(hover + 9) : kMonkOrbFinalDefaultMonkSpeedQ8;
+        if (speed_q8 <= 0) speed_q8 = kMonkOrbFinalDefaultMonkSpeedQ8;
+        int64_t progress_q8 = (int64_t)glide_frame * (int64_t)speed_q8;
+        int64_t dist_q8 = (int64_t)dist * 256LL;
+        if (progress_q8 < dist_q8) {
+            next_x = start_x + (int32_t)(((int64_t)dx * progress_q8) / dist_q8);
+            next_y = start_y + (int32_t)(((int64_t)dy * progress_q8) / dist_q8);
+        }
+    }
+    if (atk != nullptr) {
+        atk[30] = (uint8_t)(glide_frame & 0xFFu);
+        atk[31] = (uint8_t)((glide_frame >> 8) & 0xFFu);
+    }
+    lgfx_final_lock_monk_pos(row, hover, next_x, next_y, target_center_x, target_center_y);
+    *center_x = next_x + (ow / 2);
+    *center_y = next_y + (oh / 2);
+    return next_x == target_x && next_y == target_y;
+}
+
+static inline void lgfx_final_set_monk_center(uint8_t *row, uint8_t *hover, int32_t center_x, int32_t center_y) {
+    int32_t ow = lgfx_band_rd_i16(row + 4);
+    int32_t oh = lgfx_band_rd_i16(row + 6);
+    if (ow < 1) ow = 32;
+    if (oh < 1) oh = 48;
+    lgfx_final_lock_monk_pos(row, hover, center_x - (ow / 2), center_y - (oh / 2), center_x, center_y);
+}
+
+static inline void lgfx_band_wr_u32(uint8_t *p, uint32_t v) {
+    p[0] = (uint8_t)(v & 0xFFu);
+    p[1] = (uint8_t)((v >> 8) & 0xFFu);
+    p[2] = (uint8_t)((v >> 16) & 0xFFu);
+    p[3] = (uint8_t)((v >> 24) & 0xFFu);
+}
+
+static inline uint32_t lgfx_band_rd_u32(const uint8_t *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static inline void lgfx_final_velocity_for_angle(int32_t angle_step, int32_t speed_px, int32_t *vx, int32_t *vy) {
+    int32_t idx = angle_step % kMonkOrbFinalTableSize;
+    if (idx < 0) idx += kMonkOrbFinalTableSize;
+    if (speed_px < 2) speed_px = kMonkOrbFinalRushSpeed;
+    int32_t out_vx = (kMonkOrbFinalCos[idx] * speed_px) / kMonkOrbFinalScale;
+    int32_t out_vy = -(kMonkOrbFinalSin[idx] * speed_px) / kMonkOrbFinalScale;
+    if (out_vx == 0 && kMonkOrbFinalCos[idx] != 0) out_vx = kMonkOrbFinalCos[idx] > 0 ? 1 : -1;
+    if (out_vy == 0 && kMonkOrbFinalSin[idx] != 0) out_vy = kMonkOrbFinalSin[idx] > 0 ? -1 : 1;
+    if (out_vx == 0 && out_vy == 0) out_vx = speed_px;
+    *vx = out_vx;
+    *vy = out_vy;
+}
+
+static inline void lgfx_final_step_bounce(
+    int32_t *x,
+    int32_t *y,
+    int32_t *vx,
+    int32_t *vy,
+    int32_t left,
+    int32_t top,
+    int32_t right,
+    int32_t bottom
+) {
+    int32_t nx = *x + *vx;
+    int32_t ny = *y + *vy;
+    if (nx < left) {
+        nx = left + (left - nx);
+        *vx = -*vx;
+    } else if (nx > right) {
+        nx = right - (nx - right);
+        *vx = -*vx;
+    }
+    if (ny < top) {
+        ny = top + (top - ny);
+        *vy = -*vy;
+    } else if (ny > bottom) {
+        ny = bottom - (ny - bottom);
+        *vy = -*vy;
+    }
+    *x = nx;
+    *y = ny;
+}
+
+static inline bool lgfx_final_scan_orbs(
+    uint8_t *orbs,
+    int32_t orb_stride,
+    int32_t enemy_i,
+    int32_t per_enemy_orbs,
+    int32_t active_slot,
+    bool allow_final_modes,
+    int32_t *slot_out
+) {
+    int32_t candidate_count = 0;
+    int32_t lost_count = 0;
+    int32_t candidate_slot = -1;
+    for (int32_t si = 0; si < per_enemy_orbs; ++si) {
+        uint8_t *orb = orbs + ((size_t)((enemy_i * per_enemy_orbs) + si) * (size_t)orb_stride);
+        uint8_t mode = orb[0];
+        bool candidate = mode == 0u;
+        if (allow_final_modes && si == active_slot && (mode == (uint8_t)kMonkOrbFinalMode || mode == 4u)) {
+            candidate = true;
+        }
+        if (candidate) {
+            candidate_count += 1;
+            candidate_slot = si;
+        } else if (mode == 8u) {
+            lost_count += 1;
+        } else {
+            return false;
+        }
+    }
+    if (candidate_count == 1 && lost_count == 4) {
+        *slot_out = candidate_slot;
+        return true;
+    }
+    return false;
+}
+
+static inline void lgfx_final_reset_attack(uint8_t *atk, bool has_dive_fields) {
+    atk[0] = 0u;
+    atk[2] = 0xFFu;
+    atk[3] = 0xFFu;
+    atk[12] = 0u;
+    atk[13] = 0u;
+    if (has_dive_fields) {
+        atk[16] = 0xFFu;
+        atk[17] = 0u;
+    }
+}
+
+static inline void lgfx_final_release_monk_waypoint(uint8_t *hover) {
+    if (hover != nullptr && hover[8] == kMonkHoverStateFinalLocked) {
+        hover[8] = 1u;
+    }
 }
 
 static inline int32_t lgfx_pulse_radius_for_step(int32_t start_radius, int32_t target_radius, int32_t step, int32_t total) {
@@ -1725,8 +2496,8 @@ static inline uint8_t lgfx_pulse_double_mode_for_step(int32_t step, int32_t *rad
 }
 
 static mp_obj_t lgfx_update_monk_attack_native(size_t n_args, const mp_obj_t *args) {
-    if (n_args != 14 && n_args != 16) {
-        mp_raise_ValueError(MP_ERROR_TEXT("need 14 or 16 args"));
+    if (n_args != 14 && n_args != 16 && n_args != 18 && n_args != 21) {
+        mp_raise_ValueError(MP_ERROR_TEXT("need 14, 16, 18 or 21 args"));
     }
 
     mp_buffer_info_t attack_info;
@@ -1736,7 +2507,7 @@ static mp_obj_t lgfx_update_monk_attack_native(size_t n_args, const mp_obj_t *ar
     mp_get_buffer_raise(args[0], &attack_info, MP_BUFFER_RW);
     mp_int_t attack_stride = mp_obj_get_int(args[1]);
     mp_int_t attack_count = mp_obj_get_int(args[2]);
-    mp_get_buffer_raise(args[3], &enemy_rows_info, MP_BUFFER_READ);
+    mp_get_buffer_raise(args[3], &enemy_rows_info, MP_BUFFER_RW);
     mp_int_t enemy_row_stride = mp_obj_get_int(args[4]);
     mp_int_t enemy_count = mp_obj_get_int(args[5]);
     mp_get_buffer_raise(args[6], &monk_hover_info, MP_BUFFER_RW);
@@ -1748,13 +2519,32 @@ static mp_obj_t lgfx_update_monk_attack_native(size_t n_args, const mp_obj_t *ar
     bool attack_enabled = mp_obj_is_true(args[12]);
     mp_int_t speed_px = mp_obj_get_int(args[13]);
     mp_int_t player_x = 0;
+    mp_int_t player_y = 0;
     mp_int_t player_w = kMonkOrbW;
+    mp_int_t player_h = kMonkOrbH;
+    mp_int_t camera_x_arg = 0;
+    mp_int_t view_w_arg = 320;
+    mp_int_t view_h_arg = 240;
     if (n_args >= 16) {
         player_x = mp_obj_get_int(args[14]);
         player_w = mp_obj_get_int(args[15]);
         if (player_w < 1) {
             player_w = kMonkOrbW;
         }
+    }
+    if (n_args >= 18) {
+        player_y = mp_obj_get_int(args[16]);
+        player_h = mp_obj_get_int(args[17]);
+        if (player_h < 1) {
+            player_h = kMonkOrbH;
+        }
+    }
+    if (n_args >= 21) {
+        camera_x_arg = mp_obj_get_int(args[18]);
+        view_w_arg = mp_obj_get_int(args[19]);
+        view_h_arg = mp_obj_get_int(args[20]);
+        if (view_w_arg < 64) view_w_arg = 320;
+        if (view_h_arg < 64) view_h_arg = 240;
     }
 
     if (attack_stride < 16 || enemy_row_stride < 12 || monk_hover_stride < 9 || orb_stride < 16 || attack_count < 0 || enemy_count < 0 || monk_hover_count < 0 || orb_count < 0) {
@@ -1775,9 +2565,13 @@ static mp_obj_t lgfx_update_monk_attack_native(size_t n_args, const mp_obj_t *ar
     if (speed_px < 1) {
         speed_px = 6;
     }
+    (void)player_x;
+    (void)player_y;
+    (void)player_w;
+    (void)player_h;
 
     uint8_t *attack = (uint8_t *)attack_info.buf;
-    const uint8_t *enemy_rows = (const uint8_t *)enemy_rows_info.buf;
+    uint8_t *enemy_rows = (uint8_t *)enemy_rows_info.buf;
     uint8_t *monk_hover = (uint8_t *)monk_hover_info.buf;
     uint8_t *orbs = (uint8_t *)monk_orbs_info.buf;
     const uint8_t moving_cd = 0xFFu;
@@ -1795,7 +2589,7 @@ static mp_obj_t lgfx_update_monk_attack_native(size_t n_args, const mp_obj_t *ar
 
     for (int32_t ei = 0; ei < limit; ++ei) {
         uint8_t *atk = attack + ((size_t)ei * (size_t)attack_stride);
-        const uint8_t *row = enemy_rows + ((size_t)ei * (size_t)enemy_row_stride);
+        uint8_t *row = enemy_rows + ((size_t)ei * (size_t)enemy_row_stride);
         uint8_t *hover = monk_hover + ((size_t)ei * (size_t)monk_hover_stride);
         uint8_t phase = atk[0];
         uint8_t prev_cd = atk[1];
@@ -1811,13 +2605,30 @@ static mp_obj_t lgfx_update_monk_attack_native(size_t n_args, const mp_obj_t *ar
         int32_t dive_target_x = (int32_t)player_x + ((int32_t)player_w / 2) - (kMonkOrbW / 2);
 
         if (!row[8] || !row[11]) {
+            int32_t final_slot = (int32_t)(int8_t)atk[2];
+            if (phase == (uint8_t)kMonkOrbFinalPhaseDeath && final_slot >= 0 && final_slot < per_enemy_orbs) {
+                uint8_t *orb = orbs + ((size_t)((ei * per_enemy_orbs) + final_slot) * (size_t)orb_stride);
+                if (orb[0] == (uint8_t)kMonkOrbPlayerOrbitMode) {
+                    lgfx_final_update_player_orbit_orb(orb, final_slot, (int32_t)player_x, (int32_t)player_y, (int32_t)player_w, (int32_t)player_h);
+                    atk[1] = current_cd;
+                    changed += 1;
+                    continue;
+                }
+            }
             if (phase >= 4u && phase <= 6u) {
                 for (int32_t si = 0; si < per_enemy_orbs; ++si) {
                     uint8_t *orb = orbs + ((size_t)((ei * per_enemy_orbs) + si) * (size_t)orb_stride);
                     if (orb[0] == 5u || orb[0] == 6u) lgfx_attack_set_orbit_orb(orb, si);
                 }
+            } else if (phase >= (uint8_t)kMonkOrbFinalPhaseOrbit && phase <= (uint8_t)kMonkOrbFinalPhaseDeath) {
+                int32_t final_slot = (int32_t)(int8_t)atk[2];
+                if (final_slot >= 0 && final_slot < per_enemy_orbs) {
+                    uint8_t *orb = orbs + ((size_t)((ei * per_enemy_orbs) + final_slot) * (size_t)orb_stride);
+                    if (orb[0] == (uint8_t)kMonkOrbFinalMode || orb[0] == 4u || orb[0] == (uint8_t)kMonkOrbPlayerOrbitMode) lgfx_attack_set_orbit_orb(orb, final_slot);
+                }
             }
             atk[0] = 0u;
+            lgfx_final_release_monk_waypoint(hover);
             atk[1] = current_cd;
             atk[2] = 0xFFu;
             atk[3] = 0xFFu;
@@ -1837,6 +2648,12 @@ static mp_obj_t lgfx_update_monk_attack_native(size_t n_args, const mp_obj_t *ar
                         uint8_t *orb = orbs + ((size_t)((ei * per_enemy_orbs) + si) * (size_t)orb_stride);
                         if (orb[0] == 5u || orb[0] == 6u) lgfx_attack_set_orbit_orb(orb, si);
                     }
+                } else if (phase >= (uint8_t)kMonkOrbFinalPhaseOrbit && phase <= (uint8_t)kMonkOrbFinalPhaseDeath) {
+                    int32_t final_slot = (int32_t)(int8_t)atk[2];
+                    if (final_slot >= 0 && final_slot < per_enemy_orbs) {
+                        uint8_t *orb = orbs + ((size_t)((ei * per_enemy_orbs) + final_slot) * (size_t)orb_stride);
+                        if (orb[0] == (uint8_t)kMonkOrbFinalMode || orb[0] == 4u || orb[0] == (uint8_t)kMonkOrbPlayerOrbitMode) lgfx_attack_set_orbit_orb(orb, final_slot);
+                    }
                 }
                 if (slot_left >= 0 && slot_left < per_enemy_orbs) {
                     uint8_t *orb = orbs + ((size_t)((ei * per_enemy_orbs) + slot_left) * (size_t)orb_stride);
@@ -1852,6 +2669,7 @@ static mp_obj_t lgfx_update_monk_attack_native(size_t n_args, const mp_obj_t *ar
                 }
             }
             atk[0] = 0u;
+            lgfx_final_release_monk_waypoint(hover);
             atk[1] = current_cd;
             atk[2] = 0xFFu;
             atk[3] = 0xFFu;
@@ -1862,6 +2680,264 @@ static mp_obj_t lgfx_update_monk_attack_native(size_t n_args, const mp_obj_t *ar
                 atk[17] = 0u;
             }
             continue;
+        }
+
+        if (phase >= (uint8_t)kMonkOrbFinalPhaseOrbit && phase <= (uint8_t)kMonkOrbFinalPhaseDeath) {
+            int32_t final_slot = (int32_t)(int8_t)atk[2];
+            int32_t checked_slot = -1;
+            bool final_death_phase = phase == (uint8_t)kMonkOrbFinalPhaseDeath;
+            bool final_ready = final_slot >= 0 && final_slot < per_enemy_orbs && n_args >= 18;
+            if (final_ready && !final_death_phase) {
+                final_ready = lgfx_final_scan_orbs(orbs, (int32_t)orb_stride, ei, per_enemy_orbs, final_slot, true, &checked_slot)
+                    && checked_slot == final_slot;
+            }
+            if (final_ready && final_death_phase) {
+                for (int32_t si = 0; si < per_enemy_orbs; ++si) {
+                    uint8_t *orb = orbs + ((size_t)((ei * per_enemy_orbs) + si) * (size_t)orb_stride);
+                    uint8_t mode = orb[0];
+                    if (si == final_slot) {
+                        final_ready = mode == (uint8_t)kMonkOrbPlayerOrbitMode || mode == (uint8_t)kMonkOrbFinalMode || mode == 4u;
+                    } else if (mode != 8u) {
+                        final_ready = false;
+                    }
+                }
+            }
+            if (!final_ready) {
+                if (final_slot >= 0 && final_slot < per_enemy_orbs) {
+                    uint8_t *orb = orbs + ((size_t)((ei * per_enemy_orbs) + final_slot) * (size_t)orb_stride);
+                    if (orb[0] == (uint8_t)kMonkOrbFinalMode || orb[0] == 4u || orb[0] == (uint8_t)kMonkOrbPlayerOrbitMode) {
+                        lgfx_attack_set_orbit_orb(orb, final_slot);
+                    }
+                }
+                lgfx_final_reset_attack(atk, has_dive_fields);
+                lgfx_final_release_monk_waypoint(hover);
+                atk[1] = current_cd;
+                mp_printf(&mp_plat_print, "MONK_ATTACK_NATIVE_FINAL_CANCEL enemy=%d slot=%d\n", (int)ei, (int)final_slot);
+                changed += 1;
+                continue;
+            }
+
+            uint8_t *final_orb = orbs + ((size_t)((ei * per_enemy_orbs) + final_slot) * (size_t)orb_stride);
+            int32_t total_step = (int32_t)atk[12] | ((int32_t)atk[13] << 8);
+            int32_t local_step = (int32_t)atk[14];
+            int32_t angle_step = (int32_t)atk[3];
+            if (angle_step < 0 || angle_step >= kMonkOrbFinalTableSize) {
+                angle_step = 0;
+            }
+            int32_t monk_center_x = 0;
+            int32_t monk_center_y = 0;
+            int32_t waypoint_x = attack_stride >= 32 ? lgfx_band_rd_i16(atk + 18) : ((int32_t)camera_x_arg + ((int32_t)view_w_arg / 2));
+            int32_t waypoint_y = attack_stride >= 32 ? lgfx_band_rd_i16(atk + 20) : ((int32_t)view_h_arg / 2);
+            if (waypoint_y < 0) waypoint_y = 0;
+            int32_t view_left = (int32_t)camera_x_arg;
+            int32_t view_top = 0;
+            int32_t view_right = view_left + (int32_t)view_w_arg - kMonkOrbW;
+            int32_t view_bottom = (int32_t)view_h_arg - kMonkOrbH;
+            if (view_right < view_left) view_right = view_left;
+            if (view_bottom < view_top) view_bottom = view_top;
+            bool monk_centered = false;
+            if (phase == (uint8_t)kMonkOrbFinalPhaseDeath) {
+                lgfx_final_lock_monk_waypoint((uint8_t *)row, hover, waypoint_x, waypoint_y);
+                monk_center_x = waypoint_x;
+                monk_center_y = waypoint_y;
+                monk_centered = true;
+            } else if (phase == (uint8_t)kMonkOrbFinalPhaseOrbit) {
+                monk_centered = lgfx_final_glide_monk((uint8_t *)row, hover, attack_stride >= 32 ? atk : nullptr, waypoint_x, waypoint_y, &monk_center_x, &monk_center_y);
+            } else {
+                lgfx_final_set_monk_center((uint8_t *)row, hover, waypoint_x, waypoint_y);
+                monk_center_x = waypoint_x;
+                monk_center_y = waypoint_y;
+                monk_centered = true;
+            }
+            int32_t ox = lgfx_band_rd_i16(final_orb + 10);
+            int32_t oy = lgfx_band_rd_i16(final_orb + 12);
+            int32_t start_x = lgfx_band_rd_i16(atk + 4);
+            int32_t start_y = lgfx_band_rd_i16(atk + 6);
+            int32_t path_vx = lgfx_band_rd_i16(atk + 8);
+            int32_t path_vy = lgfx_band_rd_i16(atk + 10);
+            uint32_t next_rush_start_ms = 0u;
+            if (!final_death_phase && final_orb[2] == kMonkOrbFinalSwapPending) {
+                final_orb[2] = 0u;
+                if ((phase == (uint8_t)kMonkOrbFinalPhaseRush || phase == (uint8_t)kMonkOrbFinalPhaseEject) && (path_vx != 0 || path_vy != 0)) {
+                    phase = (uint8_t)kMonkOrbFinalPhaseEject;
+                    start_x = ox;
+                    start_y = oy;
+                    local_step = 0;
+                    total_step = 0;
+                    mp_printf(&mp_plat_print, "MONK_ATTACK_NATIVE_FINAL_SWAP_EJECT enemy=%d slot=%d vx=%d vy=%d\n", (int)ei, (int)final_slot, (int)path_vx, (int)path_vy);
+                } else {
+                    angle_step = lgfx_final_angle_for_center(monk_center_x, monk_center_y, ox, oy);
+                    phase = (uint8_t)kMonkOrbFinalPhaseOrbit;
+                    local_step = 0;
+                    total_step = 0;
+                }
+            }
+            uint8_t next_phase = phase;
+            int32_t next_total_step = total_step;
+            int32_t next_local_step = local_step;
+            int32_t next_angle_step = angle_step;
+            int32_t next_start_x = start_x;
+            int32_t next_start_y = start_y;
+            int32_t next_vx = path_vx;
+            int32_t next_vy = path_vy;
+
+            if (phase == (uint8_t)kMonkOrbFinalPhaseOrbit) {
+                lgfx_final_pos_from_center_for_radius(monk_center_x, monk_center_y, angle_step, kMonkOrbFinalOrbitRadius, &ox, &oy);
+                lgfx_attack_set_final_orb(final_orb, final_slot, ox, oy);
+                next_total_step += 1;
+                next_local_step += 1;
+                next_angle_step = (angle_step + 1) % kMonkOrbFinalTableSize;
+                if (monk_centered) {
+                    int32_t chosen_angle = lgfx_final_random_angle_step((int32_t)ei, final_slot, total_step, ox, oy);
+                    lgfx_final_velocity_for_angle(chosen_angle, kMonkOrbFinalRushSpeed, &next_vx, &next_vy);
+                    next_angle_step = chosen_angle;
+                    next_start_x = ox;
+                    next_start_y = oy;
+                    next_phase = (uint8_t)kMonkOrbFinalPhaseRush;
+                    next_total_step = 0;
+                    next_local_step = 0;
+                    lgfx_attack_set_scripted_orb(final_orb, final_slot, ox, oy);
+                    mp_printf(&mp_plat_print, "MONK_ATTACK_NATIVE_FINAL_RANDOM_RUSH enemy=%d slot=%d vx=%d vy=%d\n", (int)ei, (int)final_slot, (int)next_vx, (int)next_vy);
+                }
+            } else if (phase == (uint8_t)kMonkOrbFinalPhaseRush) {
+                if (path_vx == 0 && path_vy == 0) {
+                    int32_t chosen_angle = lgfx_final_random_angle_step((int32_t)ei, final_slot, total_step, ox, oy);
+                    lgfx_final_velocity_for_angle(chosen_angle, kMonkOrbFinalRushSpeed, &next_vx, &next_vy);
+                    next_angle_step = chosen_angle;
+                    path_vx = next_vx;
+                    path_vy = next_vy;
+                }
+                lgfx_final_step_bounce(&ox, &oy, &path_vx, &path_vy, view_left, view_top, view_right, view_bottom);
+                next_vx = path_vx;
+                next_vy = path_vy;
+                next_start_x = ox;
+                next_start_y = oy;
+                lgfx_attack_set_scripted_orb(final_orb, final_slot, ox, oy);
+                next_total_step += 1;
+                next_local_step += 1;
+            } else if (phase == (uint8_t)kMonkOrbFinalPhaseEject) {
+                int32_t prev_ox = ox;
+                int32_t prev_oy = oy;
+                if (path_vx == 0 && path_vy == 0) {
+                    int32_t chosen_angle = lgfx_final_random_angle_step((int32_t)ei, final_slot, total_step, ox, oy);
+                    lgfx_final_velocity_for_angle(chosen_angle, kMonkOrbFinalRushSpeed, &next_vx, &next_vy);
+                    next_angle_step = chosen_angle;
+                    path_vx = next_vx;
+                    path_vy = next_vy;
+                }
+                lgfx_final_step_bounce(&ox, &oy, &path_vx, &path_vy, view_left, view_top, view_right, view_bottom);
+                lgfx_attack_set_scripted_orb(final_orb, final_slot, ox, oy);
+                next_start_x = ox;
+                next_start_y = oy;
+                next_vx = path_vx;
+                next_vy = path_vy;
+                next_total_step += 1;
+                next_local_step += 1;
+                if (lgfx_final_orb_swept_hits_monk((uint8_t *)row, prev_ox, prev_oy, ox, oy)) {
+                    next_phase = (uint8_t)kMonkOrbFinalPhaseDeath;
+                    next_total_step = 0;
+                    next_local_step = 0;
+                    next_start_x = ox;
+                    next_start_y = oy;
+                    next_vx = 0;
+                    next_vy = 0;
+                    next_rush_start_ms = 0u;
+                    row[9] = 0u;
+                    int32_t player_orbit_angle = lgfx_final_angle_for_pos(
+                        (int32_t)player_x,
+                        (int32_t)player_y,
+                        (int32_t)player_w,
+                        (int32_t)player_h,
+                        ox,
+                        oy
+                    );
+                    next_angle_step = player_orbit_angle;
+                    int32_t player_center_x = (int32_t)player_x + ((int32_t)player_w / 2);
+                    int32_t player_center_y = (int32_t)player_y + ((int32_t)player_h / 2);
+                    lgfx_final_pos_from_center_for_radius(player_center_x, player_center_y, player_orbit_angle, kMonkOrbPlayerOrbitRadius, &ox, &oy);
+                    lgfx_attack_set_player_orbit_orb(final_orb, final_slot, ox, oy, player_orbit_angle);
+                    mp_printf(&mp_plat_print, "MONK_ATTACK_NATIVE_FINAL_DEATH enemy=%d slot=%d x=%d y=%d\n", (int)ei, (int)final_slot, (int)ox, (int)oy);
+                }
+            } else if (phase == (uint8_t)kMonkOrbFinalPhaseDeath) {
+                lgfx_final_update_player_orbit_orb(final_orb, final_slot, (int32_t)player_x, (int32_t)player_y, (int32_t)player_w, (int32_t)player_h);
+                next_total_step += 1;
+                next_local_step += 1;
+                if (next_local_step >= kMonkOrbFinalDeathFrames) {
+                    row[8] = 0u;
+                    row[9] = 0u;
+                    lgfx_final_release_monk_waypoint(hover);
+                    mp_printf(&mp_plat_print, "MONK_ATTACK_NATIVE_FINAL_DEATH_DONE enemy=%d slot=%d\n", (int)ei, (int)final_slot);
+                }
+            }
+
+            atk[0] = next_phase;
+            atk[2] = (uint8_t)final_slot;
+            atk[3] = (uint8_t)(next_angle_step & 0xFF);
+            lgfx_band_wr_i16(atk + 4, next_start_x);
+            lgfx_band_wr_i16(atk + 6, next_start_y);
+            lgfx_band_wr_i16(atk + 8, next_vx);
+            lgfx_band_wr_i16(atk + 10, next_vy);
+            atk[12] = (uint8_t)(next_total_step & 0xFF);
+            atk[13] = (uint8_t)((next_total_step >> 8) & 0xFF);
+            atk[14] = (uint8_t)(next_local_step & 0xFF);
+            atk[1] = current_cd;
+            if (attack_stride >= 32) {
+                lgfx_band_wr_i16(atk + 18, waypoint_x);
+                lgfx_band_wr_i16(atk + 20, waypoint_y);
+                lgfx_band_wr_u32(atk + 22, next_rush_start_ms);
+            }
+            changed += 1;
+            continue;
+        }
+
+        if (phase == 0u && !dive_active && n_args >= 18) {
+            int32_t final_slot = -1;
+            if (lgfx_final_scan_orbs(orbs, (int32_t)orb_stride, ei, per_enemy_orbs, -1, false, &final_slot)) {
+                uint8_t *final_orb = orbs + ((size_t)((ei * per_enemy_orbs) + final_slot) * (size_t)orb_stride);
+                int32_t monk_center_x = 0;
+                int32_t monk_center_y = 0;
+                monk_center_x = (int32_t)camera_x_arg + ((int32_t)view_w_arg / 2);
+                monk_center_y = (int32_t)view_h_arg / 2;
+                int32_t curr_x = lgfx_band_rd_i16(final_orb + 10);
+                int32_t curr_y = lgfx_band_rd_i16(final_orb + 12);
+                int32_t ow = lgfx_band_rd_i16(row + 4);
+                int32_t oh = lgfx_band_rd_i16(row + 6);
+                if (ow < 1) ow = 32;
+                if (oh < 1) oh = 48;
+                int32_t curr_monk_center_x = lgfx_band_rd_i16(row + 0) + (ow / 2);
+                int32_t curr_monk_center_y = lgfx_band_rd_i16(row + 2) + (oh / 2);
+                int32_t angle_step = lgfx_final_angle_for_center(curr_monk_center_x, curr_monk_center_y, curr_x, curr_y);
+                lgfx_final_pos_from_center_for_radius(curr_monk_center_x, curr_monk_center_y, angle_step, kMonkOrbFinalOrbitRadius, &curr_x, &curr_y);
+                atk[0] = (uint8_t)kMonkOrbFinalPhaseOrbit;
+                atk[2] = (uint8_t)final_slot;
+                atk[3] = (uint8_t)(angle_step & 0xFF);
+                lgfx_band_wr_i16(atk + 4, 0);
+                lgfx_band_wr_i16(atk + 6, 0);
+                lgfx_band_wr_i16(atk + 8, 0);
+                lgfx_band_wr_i16(atk + 10, 0);
+                atk[12] = 0u;
+                atk[13] = 0u;
+                atk[14] = 0u;
+                if (has_dive_fields) {
+                    atk[16] = 0xFFu;
+                    atk[17] = 0u;
+                }
+                if (attack_stride >= 32) {
+                    lgfx_band_wr_i16(atk + 18, monk_center_x);
+                    lgfx_band_wr_i16(atk + 20, monk_center_y);
+                    lgfx_band_wr_u32(atk + 22, 0u);
+                    lgfx_band_wr_i16(atk + 26, lgfx_band_rd_i16(row + 0));
+                    lgfx_band_wr_i16(atk + 28, lgfx_band_rd_i16(row + 2));
+                    atk[30] = 0u;
+                    atk[31] = 0u;
+                }
+                lgfx_final_lock_monk_waypoint((uint8_t *)row, hover, monk_center_x, monk_center_y);
+                lgfx_attack_set_final_orb(final_orb, final_slot, curr_x, curr_y);
+                atk[1] = current_cd;
+                mp_printf(&mp_plat_print, "MONK_ATTACK_NATIVE_FINAL_START enemy=%d slot=%d x=%d y=%d\n", (int)ei, (int)final_slot, (int)curr_x, (int)curr_y);
+                changed += 1;
+                continue;
+            }
         }
 
         if (phase == 0u && !dive_active && prev_cd == moving_cd && current_cd > 0u && current_cd != moving_cd) {
@@ -2285,7 +3361,7 @@ static mp_obj_t lgfx_update_monk_attack_native(size_t n_args, const mp_obj_t *ar
     }
     return mp_obj_new_int(changed);
 }
-MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lgfx_update_monk_attack_native_obj, 14, 16, lgfx_update_monk_attack_native);
+MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lgfx_update_monk_attack_native_obj, 14, 21, lgfx_update_monk_attack_native);
 
 } // extern "C"
 

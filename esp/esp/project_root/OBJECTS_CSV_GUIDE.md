@@ -44,7 +44,7 @@ grass,decor,224,112,32,32,grass,0,0,1,1,144,0,32,32,1,,0
 - `trigger`：`1/0`，是否作為觸發物件。
 - `layer`：保留欄位，目前主線 object atlas 仍照資料順序處理。
 - `swappable`：`1/0`，是否可被 B/Y swap 技能選中。
-- `src_x, src_y, src_w, src_h`：此物件在 `objects_atlas_wire.rgb565` 裡的來源矩形。
+- `src_x, src_y, src_w, src_h`：此物件在 `object_altes_wire.rgb565` 裡的來源矩形。
 - `gravity`：`1/0`，是否參與 object gravity 更新。
 - `anim_id`：special overlay / animation key，例如 `respawn_stone`。
 - `checkpoint`：`1/0`，是否視為重生點。
@@ -91,7 +91,7 @@ grass,decor,224,112,32,32,grass,0,0,1,1,144,0,32,32,1,,0
 主線 object 渲染資源：
 
 - CSV：`/sd/game/picture/object/objects.csv`
-- atlas：`/sd/game/picture/object/objects_atlas_wire.rgb565`
+- atlas：`/sd/game/picture/object/object_altes_wire.rgb565`
 - animations：`/sd/game/picture/object/object_animations.json`
 - spawn sheets：
   - `/sd/game/picture/spawn/Spawnpoint_rock_wire.rgb565`
@@ -104,7 +104,7 @@ grass,decor,224,112,32,32,grass,0,0,1,1,144,0,32,32,1,,0
 1. 讀取 `objects.csv` 成 `objects_rows` 與 metadata。
 2. 建立 `object_solids`，供玩家碰撞 / swap / gravity 使用。
 3. 建立 `objects_c_buf`，供 C++ renderer 使用。
-4. 載入 `objects_atlas_wire.rgb565`。
+4. 載入 `object_altes_wire.rgb565`。
 5. 載入 `object_animations.json`，讓 respawn stone / special overlay 可用。
 
 ## 6. Native object buffer
@@ -146,7 +146,7 @@ Python 傳給 C++ 前會對 colorkey 做 `_swap16(...)`，所以 C++ 可以直�
 - Python 會依 object metadata、respawn anchor、enemy bullet 等狀態打包 overlay descriptor
 - native band pipeline 會在基礎 object atlas 後、player sprite 前繪製 overlay
 
-因此 respawn stone 這類物件不是只靠 `objects_atlas_wire.rgb565`；若 `object_animations.json` 或 `picture/spawn/*.rgb565` 缺失，物件本體可能載入了，但畫面仍不會正常顯示。
+因此 respawn stone 這類物件不是只靠 `object_altes_wire.rgb565`；若 `object_animations.json` 或 `picture/spawn/*.rgb565` 缺失，物件本體可能載入了，但畫面仍不會正常顯示。
 
 ## 8. `solid`、`trigger`、`swappable`、`gravity`、`checkpoint`
 

@@ -275,6 +275,28 @@ attack controller 另有一組 native buffer：
 - `20..21`: type 1 third dive drop target Y，目前固定 `160`
 - `22..23`: type 1 third dive top target Y，目前固定 `0`
 
+final one-orb phase 也使用同一組 attack row，但只在精確 `1 orbit + 4 lost` 時啟動，且不實作 monk defeated / encounter clear：
+
+- `phase 7`: final player orbit / prepare
+- `phase 8`: final lock，鎖定當下玩家中心位置
+- `phase 9`: final rush，orb 朝鎖定點衝撞
+- `phase 10`: final detached return，rush 結束後直線回到下一輪 angle 的 final orbit 半徑位置
+- `phase 11`: final swap eject，玩家在 rush 中 swap 時沿原速度飛出畫面，接著進 final detached return
+- `2`: final active slot
+- `3`: final angle step；warning path 與下一輪 return target 都用這個 angle
+- `4..5`: final path start X
+- `6..7`: final path start Y
+- `8..9`: final path velocity X
+- `10..11`: final path velocity Y
+- `12..13`: final burst total step
+- `14`: final local phase step；final phase 會覆用原本 cadence 欄位，所以 final phase active 時不會再進入 type 1 / type 2 scheduler
+- `18..19`: fixed final waypoint center X
+- `20..21`: fixed final waypoint center Y
+- `22..25`: final rush start timestamp in ms
+- `26..27`: final Monk glide start X
+- `28..29`: final Monk glide start Y
+- `30..31`: final Monk glide progress frame
+
 monk 區域 respawn reintro 不會重建整組 enemy runtime。`_reset_monk_for_respawn_reintro(enemy_rt)` 會就地處理現有 live monk slot：
 
 - 將 live monk row visible 設為 `0`
@@ -360,7 +382,20 @@ monk 區域 respawn reintro 不會重建整組 enemy runtime。`_reset_monk_for_
 - pulse 期間若其中一顆被 swap，該顆進入一般 `detached -> captured_return -> orbit` 流程；其他仍在 pulse 的 orb 不取消，繼續目前 pulse 時間表
 - 完成後全部回到 mode `0 orbit`、半徑 `28`
 
-### 5.6 第二色 damage
+### 5.6 `final_orbit`
+
+- native mode `9`
+- 只在最後精確 `1 orbit + 4 lost` 時由 `lgfx.update_monk_attack_native(...)` 啟動
+- final phase 開始時會把當下螢幕中心存成 world waypoint，並把 live Monk 的 hover target 鎖到這個固定 waypoint；普通 hover retarget 不再抽下一個點。Monk 由 final attack native 以 `MONK_HOVER_SPEED_Q8` 對應速度沿直線平移到 waypoint，抵達後維持不動，Python render 前會從 C row sync 回 `enemy_rows`
+- orb 以 Monk 中心為圓心、半徑 `44` 公轉，renderer 使用第二色 sprite；mode `9` 不在 `monk_orb_damage.py` 的 damage list 中，所以 warning / 公轉時不會殺玩家
+- 每輪流程：Monk 直線平移入場與 waypoint 旁公轉 prepare 至少 `48` frame -> 產生純黑 `1px` path 並 warning `45` frame -> 黑線消失，orb 以 mode `4 scripted_attack`、速度 `24` 沿 path 真實時間移動 `3` 秒 -> 記住下一輪 `angle_step`，orb 以 final 專用 detached return 直線飛回 `waypoint + radius 44 at angle_step` -> 到位後立刻重新產生下一條 warning path
+- path 由 native 依 orb 當下位置與角度產生，使用螢幕邊界反彈；Python render packer 會畫完整 `3` 秒預測路徑，最多拆成 `40` 個短線段 special descriptor（kind `3`）；path 可以穿過 Monk，不再避開 Monk 外擴矩形
+- path attack 不追玩家、不以玩家位置為中心；玩家只要離開黑線就能躲
+- attack 中若玩家 swap 最後一顆 orb，Python 只交換玩家/orb 位置，保留 mode `4` 並寫入 one-frame pending flag；native 下一幀進入 eject phase，orb 沿原本 velocity 同方向飛到鏡頭邊界，然後進 final detached return，回到下一輪 `angle_step` 的 radius 44 位置後重新產生 warning path
+- 若 final phase 中 orb 變成非 final/scripted mode，或 orb 數不再是 `1 orbit/final + 4 lost`，native attack 會取消 final phase 並回 idle
+- 目前沒有實作擊敗 Monk、最後 orb 消失、勝利獎勵或 encounter clear
+
+### 5.7 第二色 damage
 
 第二色 orb damage 目前由小型 Python helper module 處理：
 
@@ -371,11 +406,12 @@ monk 區域 respawn reintro 不會重建整組 enemy runtime。`_reset_monk_for_
 此 helper 直接掃描 `monk_orb_c_buf`：
 
 - stride 仍為 `_MONK_ORB_NATIVE_STRIDE = 16`
-- mode `2 captured_return`、`4 scripted_attack`、`5 pulse_damage` 視為可傷害玩家
+- mode `2 captured_return`、`4 scripted_attack`、`5 pulse_damage` 視為可傷害玩家；mode `9 final_orbit` 雖然使用第二色 sprite，但不造成傷害
 - hitbox 使用 orb 的 `current_x/current_y` 與固定 `16x16`
+- 玩家成功 swap 到 Monk orb 後，helper 會跳過下一次 damage scan 並把 swap 後 buffer 當成新的 swept 起點，避免把玩家/Orb 的瞬間交換誤判成連續移動攻擊
 - 命中時回傳 `(orb_index, mode, x, y)`，主迴圈會印 `PLAYER_KILLED_BY_MONK_ORB ...`，再把玩家導入既有 `PLAYER_DEAD_WAIT_RESPAWN` 流程
 
-攻擊色 orb 之間也會用同一個 `16x16` hitbox 做重疊判定。若任兩顆 mode `2 captured_return`、`4 scripted_attack`、`5 pulse_damage` 的 hitbox 重疊，重疊到的 orb 會在各自當前 `current_x/current_y` 進入 mode `7 clash_bounce`，變回公轉色且不再傷害玩家，短暫彈起後往下掉並轉成 mode `8 lost`。若是在 type 2 pulse 中發生，只有重疊到的 orb 離開 pulse，其他 pulse orb 繼續目前 phase；之後 type 2 只要仍有至少三顆 orbit orb 就能再次啟動。
+攻擊色且可傷害的 orb 之間也會用同一個 `16x16` hitbox 做重疊判定。若任兩顆 mode `2 captured_return`、`4 scripted_attack`、`5 pulse_damage` 的 hitbox 重疊，重疊到的 orb 會在各自當前 `current_x/current_y` 進入 mode `7 clash_bounce`，變回公轉色且不再傷害玩家，短暫彈起後往下掉並轉成 mode `8 lost`。mode `9 final_orbit` 不參與 clash 判定。若是在 type 2 pulse 中發生，只有重疊到的 orb 離開 pulse，其他 pulse orb 繼續目前 phase；之後 type 2 只要仍有至少三顆 orbit orb 就能再次啟動。
 
 設計原因：`app_camera_test.py` 已接近 MicroPython bytecode 上限。曾將完整 damage scan helper 直接放入主檔，板上啟動會出現 `RuntimeError: bytecode overflow`；因此新增 runtime 行為應優先拆小 module，主迴圈只留短呼叫。
 

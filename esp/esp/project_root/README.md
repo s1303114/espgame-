@@ -39,7 +39,6 @@
 - `picture/backgound/bg_far_wire.rgb565`
 - `picture/object/objects.csv`
 - `picture/object/object_animations.json`
-- `picture/object/objects_atlas_wire.rgb565`
 - `picture/object/object_altes_wire.rgb565`
 - `picture/enemy/enemies.csv`
 - `picture/enemy/enemy_bow_animation_wire.rgb565`

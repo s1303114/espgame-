@@ -13,8 +13,8 @@
 - live hover base Y：`MONK_HOVER_BASE_Y = 55`
 - monk 區域重生門檻：`MONK_RESPAWN_REINTRO_MIN_X = 1500`
 - 玩家在 monk 區域重生時，會觸發 `MONK_RESPAWN_REINTRO_RESET ...`，live monk slot 會被隱藏並重用，下一輪重新跑 intro
-- monk attack 目前有 type 1 split/drop/sweep + three-orb-phase dive 與 type 2 pulse；type 1 在 5/4 顆時只用左右兩顆，剩 3 顆 orbit 且另外 2 顆是 `8 lost` 時才加第三顆：上飛到 `Y=0`、追到玩家頭上、下墜到 `Y=160`。type 2 至少三顆 orbit orb 可啟動，`8 lost` 會被忽略；5/4 顆維持同步 `28 -> 128 -> 28` pulse，timing 是 `60/40/60`；只剩 3 顆 orbit + 2 lost 時改成 `0/12/24` frame 三角錯峰雙峰 pulse，最大半徑 hold 與雙峰收尾等待都維持攻擊色
-- action 色 orb mode `2/4/5` 會傷害玩家；action orb 彼此以 `16x16` hitbox 重疊時會進入 `7 clash_bounce`，短暫彈起後掉出世界成為 `8 lost`，不再 render、damage 或被 swap picker 選中
+- monk attack 目前有 type 1 split/drop/sweep + three-orb-phase dive、type 2 pulse、以及最後一顆 orb 的黑線反彈 path phase。type 1 在 5/4 顆時只用左右兩顆，剩 3 顆 orbit 且另外 2 顆是 `8 lost` 時才加第三顆：上飛到 `Y=0`、追到玩家頭上、下墜到 `Y=160`。type 2 至少三顆 orbit orb 可啟動，`8 lost` 會被忽略；5/4 顆維持同步 `28 -> 128 -> 28` pulse，timing 是 `60/40/60`；只剩 3 顆 orbit + 2 lost 時改成 `0/12/24` frame 三角錯峰雙峰 pulse，最大半徑 hold 與雙峰收尾等待都維持攻擊色。只剩精確 `1 orbit + 4 lost` 時，會記錄進 final 當下螢幕中心為固定 world waypoint，鎖住 Monk hover target 不再 retarget，Monk 以 `MONK_HOVER_SPEED_Q8` 速度沿直線平移到 waypoint 後停住，orb 以 mode `9 final_orbit` 繞 waypoint 公轉；warning 階段畫完整 `3` 秒、純黑 `1px`、可穿過 Monk 的螢幕邊界反彈 path（special kind `3`），warning 後黑線消失，orb 以 mode `4`、速度 `24` 沿線移動真實時間 `3` 秒；rush 結束或 swap eject 後，orb 直線回到下一輪 `angle_step` 對應的 `waypoint + radius 44` 位置，到位後立刻重新產生 warning path。這裡尚未實作擊敗 Monk 或 encounter clear
+- action 色 damage mode `2/4/5` 會傷害玩家；mode `9 final_orbit` 使用 action 色但不造成傷害。可傷害 action orb 彼此以 `16x16` hitbox 重疊時會進入 `7 clash_bounce`，短暫彈起後掉出世界成為 `8 lost`，不再 render、damage 或被 swap picker 選中
 
 本次抓到的一組板上 profile/FPS（`/tmp/monk_fps_sample.log`，`CAMERA_RUNTIME_VERBOSE=True`）：
 
@@ -53,7 +53,7 @@
 - `picture/backgound/bg_far_wire.rgb565`
 - `picture/object/objects.csv`
 - `picture/object/object_animations.json`
-- `picture/object/objects_atlas_wire.rgb565`
+- `picture/object/object_altes_wire.rgb565`
 - `picture/enemy/enemies.csv`
 - `picture/enemy/enemy_bow_animation_wire.rgb565`
 - `picture/player/player_wire.rgb565`
@@ -207,9 +207,9 @@ live orb state 則已 native 化：
 - `lgfx.update_monk_orbs_native(...)` 更新 `mode/current_x/current_y/return_radius`
 - `lgfx.pack_monk_orb_descriptors_native(...)` 產生 `_SPECIAL_KIND_MONK_ORB` render descriptor
 - `lgfx.pick_swappable_monk_orb_native(...)` 負責 near/far monk orb target picking
-- `lgfx.update_monk_attack_native(...)` 負責 attack type 1 的 split/drop/sweep + three-orb dive，以及 type 2 的同步 pulse / 三顆錯峰雙峰 pulse update
+- `lgfx.update_monk_attack_native(...)` 負責 attack type 1 的 split/drop/sweep + three-orb dive、type 2 的同步 pulse / 三顆錯峰雙峰 pulse update，以及 final one-orb player-orbit/radial-rush loop
 - Python `_swap_with_monk_orb(...)` 仍負責真正 swap apply，並直接寫回 `monk_orb_c_buf`
-- Python `monk_orb_damage.action_hit_player(...)` 將 mode `2 captured_return`、`4 scripted_attack`、`5 pulse_damage` 視為第二色 damage orb；碰到玩家會沿用既有死亡 / respawn 流程。mode `1 detached` 與 `6 pulse_hold` 是公轉色，不造成傷害
+- Python `monk_orb_damage.action_hit_player(...)` 將 mode `2 captured_return`、`4 scripted_attack`、`5 pulse_damage` 視為第二色 damage orb；碰到玩家會沿用既有死亡 / respawn 流程。mode `9 final_orbit` 是第二色但不造成傷害；mode `1 detached` 與 `6 pulse_hold` 是公轉色，不造成傷害
 - 一般 live path 不再每幀把 C buffer sync 回 Python dict；dict 只保留 fallback / intro scripted / debug shadow 用途
 - attack orb swap 時，`monk_orb_c_buf` 保持 `scripted_attack` mode，render descriptor 仍必須走 native C API，不能因 Python shadow 有 `scripted_attack` 而 fallback
 
@@ -221,7 +221,6 @@ live orb state 則已 native 化：
 - tilemap CSV：`/sd/game/Tilemap/map_tilemap.csv`
 - tileset：`/sd/game/Tilemap/tilemap_all_wire.rgb565`
 - object / monk orb atlas：`/sd/game/picture/object/object_altes_wire.rgb565`
-- legacy object atlas path currently may still exist on SD：`/sd/game/picture/object/objects_atlas_wire.rgb565`
 - object animations：`/sd/game/picture/object/object_animations.json`
 - enemy CSV：`/sd/game/picture/enemy/enemies.csv`
 - enemy sheet：`/sd/game/picture/enemy/enemy_bow_animation_wire.rgb565`
@@ -307,12 +306,7 @@ internal flash boot.py/main.py
 4. 保持現有行為不變，這一刀只做搬移與 dispatcher 整理，沒有改渲染策略、native band pipeline 或 profile tuple 格式
 5. 清掉 `SPI_TFT_*` 中目前不會被走到的多條 experimental path 分支，並移除未再使用的 `CAMERA_SPI_TEST_PATH` 設定
 6. 清掉未再使用的 `BOARD_GENERATED_*`、`ROOT_RGB565_*`、`BLIT_*` modes，並同步移除它們在 mode normalize、prerequisite、startup banner、`run()` 與 config 內的殘留引用
-7. 再清掉舊的 `PNG_SINGLE` / `PNG_FULL` / `FAR_ONLY` / `SINGLE_IMAGE_*` / `DIRECT_*` fallback renderer family，包含：
-	- mode 常數
-	- 舊版 `_ensure_prerequisites(...)`
-	- 舊版 `_print_camera_test_start(..., png_single_stage)`
-	- `run()` 裡 direct / single-image / manual-frame fallback 尾段
-	- `config.py` / `sd_config.py` 內對應的 `CAMERA_TEST_PNG_SINGLE_STAGE`、`CAMERA_TEST_STRIP_H`、`CAMERA_TEST_MANUAL_FRAMES`、`CAMERA_TEST_BG_*`、`CAMERA_TEST_BG_*_RGB565`
+7. 已清掉舊的 `PNG_SINGLE` / `PNG_FULL` / `FAR_ONLY` / `SINGLE_IMAGE_*` / `DIRECT_*` fallback renderer family，`run()` 只保留主線與少數仍可用的 bring-up mode
 8. 再把 `ROWS_SAFE_PROGRESSIVE` step 4 內兩塊可獨立切出的路徑抽成 helper：
 	- native band submit 分支
 	- profile / stall / dirty-profile 統計輸出與 reset 分支

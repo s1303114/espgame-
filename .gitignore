@@ -26,6 +26,7 @@ CMakeFiles/
 .ruff_cache/
 .venv/
 venv/
+esp/esp/esp-idf/
 
 # Generated logs
 *.log

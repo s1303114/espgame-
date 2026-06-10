@@ -5,6 +5,11 @@ try:
 except Exception:
     monk_orb_damage = None
 
+try:
+    import monk_final_path
+except Exception:
+    monk_final_path = None
+
 
 try:
     import lgfx as _lgfx
@@ -72,7 +77,7 @@ _BULLET_STATE_STRIDE = 16
 _OBJECT_SOLID_STRIDE = 8
 _MONK_HOVER_STATE_STRIDE = 11
 _MONK_ORB_NATIVE_STRIDE = 16
-_MONK_ATTACK_NATIVE_STRIDE = 24
+_MONK_ATTACK_NATIVE_STRIDE = 32
 _MONK_ORB_NATIVE_MODE_ORBIT = 0
 _MONK_ORB_NATIVE_MODE_DETACHED = 1
 _MONK_ORB_NATIVE_MODE_CAPTURED_RETURN = 2
@@ -82,7 +87,27 @@ _MONK_ORB_NATIVE_MODE_PULSE_DAMAGE = 5
 _MONK_ORB_NATIVE_MODE_PULSE_HOLD = 6
 _MONK_ORB_NATIVE_MODE_CLASH_BOUNCE = 7
 _MONK_ORB_NATIVE_MODE_LOST = 8
+_MONK_ORB_NATIVE_MODE_FINAL_ORBIT = 9
+_MONK_ORB_NATIVE_MODE_PLAYER_ORBIT = 10
 _MONK_ORB_NATIVE_MODE_UNUSED = 255
+_MONK_ORB_NATIVE_FINAL_SWAP_PENDING = 1
+_MONK_ORB_FINAL_RADIUS = 44
+_MONK_ATTACK_NATIVE_FINAL_PHASE_LOCK = 8
+_MONK_ATTACK_NATIVE_FINAL_PHASE_RUSH = 9
+_MONK_ATTACK_NATIVE_FINAL_PHASE_DEATH = 12
+_MONK_FINAL_PATH_DESC_MAX_COUNT = 40
+_MONK_FINAL_PATH_DESC_CHUNK_PX = 96
+_MONK_FINAL_PATH_THICKNESS = 1
+_MONK_FINAL_RUSH_STEPS = 72
+_SWAP_PREVIEW_STATE_STRIDE = 24
+_SWAP_INPUT_STATE_STRIDE = 5
+_SWAP_TARGET_NONE = 0
+_SWAP_TARGET_OBJECT = 1
+_SWAP_TARGET_ENEMY = 2
+_SWAP_TARGET_BULLET = 3
+_SWAP_TARGET_MONK_ORB = 4
+_SWAP_PREVIEW_HYSTERESIS_PX = 16
+_SPECIAL_KIND_SWAP_PREVIEW = 4
 _boot_source_tag = "ROOT"
 _draw_digits_to_buf = None
 _get_digits_text_width = None
@@ -97,6 +122,13 @@ def _buf_get_i16_le(buf, off):
 
 def _buf_get_u16_le(buf, off):
     return (buf[off] | (buf[off + 1] << 8)) & 0xFFFF
+
+
+def _buf_get_i32_le(buf, off):
+    val = buf[off] | (buf[off + 1] << 8) | (buf[off + 2] << 16) | (buf[off + 3] << 24)
+    if val & 0x80000000:
+        val -= 0x100000000
+    return val
 
 
 def _buf_set_i16_le(buf, off, value):
@@ -114,6 +146,14 @@ def _buf_set_u16_le(buf, off, value):
     uv = int(value) & 0xFFFF
     buf[off] = uv & 0xFF
     buf[off + 1] = (uv >> 8) & 0xFF
+
+
+def _buf_set_i32_le(buf, off, value):
+    uv = int(value) & 0xFFFFFFFF
+    buf[off] = uv & 0xFF
+    buf[off + 1] = (uv >> 8) & 0xFF
+    buf[off + 2] = (uv >> 16) & 0xFF
+    buf[off + 3] = (uv >> 24) & 0xFF
 
 
 class _PackedEnemyStateView:
@@ -1026,6 +1066,8 @@ def _parse_objects_csv_with_meta(text):
         checkpoint = 1 if _to_int(_col(cols, "checkpoint"), 0) != 0 else 0
         if checkpoint == 0 and obj_type in ("checkpoint", "respawn_stone"):
             checkpoint = 1
+        if checkpoint:
+            swappable = 0
         anim_id = _col(cols, "anim_id", "")
         rows.append([wx, wy, w, h, solid, layer, visible, swappable, sx, sy, sw, sh])
         meta_rows.append(
@@ -1588,21 +1630,33 @@ def _swap_with_monk_orb(enemy_rows, enemy_states, monk_orb_states, enemy_i, slot
     new_orb_x = int(old_px + ((player_w - _MONK_ORB_W) // 2))
     new_orb_y = int(old_py + (player_h - _MONK_ORB_H))
     native_mode = _monk_orb_c_mode(monk_orb_c_buf, monk_orb_c_stride, enemy_i, slot_i)
+    final_swap = _monk_orb_c_is_final_candidate(monk_orb_c_buf, monk_orb_c_stride, enemy_i, slot_i)
     orb_state["detached_x"] = new_orb_x
     orb_state["detached_y"] = new_orb_y
-    orb_state["return_radius"] = _MONK_ORB_RADIUS
-    orb_state["mode"] = _MONK_ORB_MODE_SCRIPTED_ATTACK if native_mode == _MONK_ORB_NATIVE_MODE_SCRIPTED_ATTACK else "detached"
+    orb_state["return_radius"] = _MONK_ORB_FINAL_RADIUS if final_swap else _MONK_ORB_RADIUS
+    if native_mode == _MONK_ORB_NATIVE_MODE_FINAL_ORBIT:
+        orb_state["mode"] = _MONK_ORB_MODE_FINAL_ORBIT
+    elif native_mode == _MONK_ORB_NATIVE_MODE_SCRIPTED_ATTACK:
+        orb_state["mode"] = _MONK_ORB_MODE_SCRIPTED_ATTACK
+    else:
+        orb_state["mode"] = "detached"
     orb_state["script_x"] = new_orb_x
     orb_state["script_y"] = new_orb_y
     orb_state["current_x"] = new_orb_x
     orb_state["current_y"] = new_orb_y
     orb_state["native_current_valid"] = 0
-    if native_mode == _MONK_ORB_NATIVE_MODE_SCRIPTED_ATTACK:
+    if final_swap:
+        if _runtime_verbose_enabled():
+            print("SWAP_MONK_ORB_FINAL_CONTINUE enemy=%d slot=%d mode=%d x=%d y=%d" % (enemy_i, slot_i, native_mode, new_orb_x, new_orb_y))
+        _write_monk_orb_final_swap_to_c(monk_orb_c_buf, monk_orb_c_stride, enemy_i, slot_i, native_mode, new_orb_x, new_orb_y)
+    elif native_mode == _MONK_ORB_NATIVE_MODE_SCRIPTED_ATTACK:
         if _runtime_verbose_enabled():
             print("SWAP_MONK_ORB_ATTACK_CONTINUE enemy=%d slot=%d x=%d y=%d" % (enemy_i, slot_i, new_orb_x, new_orb_y))
         _write_monk_orb_scripted_attack_to_c(monk_orb_c_buf, monk_orb_c_stride, enemy_i, slot_i, new_orb_x, new_orb_y)
     else:
         _write_monk_orb_detached_to_c(monk_orb_c_buf, monk_orb_c_stride, enemy_i, slot_i, new_orb_x, new_orb_y)
+    if monk_orb_damage is not None:
+        monk_orb_damage.ignore_next()
     return player_x, player_y, 0, True
 
 
@@ -1700,10 +1754,30 @@ def _pack_enemy_render_descriptors(enemy_rows, enemy_states, enemy_meta=None, ca
                 out.append(int(state.get("state", _ENEMY_STATE_IDLE)) & 0xFF)
                 out.append(1 if int(state.get("facing", 1)) >= 0 else 0)
                 out.append(enemy_type_code & 0xFF)
-                out.append(0)
+                out.append(ei & 0xFF)
                 count += 1
         ei += 1
     return out, 10, count
+
+
+def _apply_monk_death_render_state(enemy_desc_buf, enemy_desc_stride, enemy_desc_count, monk_attack_c_buf, monk_attack_c_stride, monk_attack_c_count):
+    if enemy_desc_count <= 0 or enemy_desc_stride < 10 or monk_attack_c_buf is None or monk_attack_c_stride < _MONK_ATTACK_NATIVE_STRIDE:
+        return
+    stride = int(enemy_desc_stride)
+    attack_stride = int(monk_attack_c_stride)
+    i = 0
+    while i < int(enemy_desc_count):
+        ebase = i * stride
+        if (ebase + stride) <= len(enemy_desc_buf) and int(enemy_desc_buf[ebase + 8]) == 1:
+            source_i = int(enemy_desc_buf[ebase + 9]) if stride > 9 else i
+            if source_i < 0 or source_i >= int(monk_attack_c_count):
+                source_i = i
+            abase = source_i * attack_stride
+            if (abase + _MONK_ATTACK_NATIVE_STRIDE) <= len(monk_attack_c_buf) and int(monk_attack_c_buf[abase]) == _MONK_ATTACK_NATIVE_FINAL_PHASE_DEATH:
+                frame_counter = int(monk_attack_c_buf[abase + 14])
+                _buf_set_u16_le(enemy_desc_buf, ebase + 4, frame_counter)
+                enemy_desc_buf[ebase + 6] = _MONK_ATTACK_NATIVE_FINAL_PHASE_DEATH
+        i += 1
 
 
 
@@ -1781,15 +1855,18 @@ def _load_enemy_runtime_assets(shared_monk_orb_atlas=None, shared_monk_orb_atlas
     enemy_monk_frame_w = int(getattr(config, "ENEMY_MONK_FRAME_W", 32))
     enemy_monk_frame_h = int(getattr(config, "ENEMY_MONK_FRAME_H", 48))
     enemy_monk_frame_count = int(getattr(config, "ENEMY_MONK_FRAME_COUNT", 4))
+    enemy_monk_sheet_rows = int(getattr(config, "ENEMY_MONK_SHEET_ROWS", 1) or 1)
     enemy_monk_frame_hold = int(getattr(config, "ENEMY_MONK_FRAME_HOLD", 6))
     if enemy_monk_frame_count < 1:
         enemy_monk_frame_count = 1
     if enemy_monk_frame_hold < 1:
         enemy_monk_frame_hold = 1
+    if enemy_monk_sheet_rows < 1:
+        enemy_monk_sheet_rows = 1
     enemy_monk_sheet = None
     enemy_monk_sheet_w = enemy_monk_frame_w * enemy_monk_frame_count
     if enemy_monk_frame_w > 0 and enemy_monk_frame_h > 0 and enemy_monk_sheet_w > 0:
-        enemy_monk_sheet = _load_rgb565_blob(enemy_monk_sheet_path, enemy_monk_sheet_w * enemy_monk_frame_h * 2)
+        enemy_monk_sheet = _load_rgb565_blob(enemy_monk_sheet_path, enemy_monk_sheet_w * enemy_monk_frame_h * enemy_monk_sheet_rows * 2)
 
     enemy_monk_orb_atlas_w = int(getattr(config, "ENEMY_MONK_ORB_ATLAS_W", 256))
     enemy_monk_orb_atlas_h = int(getattr(config, "ENEMY_MONK_ORB_ATLAS_H", 256))
@@ -2515,6 +2592,7 @@ def _perform_world_swap(
     enemy_rows_c_buf=None,
     enemy_rows_c_stride=0,
     enemy_rows_c_count=0,
+    locked_target=None,
 ):
     if not swap_triggered or (not objects_rows and not enemy_rows and not enemy_bullets):
         return player_x, player_y, vel_y, _rebuild_object_solids(objects_rows)
@@ -2529,115 +2607,138 @@ def _perform_world_swap(
                 return player_x, player_y, vel_y, _rebuild_object_solids(objects_rows)
             ei += 1
 
+    target_kind = None
+    ti = -1
     object_ti = -1
     enemy_ti = -1
     monk_orb_enemy_i = -1
     monk_orb_slot_i = -1
     bullet_ti = -1
-    if objects_rows:
-        object_ti = _pick_swappable_object_index(
-            objects_rows,
-            player_x,
-            player_y,
-            player_w,
-            player_h,
-            swap_pick_far,
-            camera_x,
-            band_top,
-            view_w,
-            view_h,
-        )
-    if enemy_rows:
-        enemy_ti = _pick_swappable_enemy_index(
-            enemy_rows,
-            player_x,
-            player_y,
-            player_w,
-            player_h,
-            swap_pick_far,
-            camera_x,
-            band_top,
-            view_w,
-            view_h,
-            enemy_meta,
-        )
-        monk_orb_enemy_i, monk_orb_slot_i = _pick_swappable_monk_orb(
-            enemy_rows,
-            enemy_states,
-            enemy_meta,
-            monk_orb_states,
-            player_x,
-            player_y,
-            player_w,
-            player_h,
-            swap_pick_far,
-            camera_x,
-            band_top,
-            view_w,
-            view_h,
-            monk_frame_w,
-            monk_frame_h,
-            enemy_rows_c_buf,
-            enemy_rows_c_stride,
-            enemy_rows_c_count,
-            monk_orb_c_buf,
-            monk_orb_c_stride,
-            monk_orb_c_count,
-        )
-    if enemy_bullets:
-        bullet_ti = _pick_swappable_bullet_index(
-            enemy_bullets,
-            player_x,
-            player_y,
-            player_w,
-            player_h,
-            swap_pick_far,
-            camera_x,
-            band_top,
-            view_w,
-            view_h,
-        )
-
-    target_kind = None
-    ti = -1
-    if object_ti >= 0:
-        row = objects_rows[object_ti]
-        target_kind = "object"
-        ti = object_ti
-        best_d2 = _visible_target_distance2(row[0], row[1], row[2], row[3], player_x, player_y, player_w, player_h, camera_x, band_top, view_w, view_h)
-    else:
-        best_d2 = -1
-    if enemy_ti >= 0:
-        row = enemy_rows[enemy_ti]
-        d2 = _visible_target_distance2(row[0], row[1], row[2], row[3], player_x, player_y, player_w, player_h, camera_x, band_top, view_w, view_h)
-        if ti < 0 or (swap_pick_far and d2 > best_d2) or ((not swap_pick_far) and d2 < best_d2):
+    if locked_target is not None and int(locked_target[1]) != 0:
+        locked_kind = int(locked_target[3])
+        locked_index = int(locked_target[4])
+        locked_slot = int(locked_target[5])
+        if locked_kind == _SWAP_TARGET_OBJECT:
+            object_ti = locked_index
+            target_kind = "object"
+            ti = object_ti
+        elif locked_kind == _SWAP_TARGET_ENEMY:
+            enemy_ti = locked_index
             target_kind = "enemy"
             ti = enemy_ti
-            best_d2 = d2
-    if monk_orb_enemy_i >= 0 and monk_orb_slot_i >= 0:
-        row = enemy_rows[monk_orb_enemy_i]
-        state = enemy_states[monk_orb_enemy_i] if monk_orb_enemy_i < len(enemy_states) else None
-        slot_states = monk_orb_states[monk_orb_enemy_i] if (monk_orb_states is not None and monk_orb_enemy_i < len(monk_orb_states)) else None
-        if state is not None and slot_states is not None and monk_orb_slot_i < len(slot_states):
-            orb_state = slot_states[monk_orb_slot_i]
-            native_pos = _monk_orb_c_current_pos(monk_orb_c_buf, monk_orb_c_stride, monk_orb_enemy_i, monk_orb_slot_i)
-            if native_pos is not None:
-                orb_x, orb_y = native_pos
-            else:
-                orb_x, orb_y = _monk_orb_current_world_pos(row[0], row[1], row[2], row[3], int(state.get("anim_counter", 0) or 0), monk_orb_slot_i, monk_frame_w, monk_frame_h, orb_state)
-            d2 = _visible_target_distance2(orb_x, orb_y, _MONK_ORB_W, _MONK_ORB_H, player_x, player_y, player_w, player_h, camera_x, band_top, view_w, view_h)
-            prefer_over_enemy = (target_kind == "enemy" and enemy_ti == monk_orb_enemy_i)
-            if d2 >= 0 and (prefer_over_enemy or ti < 0 or (swap_pick_far and d2 > best_d2) or ((not swap_pick_far) and d2 < best_d2)):
-                target_kind = "monk_orb"
-                ti = monk_orb_slot_i
-                best_d2 = d2
-    if bullet_ti >= 0:
-        row = enemy_bullets[bullet_ti]
-        d2 = _visible_target_distance2(row[0], row[1], row[4], row[5], player_x, player_y, player_w, player_h, camera_x, band_top, view_w, view_h)
-        if ti < 0 or (swap_pick_far and d2 > best_d2) or ((not swap_pick_far) and d2 < best_d2):
+        elif locked_kind == _SWAP_TARGET_BULLET:
+            bullet_ti = locked_index
             target_kind = "bullet"
             ti = bullet_ti
-            best_d2 = d2
+        elif locked_kind == _SWAP_TARGET_MONK_ORB:
+            monk_orb_enemy_i = locked_index
+            monk_orb_slot_i = locked_slot
+            target_kind = "monk_orb"
+            ti = monk_orb_slot_i
+        best_d2 = int(locked_target[10])
+    else:
+        if objects_rows:
+            object_ti = _pick_swappable_object_index(
+                objects_rows,
+                player_x,
+                player_y,
+                player_w,
+                player_h,
+                swap_pick_far,
+                camera_x,
+                band_top,
+                view_w,
+                view_h,
+            )
+        if enemy_rows:
+            enemy_ti = _pick_swappable_enemy_index(
+                enemy_rows,
+                player_x,
+                player_y,
+                player_w,
+                player_h,
+                swap_pick_far,
+                camera_x,
+                band_top,
+                view_w,
+                view_h,
+                enemy_meta,
+            )
+            monk_orb_enemy_i, monk_orb_slot_i = _pick_swappable_monk_orb(
+                enemy_rows,
+                enemy_states,
+                enemy_meta,
+                monk_orb_states,
+                player_x,
+                player_y,
+                player_w,
+                player_h,
+                swap_pick_far,
+                camera_x,
+                band_top,
+                view_w,
+                view_h,
+                monk_frame_w,
+                monk_frame_h,
+                enemy_rows_c_buf,
+                enemy_rows_c_stride,
+                enemy_rows_c_count,
+                monk_orb_c_buf,
+                monk_orb_c_stride,
+                monk_orb_c_count,
+            )
+        if enemy_bullets:
+            bullet_ti = _pick_swappable_bullet_index(
+                enemy_bullets,
+                player_x,
+                player_y,
+                player_w,
+                player_h,
+                swap_pick_far,
+                camera_x,
+                band_top,
+                view_w,
+                view_h,
+            )
+
+        if object_ti >= 0:
+            row = objects_rows[object_ti]
+            target_kind = "object"
+            ti = object_ti
+            best_d2 = _visible_target_distance2(row[0], row[1], row[2], row[3], player_x, player_y, player_w, player_h, camera_x, band_top, view_w, view_h)
+        else:
+            best_d2 = -1
+        if enemy_ti >= 0:
+            row = enemy_rows[enemy_ti]
+            d2 = _visible_target_distance2(row[0], row[1], row[2], row[3], player_x, player_y, player_w, player_h, camera_x, band_top, view_w, view_h)
+            if ti < 0 or (swap_pick_far and d2 > best_d2) or ((not swap_pick_far) and d2 < best_d2):
+                target_kind = "enemy"
+                ti = enemy_ti
+                best_d2 = d2
+        if monk_orb_enemy_i >= 0 and monk_orb_slot_i >= 0:
+            row = enemy_rows[monk_orb_enemy_i]
+            state = enemy_states[monk_orb_enemy_i] if monk_orb_enemy_i < len(enemy_states) else None
+            slot_states = monk_orb_states[monk_orb_enemy_i] if (monk_orb_states is not None and monk_orb_enemy_i < len(monk_orb_states)) else None
+            if state is not None and slot_states is not None and monk_orb_slot_i < len(slot_states):
+                orb_state = slot_states[monk_orb_slot_i]
+                native_pos = _monk_orb_c_current_pos(monk_orb_c_buf, monk_orb_c_stride, monk_orb_enemy_i, monk_orb_slot_i)
+                if native_pos is not None:
+                    orb_x, orb_y = native_pos
+                else:
+                    orb_x, orb_y = _monk_orb_current_world_pos(row[0], row[1], row[2], row[3], int(state.get("anim_counter", 0) or 0), monk_orb_slot_i, monk_frame_w, monk_frame_h, orb_state)
+                d2 = _visible_target_distance2(orb_x, orb_y, _MONK_ORB_W, _MONK_ORB_H, player_x, player_y, player_w, player_h, camera_x, band_top, view_w, view_h)
+                prefer_over_enemy = (target_kind == "enemy" and enemy_ti == monk_orb_enemy_i)
+                if d2 >= 0 and (prefer_over_enemy or ti < 0 or (swap_pick_far and d2 > best_d2) or ((not swap_pick_far) and d2 < best_d2)):
+                    target_kind = "monk_orb"
+                    ti = monk_orb_slot_i
+                    best_d2 = d2
+        if bullet_ti >= 0:
+            row = enemy_bullets[bullet_ti]
+            d2 = _visible_target_distance2(row[0], row[1], row[4], row[5], player_x, player_y, player_w, player_h, camera_x, band_top, view_w, view_h)
+            if ti < 0 or (swap_pick_far and d2 > best_d2) or ((not swap_pick_far) and d2 < best_d2):
+                target_kind = "bullet"
+                ti = bullet_ti
+                best_d2 = d2
 
     if swap_triggered:
         print("SWAP_CANDIDATE_DBG obj=%d enemy=%d bullet=%d far=%d" % (
@@ -2678,6 +2779,8 @@ def _perform_world_swap(
     if target_kind == "object" and ti >= 0:
         row = objects_rows[ti]
         meta = objects_meta[ti] if ti < len(objects_meta) else None
+        if meta and meta.get("checkpoint"):
+            return player_x, player_y, vel_y, object_solids
         old_px = player_x
         old_py = player_y
         old_ox = int(row[0])
@@ -2797,6 +2900,7 @@ def _is_special_render_object(meta):
 _SPECIAL_KIND_RESPAWN_STONE = 0
 _SPECIAL_KIND_ANCHOR = 1
 _SPECIAL_KIND_MONK_ORB = 2
+_SPECIAL_KIND_MONK_FINAL_PATH = 3
 
 _MONK_ORB_COUNT = 5
 _MONK_ORB_RADIUS = 28
@@ -2815,6 +2919,8 @@ _MONK_ORB_RETURN_RADIUS_MIN_STEP = 1
 _MONK_ORB_RAD_PER_IDX = 6.283185307179586 / _MONK_ORB_TABLE_SIZE
 _MONK_ORB_MODE_SCRIPTED_INTRO = "scripted_intro"
 _MONK_ORB_MODE_SCRIPTED_ATTACK = "scripted_attack"
+_MONK_ORB_MODE_FINAL_ORBIT = "final_orbit"
+_MONK_ORB_MODE_PLAYER_ORBIT = "player_orbit"
 _MONK_ENCOUNTER_STATE_INACTIVE = "inactive"
 _MONK_ENCOUNTER_STATE_INTRO = "intro_drop"
 _MONK_ENCOUNTER_STATE_LIVE = "live"
@@ -2979,6 +3085,10 @@ def _monk_orb_native_mode_from_state(orb_state):
         return _MONK_ORB_NATIVE_MODE_SCRIPTED_INTRO
     if mode == _MONK_ORB_MODE_SCRIPTED_ATTACK:
         return _MONK_ORB_NATIVE_MODE_SCRIPTED_ATTACK
+    if mode == _MONK_ORB_MODE_FINAL_ORBIT:
+        return _MONK_ORB_NATIVE_MODE_FINAL_ORBIT
+    if mode == _MONK_ORB_MODE_PLAYER_ORBIT:
+        return _MONK_ORB_NATIVE_MODE_PLAYER_ORBIT
     if mode == "clash_bounce":
         return _MONK_ORB_NATIVE_MODE_CLASH_BOUNCE
     if mode == "lost":
@@ -2996,6 +3106,10 @@ def _monk_orb_state_mode_from_native(mode):
         return _MONK_ORB_MODE_SCRIPTED_INTRO
     if mi == _MONK_ORB_NATIVE_MODE_SCRIPTED_ATTACK:
         return _MONK_ORB_MODE_SCRIPTED_ATTACK
+    if mi == _MONK_ORB_NATIVE_MODE_FINAL_ORBIT:
+        return _MONK_ORB_MODE_FINAL_ORBIT
+    if mi == _MONK_ORB_NATIVE_MODE_PLAYER_ORBIT:
+        return _MONK_ORB_MODE_PLAYER_ORBIT
     if mi == _MONK_ORB_NATIVE_MODE_CLASH_BOUNCE:
         return "clash_bounce"
     if mi == _MONK_ORB_NATIVE_MODE_LOST:
@@ -3072,6 +3186,28 @@ def _monk_orb_c_mode(monk_orb_c_buf, monk_orb_c_stride, enemy_i, slot_i):
     return int(monk_orb_c_buf[base + 0])
 
 
+def _monk_orb_c_is_final_candidate(monk_orb_c_buf, monk_orb_c_stride, enemy_i, slot_i):
+    mode = _monk_orb_c_mode(monk_orb_c_buf, monk_orb_c_stride, enemy_i, slot_i)
+    if mode != _MONK_ORB_NATIVE_MODE_FINAL_ORBIT and mode != _MONK_ORB_NATIVE_MODE_SCRIPTED_ATTACK:
+        return False
+    lost_count = 0
+    si = 0
+    while si < _MONK_ORB_COUNT:
+        base = _monk_orb_c_base(monk_orb_c_buf, monk_orb_c_stride, enemy_i, si)
+        if base < 0:
+            return False
+        slot_mode = int(monk_orb_c_buf[base + 0])
+        if si == int(slot_i):
+            if slot_mode != mode:
+                return False
+        elif slot_mode == _MONK_ORB_NATIVE_MODE_LOST:
+            lost_count += 1
+        else:
+            return False
+        si += 1
+    return lost_count == (_MONK_ORB_COUNT - 1)
+
+
 def _write_monk_orb_detached_to_c(monk_orb_c_buf, monk_orb_c_stride, enemy_i, slot_i, detached_x, detached_y):
     base = _monk_orb_c_base(monk_orb_c_buf, monk_orb_c_stride, enemy_i, slot_i)
     if base < 0:
@@ -3101,6 +3237,23 @@ def _write_monk_orb_scripted_attack_to_c(monk_orb_c_buf, monk_orb_c_stride, enem
     _buf_set_i16_le(monk_orb_c_buf, base + 8, _MONK_ORB_RADIUS)
     _buf_set_i16_le(monk_orb_c_buf, base + 10, script_x)
     _buf_set_i16_le(monk_orb_c_buf, base + 12, script_y)
+    return True
+
+
+def _write_monk_orb_final_swap_to_c(monk_orb_c_buf, monk_orb_c_stride, enemy_i, slot_i, native_mode, x, y):
+    base = _monk_orb_c_base(monk_orb_c_buf, monk_orb_c_stride, enemy_i, slot_i)
+    if base < 0:
+        return False
+    mode = _MONK_ORB_NATIVE_MODE_SCRIPTED_ATTACK if int(native_mode) == _MONK_ORB_NATIVE_MODE_SCRIPTED_ATTACK else _MONK_ORB_NATIVE_MODE_FINAL_ORBIT
+    monk_orb_c_buf[base + 0] = mode
+    monk_orb_c_buf[base + 1] = int(slot_i) & 0xFF
+    monk_orb_c_buf[base + 2] = _MONK_ORB_NATIVE_FINAL_SWAP_PENDING
+    monk_orb_c_buf[base + 3] = 1
+    _buf_set_i16_le(monk_orb_c_buf, base + 4, x)
+    _buf_set_i16_le(monk_orb_c_buf, base + 6, y)
+    _buf_set_i16_le(monk_orb_c_buf, base + 8, _MONK_ORB_FINAL_RADIUS)
+    _buf_set_i16_le(monk_orb_c_buf, base + 10, x)
+    _buf_set_i16_le(monk_orb_c_buf, base + 12, y)
     return True
 
 
@@ -3171,6 +3324,8 @@ def _pack_monk_attack_states_for_c(enemy_rows, enemy_meta=None):
         out[base + 16] = 0xFF
         out[base + 17] = 0
         out[base + 14] = 0
+        _buf_set_i16_le(out, base + 18, 0)
+        _buf_set_i16_le(out, base + 20, 0)
         ei += 1
     return out, _MONK_ATTACK_NATIVE_STRIDE, count
 
@@ -3192,6 +3347,8 @@ def _ensure_monk_attack_c_count(monk_attack_c_buf, monk_attack_c_stride, monk_at
         monk_attack_c_buf[base + 14] = 0
         monk_attack_c_buf[base + 16] = 0xFF
         monk_attack_c_buf[base + 17] = 0
+        _buf_set_i16_le(monk_attack_c_buf, base + 18, 0)
+        _buf_set_i16_le(monk_attack_c_buf, base + 20, 0)
         monk_attack_c_count += 1
     return monk_attack_c_buf, monk_attack_c_stride, monk_attack_c_count
 
@@ -3214,7 +3371,7 @@ def _native_monk_attack_ready():
     return bool(_lgfx is not None and hasattr(_lgfx, "update_monk_attack_native"))
 
 
-def _update_monk_attack_native(monk_attack_c_buf, monk_attack_c_stride, monk_attack_c_count, enemy_rows_c_buf, enemy_rows_c_stride, enemy_rows_c_count, monk_hover_c_buf, monk_hover_c_stride, monk_hover_c_count, monk_orb_c_buf, monk_orb_c_stride, monk_orb_c_count, player_x=0, player_w=16):
+def _update_monk_attack_native(monk_attack_c_buf, monk_attack_c_stride, monk_attack_c_count, enemy_rows_c_buf, enemy_rows_c_stride, enemy_rows_c_count, monk_hover_c_buf, monk_hover_c_stride, monk_hover_c_count, monk_orb_c_buf, monk_orb_c_stride, monk_orb_c_count, player_x=0, player_w=16, player_y=0, player_h=16, camera_x=0, view_w=320, view_h=240):
     if not _native_monk_attack_ready():
         return False
     if monk_attack_c_buf is None or enemy_rows_c_buf is None or monk_hover_c_buf is None or monk_orb_c_buf is None:
@@ -3240,6 +3397,11 @@ def _update_monk_attack_native(monk_attack_c_buf, monk_attack_c_stride, monk_att
             speed_px,
             int(player_x),
             int(player_w),
+            int(player_y),
+            int(player_h),
+            int(camera_x),
+            int(view_w),
+            int(view_h),
         )
         return True
     except Exception as exc:
@@ -3671,6 +3833,8 @@ def _reset_monk_for_respawn_reintro(enemy_rt):
                         monk_attack_c_buf[base + 14] = 0
                         monk_attack_c_buf[base + 16] = 0xFF
                         monk_attack_c_buf[base + 17] = 0
+                        _buf_set_i16_le(monk_attack_c_buf, base + 18, 0)
+                        _buf_set_i16_le(monk_attack_c_buf, base + 20, 0)
             else:
                 encounter["live_enemy_i"] = -1
             encounter["state"] = _MONK_ENCOUNTER_STATE_INACTIVE
@@ -4328,6 +4492,8 @@ def _pack_monk_orb_descriptors_native(
         count = int(count)
         if count < 0:
             count = 0
+        if count < max_count:
+            out = out[:count * stride]
         return out, stride, count
     except Exception as exc:
         print("MONK_ORB_DESC_NATIVE_FAIL %r" % (exc,))
@@ -4361,6 +4527,10 @@ def _pack_monk_encounter_intro_orb_descriptors(monk_encounters, camera_x=0, view
                 oi += 1
         ei += 1
     return out, stride, count
+
+
+def _pack_monk_final_path_descriptors(monk_attack_c_buf, monk_attack_c_stride, monk_attack_c_count, camera_x=0, view_w=320, view_h=240):
+    return bytearray(), 8, 0
 
 
 def _pack_monk_encounter_intro_body_descriptors(monk_encounters, camera_x=0, view_w=320, view_h=240, monk_frame_w=32, monk_frame_h=48):
@@ -4627,10 +4797,248 @@ def _pick_swappable_object_index(objects_rows, player_x, player_y, player_w, pla
     return best_i
 
 
+def _swap_preview_state_tuple(state):
+    if state is None or len(state) < _SWAP_PREVIEW_STATE_STRIDE:
+        return (0, 0, 0, _SWAP_TARGET_NONE, -1, -1, 0, 0, 0, 0, -1)
+    return (
+        int(state[0]),
+        int(state[1]),
+        int(state[2]),
+        int(state[3]),
+        _buf_get_i16_le(state, 4),
+        _buf_get_i16_le(state, 6),
+        _buf_get_i16_le(state, 8),
+        _buf_get_i16_le(state, 10),
+        _buf_get_i16_le(state, 12),
+        _buf_get_i16_le(state, 14),
+        _buf_get_i32_le(state, 16),
+    )
+
+
+def _swap_preview_write_state(state, active, valid, pick_far, kind, index, slot, x, y, w, h, d2):
+    if state is None or len(state) < _SWAP_PREVIEW_STATE_STRIDE:
+        return
+    state[0] = 1 if active else 0
+    state[1] = 1 if valid else 0
+    state[2] = 1 if pick_far else 0
+    state[3] = int(kind) & 0xFF
+    _buf_set_i16_le(state, 4, index)
+    _buf_set_i16_le(state, 6, slot)
+    _buf_set_i16_le(state, 8, x)
+    _buf_set_i16_le(state, 10, y)
+    _buf_set_i16_le(state, 12, w)
+    _buf_set_i16_le(state, 14, h)
+    _buf_set_i32_le(state, 16, d2)
+    age = (state[20] | (state[21] << 8)) if valid else 0
+    if valid and age < 65535:
+        age += 1
+    state[20] = age & 0xFF
+    state[21] = (age >> 8) & 0xFF
+    state[22] = 0
+    state[23] = 0
+
+
+def _swap_preview_target_valid(target, objects_rows, enemy_rows, enemy_bullets, monk_orb_c_buf, monk_orb_c_stride):
+    if target is None or int(target[1]) == 0:
+        return False
+    kind = int(target[3])
+    index = int(target[4])
+    slot = int(target[5])
+    if kind == _SWAP_TARGET_OBJECT:
+        if not objects_rows or index < 0 or index >= len(objects_rows):
+            return False
+        row = objects_rows[index]
+        return bool(row[6] and row[7])
+    if kind == _SWAP_TARGET_ENEMY:
+        if not enemy_rows or index < 0 or index >= len(enemy_rows):
+            return False
+        row = enemy_rows[index]
+        return bool(row[4] and row[5])
+    if kind == _SWAP_TARGET_BULLET:
+        if not enemy_bullets or index < 0 or index >= len(enemy_bullets):
+            return False
+        row = enemy_bullets[index]
+        return bool(row[6])
+    if kind == _SWAP_TARGET_MONK_ORB:
+        mode = _monk_orb_c_mode(monk_orb_c_buf, monk_orb_c_stride, index, slot)
+        return mode not in (_MONK_ORB_NATIVE_MODE_UNUSED, _MONK_ORB_NATIVE_MODE_SCRIPTED_INTRO, _MONK_ORB_NATIVE_MODE_CLASH_BOUNCE, _MONK_ORB_NATIVE_MODE_LOST, _MONK_ORB_NATIVE_MODE_PLAYER_ORBIT)
+    return False
+
+
+def _swap_hold_step(input_system, preview_state, state):
+    b_now = 1 if bool(getattr(input_system, "btn_b_down", False)) else 0
+    y_now = 1 if bool(getattr(input_system, "btn_y_down", False)) else 0
+    b_edge = b_now and not state[0]
+    y_edge = y_now and not state[1]
+    b_release = (not b_now) and state[0]
+    y_release = (not y_now) and state[1]
+    state[0] = b_now
+    state[1] = y_now
+    triggered = False
+    pick_far = False
+    locked_target = None
+    if not state[2]:
+        if b_edge:
+            state[2] = 1
+            state[3] = 1
+            state[4] = 1
+            _swap_preview_write_state(preview_state, True, False, True, _SWAP_TARGET_NONE, -1, -1, 0, 0, 0, 0, -1)
+        elif y_edge:
+            state[2] = 1
+            state[3] = 0
+            state[4] = 2
+            _swap_preview_write_state(preview_state, True, False, False, _SWAP_TARGET_NONE, -1, -1, 0, 0, 0, 0, -1)
+    if state[2]:
+        pick_far = bool(state[3])
+        button = int(state[4])
+        if (button == 1 and b_now) or (button == 2 and y_now):
+            pass
+        elif (button == 1 and b_release) or (button == 2 and y_release):
+            locked_target = _swap_preview_state_tuple(preview_state)
+            triggered = bool(locked_target[1])
+            state[2] = 0
+            state[4] = 0
+            _swap_preview_write_state(preview_state, False, False, pick_far, _SWAP_TARGET_NONE, -1, -1, 0, 0, 0, 0, -1)
+        elif not b_now and not y_now:
+            state[2] = 0
+            state[4] = 0
+            _swap_preview_write_state(preview_state, False, False, pick_far, _SWAP_TARGET_NONE, -1, -1, 0, 0, 0, 0, -1)
+    return triggered, pick_far, locked_target
+
+
+def _swap_hold_cancel(input_system, preview_state, state):
+    if state is not None and len(state) >= _SWAP_INPUT_STATE_STRIDE:
+        state[0] = 1 if bool(getattr(input_system, "btn_b_down", False)) else 0
+        state[1] = 1 if bool(getattr(input_system, "btn_y_down", False)) else 0
+        pick_far = bool(state[3])
+        state[2] = 0
+        state[3] = 0
+        state[4] = 0
+    else:
+        pick_far = False
+    _swap_preview_write_state(preview_state, False, False, pick_far, _SWAP_TARGET_NONE, -1, -1, 0, 0, 0, 0, -1)
+
+
+def _respawn_confirm_pressed(input_system):
+    return bool(
+        getattr(input_system, "btn_a_pressed", False)
+        or getattr(input_system, "btn_b_pressed", False)
+        or getattr(input_system, "btn_x_pressed", False)
+        or getattr(input_system, "btn_y_pressed", False)
+    )
+
+
+def _swap_preview_update_native(
+    preview_state,
+    objects_rows,
+    enemy_rows_c_buf,
+    enemy_rows_c_stride,
+    enemy_rows_c_count,
+    enemy_bullets,
+    monk_orb_c_buf,
+    monk_orb_c_stride,
+    monk_orb_c_count,
+    player_x,
+    player_y,
+    player_w,
+    player_h,
+    pick_far,
+    camera_x,
+    band_top,
+    view_w,
+    view_h,
+):
+    if preview_state is None or len(preview_state) < _SWAP_PREVIEW_STATE_STRIDE:
+        return False
+    if _lgfx is None or not hasattr(_lgfx, "update_swap_preview_native"):
+        return False
+    bullet_buf = enemy_bullets._buf if hasattr(enemy_bullets, "_buf") else bytearray()
+    bullet_count = len(enemy_bullets) if enemy_bullets is not None else 0
+    object_buf = bytearray()
+    object_stride = 10
+    object_count = 0
+    if objects_rows:
+        object_count = len(objects_rows)
+        object_buf = bytearray(object_count * object_stride)
+        oi = 0
+        while oi < object_count:
+            row = objects_rows[oi]
+            base = oi * object_stride
+            _buf_set_i16_le(object_buf, base + 0, row[0])
+            _buf_set_i16_le(object_buf, base + 2, row[1])
+            _buf_set_i16_le(object_buf, base + 4, row[2])
+            _buf_set_i16_le(object_buf, base + 6, row[3])
+            object_buf[base + 8] = 1 if row[6] else 0
+            object_buf[base + 9] = 1 if row[7] else 0
+            oi += 1
+    try:
+        _lgfx.update_swap_preview_native(
+            preview_state,
+            object_buf,
+            object_stride,
+            object_count,
+            enemy_rows_c_buf if enemy_rows_c_buf is not None else bytearray(),
+            enemy_rows_c_stride,
+            enemy_rows_c_count,
+            bullet_buf,
+            _BULLET_STATE_STRIDE,
+            bullet_count,
+            monk_orb_c_buf if monk_orb_c_buf is not None else bytearray(),
+            monk_orb_c_stride,
+            monk_orb_c_count,
+            player_x,
+            player_y,
+            player_w,
+            player_h,
+            pick_far,
+            camera_x,
+            band_top,
+            view_w,
+            view_h,
+            _SWAP_PREVIEW_HYSTERESIS_PX,
+        )
+        return True
+    except Exception as exc:
+        if _runtime_verbose_enabled():
+            print("SWAP_PREVIEW_NATIVE_FAIL %r" % (exc,))
+        return False
+
+
+def _pack_swap_preview_descriptor(preview_state, camera_x=0, view_w=320, view_h=240):
+    target = _swap_preview_state_tuple(preview_state)
+    stride = 8
+    if int(target[1]) == 0:
+        return bytearray(), stride, 0
+    x = int(target[6]) + 1
+    y = int(target[7]) + 1
+    w = int(target[8]) - 2
+    h = int(target[9]) - 2
+    if w <= 0 or h <= 0 or not _aabb_near_view(x, y, w, h, camera_x, view_w, view_h, 8, 8):
+        return bytearray(), stride, 0
+    out = bytearray()
+    _append_i16_le(out, x)
+    _append_i16_le(out, y)
+    out.append(_SPECIAL_KIND_SWAP_PREVIEW)
+    out.append(w & 0xFF)
+    out.append(h & 0xFF)
+    out.append(2)
+    return out, stride, 1
+
+
 def _clone_object_rows(rows):
     if not rows:
         return []
     return [list(row) for row in rows]
+
+
+def _respawn_checkpoint_row(checkpoint_index, objects_rows, saved_rows):
+    if checkpoint_index < 0:
+        return None
+    if saved_rows is not None and checkpoint_index < len(saved_rows):
+        return saved_rows[checkpoint_index]
+    if objects_rows is not None and checkpoint_index < len(objects_rows):
+        return objects_rows[checkpoint_index]
+    return None
 
 
 def _restore_objects_rows(rows, saved_rows, objects_c_buf, objects_c_stride, meta_rows=None):
@@ -4735,6 +5143,46 @@ def _object_valid_after_swap(objects_rows, row_index, tilemap_idx, tilemap_w, ti
                     return False
         i += 1
     return True
+
+
+def _update_object_gravity_rows(objects_rows, objects_meta, objects_c_buf, objects_c_stride, object_solids, object_solids_c_buf, object_solids_c_stride, object_solids_c_count, tilemap_idx, tilemap_w, tilemap_h, tile_size, object_gravity_enabled, object_gravity_step, map_h_px, death_margin, camera_x, view_w, view_h, margin_x, margin_y):
+    if not (object_gravity_enabled and object_gravity_step > 0 and objects_rows and tilemap_idx is not None and tilemap_w > 0 and tilemap_h > 0):
+        return object_solids, object_solids_c_count
+    obj_moved = False
+    oi = 0
+    while oi < len(objects_rows):
+        row = objects_rows[oi]
+        meta = objects_meta[oi] if oi < len(objects_meta) else None
+        wx, wy, ow, oh, _solid, _layer, visible, _swappable, sx, sy, sw0, sh0 = row
+        gravity_on = 1 if meta is not None and int(meta.get("gravity", 0) or 0) != 0 else 0
+        if visible and gravity_on and ow > 0 and oh > 0 and _aabb_near_view(wx, wy, ow, oh, camera_x, view_w, view_h, margin_x, margin_y):
+            steps = object_gravity_step
+            moved_y = 0
+            object_removed = False
+            while steps > 0:
+                ny = int(wy) + 1
+                if _aabb_collides_tilemap(tilemap_idx, tilemap_w, tilemap_h, tile_size, int(wx), ny, int(ow), int(oh)):
+                    break
+                wy = ny
+                moved_y += 1
+                if int(wy) > (map_h_px + death_margin):
+                    object_removed = True
+                    break
+                steps -= 1
+            if object_removed:
+                row[1] = int(wy)
+                row[6] = 0
+                _repack_single_object_entry(objects_c_buf, objects_c_stride, oi, row[0], row[1], 0, 0, 0, 0, meta)
+                obj_moved = True
+            elif moved_y > 0:
+                row[1] = int(wy)
+                _repack_single_object_entry(objects_c_buf, objects_c_stride, oi, row[0], row[1], row[8], row[9], row[10], row[11], meta)
+                obj_moved = True
+        oi += 1
+    if obj_moved:
+        object_solids = _rebuild_object_solids(objects_rows)
+        object_solids_c_count = _sync_object_solids_c_from_list(object_solids_c_buf, object_solids_c_stride, object_solids)
+    return object_solids, object_solids_c_count
 
 
 
@@ -5369,8 +5817,88 @@ def _print_profile_summary(
     avg_other_us,
     avg_total_us,
     fps_prof,
+    avg_tail_overlap_update_us,
+    avg_tail_overlap_residual_wait_us,
+    avg_tail_overlap_total_wait_us,
+    avg_descriptor_us=0,
+    avg_swap_detail_us=0,
 ):
     if not _runtime_verbose_enabled():
+        return
+    tail_hidden_us = avg_tail_overlap_total_wait_us - avg_tail_overlap_residual_wait_us
+    if tail_hidden_us < 0:
+        tail_hidden_us = 0
+    print(
+        "RENDER_SUM fps=%.2f total_us=%d update_us=%d submit_us=%d compose_us=%d dma_wait_us=%d tail_res_us=%d"
+        % (
+            fps_prof,
+            avg_total_us,
+            avg_update_us,
+            avg_submit_us,
+            avg_submit_compose_us,
+            avg_submit_dma_wait_us,
+            avg_tail_overlap_residual_wait_us,
+        )
+    )
+    print(
+        "RENDER_COMP bg_us=%d tile_us=%d obj_us=%d enemy_us=%d special_us=%d player_us=%d"
+        % (
+            avg_band_bg_us,
+            avg_band_tilemap_us,
+            avg_band_object_us,
+            avg_band_enemy_us,
+            avg_band_special_us,
+            avg_band_player_us,
+        )
+    )
+    print(
+        "RENDER_DMA kick_us=%d sync_us=%d start_us=%d push_us=%d wait_us=%d wait_dma_us=%d end_us=%d swap_us=%d"
+        % (
+            avg_submit_kick_us,
+            avg_submit_sync_us,
+            avg_submit_start_us,
+            avg_submit_push_us,
+            avg_submit_wait_us,
+            avg_submit_dma_wait_us,
+            avg_submit_end_us,
+            avg_submit_swap_us,
+        )
+    )
+    print(
+        "RENDER_PIPE band_comp_us=%d,%d,%d,%d,%d,%d band_wait_us=%d,%d,%d,%d,%d,%d tail_total_us=%d tail_update_us=%d tail_hidden_us=%d"
+        % (
+            avg_band0_compose_us,
+            avg_band1_compose_us,
+            avg_band2_compose_us,
+            avg_band3_compose_us,
+            avg_band4_compose_us,
+            avg_band5_compose_us,
+            avg_band0_wait_us,
+            avg_band1_wait_us,
+            avg_band2_wait_us,
+            avg_band3_wait_us,
+            avg_band4_wait_us,
+            avg_band5_wait_us,
+            avg_tail_overlap_total_wait_us,
+            avg_tail_overlap_update_us,
+            tail_hidden_us,
+        )
+    )
+    avg_render_us = avg_submit_compose_us + avg_bg_us + avg_world_us + avg_sprite_us + avg_hud_us
+    avg_wait_us = avg_submit_wait_us + avg_tail_overlap_residual_wait_us
+    print(
+        "PROFILE_TABLE update_us=%d render_us=%d wait_us=%d desc_us=%d swap_us=%d total_us=%d fps=%.2f"
+        % (
+            avg_update_us,
+            avg_render_us,
+            avg_wait_us,
+            avg_descriptor_us,
+            avg_swap_detail_us,
+            avg_total_us,
+            fps_prof,
+        )
+    )
+    if not bool(getattr(config, "CAMERA_RENDER_PROFILE_DETAIL", False)):
         return
     print("PROFILE update_us=%d" % avg_update_us)
     print("PROFILE bg_us=%d" % avg_bg_us)
@@ -5409,6 +5937,114 @@ def _print_profile_summary(
     print("PROFILE other_us=%d" % avg_other_us)
     print("PROFILE total_us=%d" % avg_total_us)
     print("PROFILE fps=%.2f" % fps_prof)
+    print("PROFILE tail_overlap_update_us=%d" % avg_tail_overlap_update_us)
+    print("PROFILE tail_overlap_residual_wait_us=%d" % avg_tail_overlap_residual_wait_us)
+    print("PROFILE tail_overlap_total_wait_us=%d" % avg_tail_overlap_total_wait_us)
+    print("PROFILE descriptor_us=%d" % avg_descriptor_us)
+    print("PROFILE swap_detail_us=%d" % avg_swap_detail_us)
+
+
+def _avg_update_breakdown(profile_every, prof_update_us, prof_update_break_us):
+    n = profile_every
+    input_us = prof_update_break_us[0] // n
+    object_us = prof_update_break_us[1] // n
+    enemy_us = prof_update_break_us[2] // n
+    monk_us = prof_update_break_us[3] // n
+    swap_us = prof_update_break_us[4] // n
+    physics_us = prof_update_break_us[5] // n
+    camera_us = prof_update_break_us[6] // n
+    respawn_us = prof_update_break_us[7] // n
+    misc_us = (prof_update_us // n) - (
+        input_us
+        + object_us
+        + enemy_us
+        + monk_us
+        + swap_us
+        + physics_us
+        + camera_us
+        + respawn_us
+    )
+    if misc_us < 0:
+        misc_us = 0
+    return input_us, object_us, enemy_us, monk_us, swap_us, physics_us, camera_us, respawn_us, misc_us
+
+
+def _profile_update_part(acc, idx, start_us):
+    now_us = ticks_us()
+    acc[idx] += ticks_diff(now_us, start_us)
+    return now_us
+
+
+def _emit_update_breakdown(profile_every, prof_update_us, prof_update_break_us):
+    input_us, object_us, enemy_us, monk_us, swap_us, physics_us, camera_us, respawn_us, misc_us = _avg_update_breakdown(
+        profile_every,
+        prof_update_us,
+        prof_update_break_us,
+    )
+    print(
+        "UPDATE_BREAK input_us=%d object_us=%d enemy_us=%d monk_us=%d swap_us=%d physics_us=%d camera_us=%d respawn_us=%d misc_us=%d"
+        % (input_us, object_us, enemy_us, monk_us, swap_us, physics_us, camera_us, respawn_us, misc_us)
+    )
+
+
+def _emit_step_debug(
+    now,
+    perf_window_start,
+    dbg_every,
+    top_hud_fps_text,
+    coord_hud_enabled,
+    coord_hud_text,
+    use_sprite_player,
+    frame,
+    facing,
+    anim_idx,
+    moving,
+    perf_prefix,
+    player_x,
+    camera_x,
+    input_lr,
+    sprite_draw_mode,
+    draw_off_x,
+    player_screen_x,
+    boundary_clamp_last,
+    partial_rect_experiment_disabled,
+    dirty_last_camera_static,
+    dirty_last_rects_count,
+    dirty_last_bands_count,
+):
+    win_ms = ticks_diff(now, perf_window_start)
+    if win_ms <= 0:
+        win_ms = 1
+    avg_ms = win_ms / dbg_every
+    fps = 1000.0 / avg_ms
+    fps_i = int(fps + 0.5)
+    if fps_i < 0:
+        fps_i = 0
+    top_hud_fps_text = str(fps_i)
+    if coord_hud_enabled:
+        print("CAMERA_TOP_HUD_VALUE fps=%s coord=%s" % (top_hud_fps_text, coord_hud_text))
+    if use_sprite_player:
+        print(
+            "CAMERA_PLAYER_ANIM frame=%d facing=%s idx=%d moving=%d"
+            % (frame, "L" if facing < 0 else "R", anim_idx, moving)
+        )
+        print("CAMERA_PLAYER_SPRITE_PERF frame_ms=%.2f fps=%.2f" % (avg_ms, fps))
+    print("%s_DBG frame=%d player_x=%d camera_x=%d input_lr=%d" % (perf_prefix, frame, player_x, camera_x, input_lr))
+    if use_sprite_player and sprite_draw_mode == "COMPOSE":
+        min_screen_x = 0
+        if draw_off_x < 0:
+            min_screen_x = -draw_off_x
+        print(
+            "PLAYER_BOUNDARY_DBG player_x=%d camera_x=%d player_screen_x=%d sprite_x=%d min_screen_x=%d"
+            % (player_x, camera_x, player_screen_x, player_screen_x + draw_off_x, min_screen_x)
+        )
+        print("PLAYER_BOUNDARY_CLAMP_APPLIED=%d" % boundary_clamp_last)
+    if partial_rect_experiment_disabled:
+        print("DIRTY_CAMERA_STATIC=%d" % dirty_last_camera_static)
+        print("DIRTY_RECTS_COUNT=%d" % dirty_last_rects_count)
+        print("DIRTY_BANDS_COUNT=%d" % dirty_last_bands_count)
+    print("%s_PERF frame_ms=%.2f fps=%.2f" % (perf_prefix, avg_ms, fps))
+    return top_hud_fps_text
 
 
 def _emit_step4_profile(
@@ -5455,6 +6091,11 @@ def _emit_step4_profile(
     dirty_us_acc,
     fallback_us_acc,
     submit_acc,
+    avg_tail_overlap_update_us,
+    avg_tail_overlap_residual_wait_us,
+    avg_tail_overlap_total_wait_us,
+    avg_descriptor_us=0,
+    avg_swap_detail_us=0,
 ):
     n = profile_every
     avg_update_us = prof_update_us // n
@@ -5538,6 +6179,11 @@ def _emit_step4_profile(
         avg_other_us,
         avg_total_us,
         fps_prof,
+        avg_tail_overlap_update_us,
+        avg_tail_overlap_residual_wait_us,
+        avg_tail_overlap_total_wait_us,
+        avg_descriptor_us,
+        avg_swap_detail_us,
     )
     if partial_rect_experiment_disabled:
         if not _runtime_verbose_enabled():
@@ -5593,6 +6239,9 @@ def _submit_native_band_frame(
     monk_orb_c_buf,
     monk_orb_c_stride,
     monk_orb_c_count,
+    monk_attack_c_buf,
+    monk_attack_c_stride,
+    monk_attack_c_count,
     enemy_monk_sheet,
     enemy_monk_frame_w,
     enemy_monk_frame_h,
@@ -5646,8 +6295,10 @@ def _submit_native_band_frame(
     native_probe_disable_far,
     dirty_log_countdown,
     defer_final_wait,
+    swap_preview_state=None,
 ):
     submit_t0 = ticks_us()
+    desc_t0 = submit_t0
     sprite_x = player_screen_x + draw_off_x
     sprite_y = player_y + draw_off_y
     spr_x = sprite_x
@@ -5717,6 +6368,22 @@ def _submit_native_band_frame(
         else:
             monk_orb_desc_buf.extend(intro_orb_desc_buf)
             monk_orb_desc_count += intro_orb_desc_count
+    final_path_desc_buf, final_path_desc_stride, final_path_desc_count = _pack_monk_final_path_descriptors(
+        monk_attack_c_buf,
+        monk_attack_c_stride,
+        monk_attack_c_count,
+        camera_x,
+        sw,
+        sh,
+    )
+    if final_path_desc_count > 0:
+        if special_desc_count <= 0:
+            special_desc_buf = final_path_desc_buf
+            special_desc_stride = final_path_desc_stride
+            special_desc_count = final_path_desc_count
+        else:
+            special_desc_buf.extend(final_path_desc_buf)
+            special_desc_count += final_path_desc_count
     if monk_orb_desc_count > 0:
         if special_desc_count <= 0:
             special_desc_buf = monk_orb_desc_buf
@@ -5725,6 +6392,20 @@ def _submit_native_band_frame(
         else:
             special_desc_buf.extend(monk_orb_desc_buf)
             special_desc_count += monk_orb_desc_count
+    preview_desc_buf, preview_desc_stride, preview_desc_count = _pack_swap_preview_descriptor(
+        swap_preview_state,
+        camera_x,
+        sw,
+        sh,
+    )
+    if preview_desc_count > 0:
+        if special_desc_count <= 0:
+            special_desc_buf = preview_desc_buf
+            special_desc_stride = preview_desc_stride
+            special_desc_count = preview_desc_count
+        else:
+            special_desc_buf.extend(preview_desc_buf)
+            special_desc_count += preview_desc_count
     overlay_desc_buf, overlay_stride, overlay_count, overlay_frames = _pack_special_render_overlays(
         objects_rows,
         objects_meta,
@@ -5764,6 +6445,14 @@ def _submit_native_band_frame(
         enemy_monk_frame_w,
         enemy_monk_frame_h,
     )
+    _apply_monk_death_render_state(
+        enemy_desc_buf,
+        enemy_desc_stride,
+        enemy_desc_count,
+        monk_attack_c_buf,
+        monk_attack_c_stride,
+        monk_attack_c_count,
+    )
     intro_enemy_desc_buf, intro_enemy_desc_stride, intro_enemy_desc_count = _pack_monk_encounter_intro_body_descriptors(
         monk_encounters,
         camera_x,
@@ -5780,6 +6469,7 @@ def _submit_native_band_frame(
         else:
             enemy_desc_buf.extend(intro_enemy_desc_buf)
             enemy_desc_count += intro_enemy_desc_count
+    descriptor_us = ticks_diff(ticks_us(), desc_t0)
     native_object_count = objects_c_count
     native_enemy_count = enemy_desc_count
     native_overlay_count = overlay_count
@@ -5983,6 +6673,7 @@ def _submit_native_band_frame(
         band4_wait_us,
         band5_wait_us,
         dirty_log_countdown,
+        descriptor_us,
     )
 
 
@@ -6723,6 +7414,8 @@ def run(max_frames=None):
                 object_gravity_step = 0
             if object_gravity_step > 8:
                 object_gravity_step = 8
+            object_gravity_update_margin_x = int(getattr(config, "OBJECT_GRAVITY_UPDATE_MARGIN_X", 160))
+            object_gravity_update_margin_y = int(getattr(config, "OBJECT_GRAVITY_UPDATE_MARGIN_Y", 80))
             dbg_key = "CAMERA_TEST_STEP3_DBG_EVERY"
             if step_tag == 4:
                 dbg_key = "CAMERA_TEST_STEP4_DBG_EVERY"
@@ -6913,9 +7606,9 @@ def run(max_frames=None):
             swap_min_interval_ms = int(getattr(config, "SWAP_MIN_INTERVAL_MS", 90))
             if swap_min_interval_ms < 0:
                 swap_min_interval_ms = 0
-            last_x_down = False
-            last_y_down = False
             last_swap_ms = -1000000
+            swap_preview_state = bytearray(_SWAP_PREVIEW_STATE_STRIDE)
+            swap_input_state = bytearray(_SWAP_INPUT_STATE_STRIDE)
             prev_sprite_x = None
             prev_sprite_y = None
             last_tick = ticks_ms()
@@ -6968,6 +7661,7 @@ def run(max_frames=None):
                 prof_total_us,
                 prof_pace_us,
             ) = _zero_profile_counters()
+            prof_desc_us = 0
             partial_rect_experiment_disabled = False
             dirty_fallback_on_camera_move = True
             dirty_band_full_width = True
@@ -6983,12 +7677,13 @@ def run(max_frames=None):
             tail_overlap_update_acc = 0
             tail_overlap_residual_wait_acc = 0
             tail_overlap_total_wait_acc = 0
+            prof_update_break_us = [0, 0, 0, 0, 0, 0, 0, 0]
             native_tail_inflight = False
             floor_layer_enabled = bool(getattr(config, "FLOOR_LAYER_ENABLED", False))
             tilemap_enabled = bool(getattr(config, "TILEMAP_ENABLED", True))
             tilemap_rows = None
             if tilemap_enabled:
-                csv_path = _resolve_asset_path(getattr(config, "TILEMAP_CSV_PATH", "game/Tilemap/map1_tilemap.csv"))
+                csv_path = _resolve_asset_path(getattr(config, "TILEMAP_CSV_PATH", "game/Tilemap/map_tilemap.csv"))
                 tilemap_rows = _load_tilemap_rows(csv_path)
                 if tilemap_rows is None:
                     print("TILEMAP_CSV_LOAD_FAIL")
@@ -7030,7 +7725,7 @@ def run(max_frames=None):
                 print("TILEMAP_COMPOSE_IMPL=%s" % tilemap_compose_impl)
 
             objects_csv_path = _resolve_asset_path(getattr(config, "OBJECTS_CSV_PATH", "game/picture/object/objects.csv"))
-            objects_atlas_path = _resolve_asset_path(getattr(config, "OBJECTS_ATLAS_RGB565_PATH", "game/picture/object/objects_atlas_wire.rgb565"))
+            objects_atlas_path = _resolve_asset_path(getattr(config, "OBJECTS_ATLAS_RGB565_PATH", "game/picture/object/object_altes_wire.rgb565"))
             objects_atlas_w = int(getattr(config, "OBJECTS_ATLAS_W", 128))
             objects_atlas_h = int(getattr(config, "OBJECTS_ATLAS_H", 128))
             objects_compose_impl_cfg = str(getattr(config, "OBJECTS_COMPOSE_IMPL", "C_API")).upper()
@@ -7452,6 +8147,7 @@ def run(max_frames=None):
                         submit_inflight_buf = None
 
                 seg_t0 = ticks_us()
+                update_part_t0 = seg_t0
                 input_system.update(now)
                 input_lr = int(getattr(input_system, "joy_x_axis", 0))
                 move_x = 0
@@ -7463,37 +8159,17 @@ def run(max_frames=None):
                     facing = -1
 
                 # User-mapped keys: B=far swap, Y=near swap.
-                # Stable trigger: edge only + minimum interval.
-                b_pressed = bool(getattr(input_system, "btn_b_pressed", False))
-                x_pressed = bool(getattr(input_system, "btn_x_pressed", False))
-                y_pressed = bool(getattr(input_system, "btn_y_pressed", False))
-                x_now = b_pressed
-                y_now = y_pressed
-                x_edge = x_now and (not last_x_down)
-                y_edge = y_now and (not last_y_down)
-                last_x_down = x_now
-                last_y_down = y_now
-
-                if b_pressed or x_pressed or y_pressed:
-                    print("SWAP_BTN_DBG b=%d x=%d y=%d x_edge=%d y_edge=%d" % (
-                        1 if b_pressed else 0,
-                        1 if x_pressed else 0,
-                        1 if y_pressed else 0,
-                        1 if x_edge else 0,
-                        1 if y_edge else 0,
-                    ))
-
-                swap_pick_far = False
-                swap_triggered = False
-                if x_edge:
-                    swap_pick_far = True
-                    swap_triggered = True
-                elif y_edge:
+                if death_state == 0:
+                    swap_triggered, swap_pick_far, swap_locked_target = _swap_hold_step(input_system, swap_preview_state, swap_input_state)
+                else:
+                    swap_triggered = False
                     swap_pick_far = False
-                    swap_triggered = True
+                    swap_locked_target = None
+                    _swap_hold_cancel(input_system, swap_preview_state, swap_input_state)
 
                 if swap_triggered:
-                    print("SWAP_TRIGGER_DBG far=%d" % (1 if swap_pick_far else 0))
+                    if _runtime_verbose_enabled():
+                        print("SWAP_TRIGGER_DBG far=%d" % (1 if swap_pick_far else 0))
                     if ticks_diff(now, last_swap_ms) < swap_min_interval_ms:
                         swap_triggered = False
                     else:
@@ -7505,41 +8181,32 @@ def run(max_frames=None):
                 map_w_px = tilemap_w * tile_size if (tilemap_enabled and tilemap_w > 0) else sw
                 if map_w_px < sw:
                     map_w_px = sw
+                update_part_t0 = _profile_update_part(prof_update_break_us, 0, update_part_t0)
 
-                if object_gravity_enabled and object_gravity_step > 0 and objects_rows and tilemap_enabled and tilemap_idx is not None and tilemap_w > 0 and tilemap_h > 0:
-                    obj_moved = False
-                    oi = 0
-                    while oi < len(objects_rows):
-                        row = objects_rows[oi]
-                        meta = objects_meta[oi] if oi < len(objects_meta) else None
-                        wx, wy, ow, oh, _solid, _layer, visible, _swappable, sx, sy, sw0, sh0 = row
-                        if visible and ow > 0 and oh > 0:
-                            steps = object_gravity_step
-                            moved_y = 0
-                            object_removed = False
-                            while steps > 0:
-                                ny = int(wy) + 1
-                                if _aabb_collides_tilemap(tilemap_idx, tilemap_w, tilemap_h, tile_size, int(wx), ny, int(ow), int(oh)):
-                                    break
-                                wy = ny
-                                moved_y += 1
-                                if int(wy) > (map_h_px + death_margin):
-                                    object_removed = True
-                                    break
-                                steps -= 1
-                            if object_removed:
-                                row[1] = int(wy)
-                                row[6] = 0
-                                _repack_single_object_entry(objects_c_buf, objects_c_stride, oi, row[0], row[1], 0, 0, 0, 0, meta)
-                                obj_moved = True
-                            elif moved_y > 0:
-                                row[1] = int(wy)
-                                _repack_single_object_entry(objects_c_buf, objects_c_stride, oi, row[0], row[1], row[8], row[9], row[10], row[11], meta)
-                                obj_moved = True
-                        oi += 1
-                    if obj_moved:
-                        object_solids = _rebuild_object_solids(objects_rows)
-                        object_solids_c_count = _sync_object_solids_c_from_list(object_solids_c_buf, object_solids_c_stride, object_solids)
+                object_solids, object_solids_c_count = _update_object_gravity_rows(
+                    objects_rows,
+                    objects_meta,
+                    objects_c_buf,
+                    objects_c_stride,
+                    object_solids,
+                    object_solids_c_buf,
+                    object_solids_c_stride,
+                    object_solids_c_count,
+                    tilemap_idx,
+                    tilemap_w,
+                    tilemap_h,
+                    tile_size,
+                    object_gravity_enabled,
+                    object_gravity_step,
+                    map_h_px,
+                    death_margin,
+                    camera_x,
+                    sw,
+                    sh,
+                    object_gravity_update_margin_x,
+                    object_gravity_update_margin_y,
+                )
+                update_part_t0 = _profile_update_part(prof_update_break_us, 1, update_part_t0)
                 if death_state == 0:
                     enemy_update_out = _update_enemies_and_bullets_native(
                         enemy_rows,
@@ -7628,6 +8295,7 @@ def run(max_frames=None):
                         _sync_enemy_rows_c_from_rows(enemy_rows_c_buf, enemy_rows_c_stride, enemy_rows, enemy_meta)
                     else:
                         player_y, vel_y = enemy_update_out
+                    update_part_t0 = _profile_update_part(prof_update_break_us, 2, update_part_t0)
 
                     if monk_orb_c_count != (len(monk_orb_states) * _MONK_ORB_COUNT):
                         monk_orb_c_buf, monk_orb_c_stride, monk_orb_c_count = _pack_monk_orbs_for_c(monk_orb_states)
@@ -7664,7 +8332,13 @@ def run(max_frames=None):
                             monk_orb_c_count,
                             player_x,
                             player_w,
+                            player_y,
+                            player_h,
+                            camera_x,
+                            sw,
+                            sh,
                         )
+                        _sync_enemy_rows_from_c(enemy_rows, enemy_rows_c_buf, enemy_rows_c_stride)
                     if not _update_monk_orbs_native(
                         monk_orb_states,
                         monk_orb_c_buf,
@@ -7703,7 +8377,41 @@ def run(max_frames=None):
                             monk_orb_c_count,
                             player_x,
                             player_w,
+                            player_y,
+                            player_h,
+                            camera_x,
+                            sw,
+                            sh,
                         )
+                        _sync_enemy_rows_from_c(enemy_rows, enemy_rows_c_buf, enemy_rows_c_stride)
+                    update_part_t0 = _profile_update_part(prof_update_break_us, 3, update_part_t0)
+
+                    if swap_input_state[2]:
+                        _swap_preview_update_native(
+                            swap_preview_state,
+                            objects_rows,
+                            enemy_rows_c_buf,
+                            enemy_rows_c_stride,
+                            enemy_rows_c_count,
+                            enemy_bullets,
+                            monk_orb_c_buf,
+                            monk_orb_c_stride,
+                            monk_orb_c_count,
+                            player_x,
+                            player_y,
+                            player_w,
+                            player_h,
+                            swap_pick_far,
+                            camera_x,
+                            band_top,
+                            sw,
+                            scene_h,
+                        )
+
+                    if swap_triggered and swap_locked_target is not None:
+                        if not _swap_preview_target_valid(swap_locked_target, objects_rows, enemy_rows, enemy_bullets, monk_orb_c_buf, monk_orb_c_stride):
+                            swap_triggered = False
+                            swap_locked_target = None
 
                     player_x, player_y, vel_y, object_solids = _perform_world_swap(
                         swap_triggered,
@@ -7737,10 +8445,12 @@ def run(max_frames=None):
                         enemy_rows_c_buf,
                         enemy_rows_c_stride,
                         enemy_rows_c_count,
+                        swap_locked_target,
                     )
                     if swap_triggered:
                         _sync_enemy_rows_c_from_rows(enemy_rows_c_buf, enemy_rows_c_stride, enemy_rows, enemy_meta)
                         object_solids_c_count = _sync_object_solids_c_from_list(object_solids_c_buf, object_solids_c_stride, object_solids)
+                    update_part_t0 = _profile_update_part(prof_update_break_us, 4, update_part_t0)
 
                     if tilemap_enabled or object_solids:
                         unembed_guard = tile_size * 4
@@ -7786,6 +8496,7 @@ def run(max_frames=None):
                     else:
                         player_x += move_x
                         player_x = _clamp(player_x, 0, max_player_x)
+                    update_part_t0 = _profile_update_part(prof_update_break_us, 5, update_part_t0)
 
                     oi = 0
                     while oi < len(objects_rows):
@@ -7829,8 +8540,8 @@ def run(max_frames=None):
                         death_state = 1
                         anchor_active = False
                         vel_y = 0
-                        if checkpoint_index >= 0 and checkpoint_index < len(objects_rows):
-                            row = objects_rows[checkpoint_index]
+                        row = _respawn_checkpoint_row(checkpoint_index, objects_rows, objects_rows_initial)
+                        if row is not None:
                             death_camera_target_x = _clamp(int(row[0]) + (int(row[2]) // 2) - screen_half, 0, camera_max)
                         else:
                             death_camera_target_x = 0
@@ -7918,6 +8629,7 @@ def run(max_frames=None):
                         moving = 0
                         anim_counter = 0
                         anim_idx = 0
+                    update_part_t0 = _profile_update_part(prof_update_break_us, 6, update_part_t0)
                 else:
                     moving = 0
                     anim_counter = 0
@@ -7933,8 +8645,8 @@ def run(max_frames=None):
                                 camera_x = death_camera_target_x
                         if camera_x == death_camera_target_x:
                             death_state = 2
-                            if checkpoint_index >= 0 and checkpoint_index < len(objects_rows):
-                                row = objects_rows[checkpoint_index]
+                            row = _respawn_checkpoint_row(checkpoint_index, objects_rows, objects_rows_initial)
+                            if row is not None:
                                 anchor_w = 32
                                 anchor_h = 32
                                 if anchor_anim_spec is not None:
@@ -7949,7 +8661,7 @@ def run(max_frames=None):
                                 print("RESPAWN_ANCHOR_READY idx=%d x=%d y=%d" % (checkpoint_index, anchor_x, anchor_y))
                     elif death_state == 2:
                         camera_x = death_camera_target_x
-                        if anchor_active and (x_edge or y_edge):
+                        if anchor_active and _respawn_confirm_pressed(input_system):
                             anchor_w = 32
                             anchor_h = 32
                             if anchor_anim_spec is not None:
@@ -7991,6 +8703,7 @@ def run(max_frames=None):
                             player_screen_x = player_x - camera_x
                             print("PLAYER_RESPAWN_OK x=%d y=%d" % (player_x, player_y))
                     player_screen_x = -4096
+                    update_part_t0 = _profile_update_part(prof_update_break_us, 7, update_part_t0)
 
                 frame_update_us = ticks_diff(ticks_us(), seg_t0)
                 prof_update_us += frame_update_us
@@ -8051,6 +8764,7 @@ def run(max_frames=None):
                         band4_wait_us,
                         band5_wait_us,
                         dirty_log_countdown,
+                        descriptor_us,
                     ) = _submit_native_band_frame(
                         scene_buf,
                         scene_buf_back,
@@ -8085,6 +8799,9 @@ def run(max_frames=None):
                         monk_orb_c_buf,
                         monk_orb_c_stride,
                         monk_orb_c_count,
+                        monk_attack_c_buf,
+                        monk_attack_c_stride,
+                        monk_attack_c_count,
                         enemy_monk_sheet,
                         enemy_monk_frame_w,
                         enemy_monk_frame_h,
@@ -8138,6 +8855,7 @@ def run(max_frames=None):
                         native_probe_disable_far,
                         dirty_log_countdown,
                         native_tail_overlap_enabled,
+                        swap_preview_state,
                     )
                     swap_us = 0
                     submit_acc += us
@@ -8169,6 +8887,7 @@ def run(max_frames=None):
                     prof_submit_dma_wait_us += wait_dma_us
                     prof_submit_end_us += end_us
                     prof_submit_swap_us += swap_us
+                    prof_desc_us += descriptor_us
                     native_tail_inflight = native_tail_overlap_enabled
                     dirty_last_rects_count = band_count
                     dirty_last_bands_count = band_count
@@ -8612,6 +9331,7 @@ def run(max_frames=None):
                     prof_submit_wait_us += wait_us
                     prof_submit_kick_us += kick_us
                     prof_submit_swap_us += swap_us
+                    prof_desc_us += 0
                     dirty_last_rects_count = 2
                     dirty_last_bands_count = 1
                     dirty_last_camera_static = 1 if camera_x == prev_camera_x else 0
@@ -8735,47 +9455,46 @@ def run(max_frames=None):
                     drew_once = True
 
                 if _runtime_verbose_enabled() and (frame % dbg_every) == 0:
-                    win_ms = ticks_diff(now, perf_window_start)
-                    if win_ms <= 0:
-                        win_ms = 1
-                    avg_ms = win_ms / dbg_every
-                    fps = 1000.0 / avg_ms
-                    fps_i = int(fps + 0.5)
-                    if fps_i < 0:
-                        fps_i = 0
-                    top_hud_fps_text = str(fps_i)
-                    if coord_hud_enabled:
-                        print("CAMERA_TOP_HUD_VALUE fps=%s coord=%s" % (top_hud_fps_text, coord_hud_text))
-                    if use_sprite_player:
-                        print(
-                            "CAMERA_PLAYER_ANIM frame=%d facing=%s idx=%d moving=%d"
-                            % (frame, "L" if facing < 0 else "R", anim_idx, moving)
-                        )
-                        print(
-                            "CAMERA_PLAYER_SPRITE_PERF frame_ms=%.2f fps=%.2f"
-                            % (avg_ms, fps)
-                        )
-                    print(
-                        "%s_DBG frame=%d player_x=%d camera_x=%d input_lr=%d"
-                        % (perf_prefix, frame, player_x, camera_x, input_lr)
+                    top_hud_fps_text = _emit_step_debug(
+                        now,
+                        perf_window_start,
+                        dbg_every,
+                        top_hud_fps_text,
+                        coord_hud_enabled,
+                        coord_hud_text,
+                        use_sprite_player,
+                        frame,
+                        facing,
+                        anim_idx,
+                        moving,
+                        perf_prefix,
+                        player_x,
+                        camera_x,
+                        input_lr,
+                        sprite_draw_mode,
+                        draw_off_x,
+                        player_screen_x,
+                        boundary_clamp_last,
+                        partial_rect_experiment_disabled,
+                        dirty_last_camera_static,
+                        dirty_last_rects_count,
+                        dirty_last_bands_count,
                     )
-                    if use_sprite_player and sprite_draw_mode == "COMPOSE":
-                        min_screen_x = 0
-                        if draw_off_x < 0:
-                            min_screen_x = -draw_off_x
-                        print(
-                            "PLAYER_BOUNDARY_DBG player_x=%d camera_x=%d player_screen_x=%d sprite_x=%d min_screen_x=%d"
-                            % (player_x, camera_x, player_screen_x, player_screen_x + draw_off_x, min_screen_x)
-                        )
-                        print("PLAYER_BOUNDARY_CLAMP_APPLIED=%d" % boundary_clamp_last)
-                    if partial_rect_experiment_disabled:
-                        print("DIRTY_CAMERA_STATIC=%d" % dirty_last_camera_static)
-                        print("DIRTY_RECTS_COUNT=%d" % dirty_last_rects_count)
-                        print("DIRTY_BANDS_COUNT=%d" % dirty_last_bands_count)
-                    print("%s_PERF frame_ms=%.2f fps=%.2f" % (perf_prefix, avg_ms, fps))
                     perf_window_start = now
 
                 if _runtime_verbose_enabled() and (frame % profile_every) == 0:
+                    avg_tail_overlap_update_us = 0
+                    avg_tail_overlap_residual_wait_us = 0
+                    avg_tail_overlap_total_wait_us = 0
+                    if native_tail_overlap_enabled:
+                        avg_tail_overlap_update_us = tail_overlap_update_acc // profile_every
+                        avg_tail_overlap_residual_wait_us = tail_overlap_residual_wait_acc // profile_every
+                        avg_tail_overlap_total_wait_us = tail_overlap_total_wait_acc // profile_every
+                    _input_us, _object_us, _enemy_us, _monk_us, avg_swap_detail_us, _physics_us, _camera_us, _respawn_us, _misc_us = _avg_update_breakdown(
+                        profile_every,
+                        prof_update_us,
+                        prof_update_break_us,
+                    )
                     dirty_us_acc, fallback_us_acc, submit_acc, profile_counters = _emit_step4_profile(
                         profile_every,
                         prof_update_us,
@@ -8820,14 +9539,16 @@ def run(max_frames=None):
                         dirty_us_acc,
                         fallback_us_acc,
                         submit_acc,
+                        avg_tail_overlap_update_us,
+                        avg_tail_overlap_residual_wait_us,
+                        avg_tail_overlap_total_wait_us,
+                        prof_desc_us // profile_every,
+                        avg_swap_detail_us,
                     )
+                    _emit_update_breakdown(profile_every, prof_update_us, prof_update_break_us)
+                    prof_update_break_us = [0, 0, 0, 0, 0, 0, 0, 0]
+                    prof_desc_us = 0
                     if native_tail_overlap_enabled:
-                        avg_tail_overlap_update_us = tail_overlap_update_acc // profile_every
-                        avg_tail_overlap_residual_wait_us = tail_overlap_residual_wait_acc // profile_every
-                        avg_tail_overlap_total_wait_us = tail_overlap_total_wait_acc // profile_every
-                        print("PROFILE tail_overlap_update_us=%d" % avg_tail_overlap_update_us)
-                        print("PROFILE tail_overlap_residual_wait_us=%d" % avg_tail_overlap_residual_wait_us)
-                        print("PROFILE tail_overlap_total_wait_us=%d" % avg_tail_overlap_total_wait_us)
                         tail_overlap_update_acc = 0
                         tail_overlap_residual_wait_acc = 0
                         tail_overlap_total_wait_acc = 0
