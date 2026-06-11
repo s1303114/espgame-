@@ -1,4 +1,5 @@
 import config
+import object_native
 
 try:
     import monk_orb_damage
@@ -9,7 +10,6 @@ try:
     import monk_final_path
 except Exception:
     monk_final_path = None
-
 
 try:
     import lgfx as _lgfx
@@ -58,14 +58,12 @@ except Exception:
         json = None
 
 _MODE_ROWS_SAFE_PROGRESSIVE = "ROWS_SAFE_PROGRESSIVE"
-_MODE_ROWS_SAFE_NEAR_TILE_TEST = "ROWS_SAFE_NEAR_TILE_TEST"
-_MODE_FULL_BUFFER_TEST = "FULL_BUFFER_TEST"
-_MODE_SPI_TFT_SPEED_TEST = "SPI_TFT_SPEED_TEST"
-_MODE_SPI_TFT_BULK_WAIT_TEST = "SPI_TFT_BULK_WAIT_TEST"
 
 _ENEMY_STATE_IDLE = 0
 _ENEMY_STATE_WALK = 1
 _ENEMY_STATE_SHOOT = 2
+_ENEMY_STATE_DEATH = 3
+_ENEMY_DEATH_FRAME_COUNT = 5
 _BULLET_DEBUG_LIMIT = 12
 _bullet_debug_count = 0
 _bullet_debug_last_active_ms = -1000000
@@ -74,7 +72,6 @@ _ENEMY_STATE_KEYS = ("facing", "state", "anim_counter", "shoot_cooldown", "shot_
 _ENEMY_ROW_STRIDE = 12
 _ENEMY_STATE_STRIDE = 8
 _BULLET_STATE_STRIDE = 16
-_OBJECT_SOLID_STRIDE = 8
 _MONK_HOVER_STATE_STRIDE = 11
 _MONK_ORB_NATIVE_STRIDE = 16
 _MONK_ATTACK_NATIVE_STRIDE = 32
@@ -1671,7 +1668,7 @@ def _pick_enemy_hit_by_bullet(enemy_rows, enemy_states, bx, by, bw, bh, ignore_e
             meta = enemy_meta[ei] if (enemy_meta is not None and ei < len(enemy_meta)) else None
             enemy_type = str(meta.get("type", "bow") or "bow") if meta is not None else "bow"
             ex, ey, ew, eh, visible, _swappable = row
-            if enemy_type != "monk" and visible and bx < (ex + ew) and (bx + bw) > ex and by < (ey + eh) and (by + bh) > ey:
+            if enemy_type != "monk" and visible and int(state.get("state", _ENEMY_STATE_IDLE)) != _ENEMY_STATE_DEATH and bx < (ex + ew) and (bx + bw) > ex and by < (ey + eh) and (by + bh) > ey:
                 return ei
         ei += 1
     return -1
@@ -1701,6 +1698,12 @@ def _pick_enemy_frame_rect(enemy_state, anim_counter, facing, frame_w, frame_h, 
             frame_idx = 9
         src_y = 0 if face_right else frame_h
         src_x = frame_idx * frame_w
+        return src_x, src_y, frame_w, frame_h
+    if state_code == _ENEMY_STATE_DEATH:
+        if frame_idx >= _ENEMY_DEATH_FRAME_COUNT:
+            frame_idx = _ENEMY_DEATH_FRAME_COUNT - 1
+        src_y = frame_h * 3
+        src_x = (frame_idx if face_right else (_ENEMY_DEATH_FRAME_COUNT + frame_idx)) * frame_w
         return src_x, src_y, frame_w, frame_h
     walk_idx = frame_idx % 5
     src_y = frame_h * 2
@@ -1954,6 +1957,7 @@ def _load_enemy_runtime_assets(shared_monk_orb_atlas=None, shared_monk_orb_atlas
         "enemy_bullets": enemy_bullets,
         "enemy_update_native_ready": enemy_update_native_ready,
         "enemy_render_enabled": enemy_render_enabled,
+        "monk_defeated": False,
     }
 
 def _make_solid_sprite_rgb565(sprite_w, sprite_h, color565, wire_order=False):
@@ -2230,6 +2234,19 @@ def _update_enemies_and_bullets(
                 facing_enemy = 1 if int(state.get("facing", 1)) >= 0 else -1
                 vel_enemy_y = int(state.get("vel_y", 0))
                 shoot_cooldown = int(state.get("shoot_cooldown", 0))
+                if state_code == _ENEMY_STATE_DEATH:
+                    death_anim_total = _ENEMY_DEATH_FRAME_COUNT * enemy_frame_hold
+                    anim_counter = int(state.get("anim_counter", 0)) + 1
+                    if anim_counter >= death_anim_total:
+                        row[4] = 0
+                        _reset_enemy_state(state, enemy_meta[ei] if ei < len(enemy_meta) else None)
+                    else:
+                        state["state"] = _ENEMY_STATE_DEATH
+                        state["anim_counter"] = anim_counter
+                        state["shot_fired"] = 0
+                        state["vel_y"] = 0
+                    ei += 1
+                    continue
                 enemy_center_x = int(wx) + (int(ew) // 2)
                 enemy_center_y = int(wy) + (int(eh) // 2)
                 dx_to_player = player_center_x_enemy - enemy_center_x
@@ -2430,10 +2447,14 @@ def _update_enemies_and_bullets(
                     active = 0
                     _bullet_debug("BULLET_HIT", "enemy idx=%d x=%d y=%d" % (int(hit_enemy_i), bx, by))
                     enemy_row = enemy_rows[hit_enemy_i]
-                    enemy_row[4] = 0
+                    enemy_row[5] = 0
                     hit_state = enemy_states[hit_enemy_i] if hit_enemy_i < len(enemy_states) else None
                     if hit_state is not None:
-                        _reset_enemy_state(hit_state, enemy_meta[hit_enemy_i] if hit_enemy_i < len(enemy_meta) else None)
+                        hit_state["state"] = _ENEMY_STATE_DEATH
+                        hit_state["anim_counter"] = 0
+                        hit_state["shoot_cooldown"] = 0
+                        hit_state["shot_fired"] = 0
+                        hit_state["vel_y"] = 0
             if active and player_x < (bx + bw) and (player_x + player_w) > bx and player_y < (by + bh) and (player_y + player_h) > by:
                 active = 0
                 _bullet_debug("BULLET_HIT", "player x=%d y=%d" % (bx, by))
@@ -2595,7 +2616,7 @@ def _perform_world_swap(
     locked_target=None,
 ):
     if not swap_triggered or (not objects_rows and not enemy_rows and not enemy_bullets):
-        return player_x, player_y, vel_y, _rebuild_object_solids(objects_rows)
+        return player_x, player_y, vel_y, object_native.rebuild_solids(objects_rows)
 
     if monk_intro_states:
         ei = 0
@@ -2604,7 +2625,7 @@ def _perform_world_swap(
             if intro_state is not None and int(intro_state.get("state", _MONK_INTRO_STATE_IDLE) or _MONK_INTRO_STATE_IDLE) == _MONK_INTRO_STATE_DROPPING:
                 if _runtime_verbose_enabled():
                     print("SWAP_BLOCKED_MONK_INTRO")
-                return player_x, player_y, vel_y, _rebuild_object_solids(objects_rows)
+                return player_x, player_y, vel_y, object_native.rebuild_solids(objects_rows)
             ei += 1
 
     target_kind = None
@@ -2638,7 +2659,7 @@ def _perform_world_swap(
         best_d2 = int(locked_target[10])
     else:
         if objects_rows:
-            object_ti = _pick_swappable_object_index(
+            object_ti = object_native.pick_swappable_index(
                 objects_rows,
                 player_x,
                 player_y,
@@ -2775,7 +2796,7 @@ def _perform_world_swap(
         else:
             print("SWAP_TARGET_DBG kind=none idx=-1")
 
-    object_solids = _rebuild_object_solids(objects_rows)
+    object_solids = object_native.rebuild_solids(objects_rows)
     if target_kind == "object" and ti >= 0:
         row = objects_rows[ti]
         meta = objects_meta[ti] if ti < len(objects_meta) else None
@@ -2791,14 +2812,14 @@ def _perform_world_swap(
         player_y = old_oy + (obj_h - player_h)
         row[0] = int(old_px + ((player_w - obj_w) // 2))
         row[1] = int(old_py + (player_h - obj_h))
-        object_solids = _rebuild_object_solids(objects_rows)
+        object_solids = object_native.rebuild_solids(objects_rows)
         max_player_y_swap = map_h_px - player_h
         if max_player_y_swap < 0:
             max_player_y_swap = 0
         player_x = _clamp(player_x, 0, max_player_x)
         player_y = _clamp(player_y, 0, max_player_y_swap)
-        _repack_single_object_entry(objects_c_buf, objects_c_stride, ti, row[0], row[1], row[8], row[9], row[10], row[11], meta)
-        object_solids = _rebuild_object_solids(objects_rows)
+        object_native.repack_render_entry(objects_c_buf, objects_c_stride, ti, row[0], row[1], row[8], row[9], row[10], row[11], meta)
+        object_solids = object_native.rebuild_solids(objects_rows)
         vel_y = 0
         if swap_pick_far:
             print("SWAP_FAR_OK_V2 idx=%d px=%d py=%d" % (ti, player_x, player_y))
@@ -2924,6 +2945,7 @@ _MONK_ORB_MODE_PLAYER_ORBIT = "player_orbit"
 _MONK_ENCOUNTER_STATE_INACTIVE = "inactive"
 _MONK_ENCOUNTER_STATE_INTRO = "intro_drop"
 _MONK_ENCOUNTER_STATE_LIVE = "live"
+_MONK_ENCOUNTER_STATE_DEFEATED = "defeated"
 _MONK_ATTACK_PHASE_SPLIT = "split_edges"
 _MONK_ATTACK_PHASE_DROP = "drop_profile"
 _MONK_ATTACK_PHASE_SWEEP = "sweep"
@@ -3784,6 +3806,8 @@ def _instantiate_live_monk_from_encounter(encounter, enemy_rows, enemy_meta, ene
 
 
 def _reset_monk_for_respawn_reintro(enemy_rt):
+    if enemy_rt.get("monk_defeated"):
+        return False
     monk_encounters = enemy_rt.get("monk_encounters") or []
     if not monk_encounters:
         return False
@@ -3861,6 +3885,88 @@ def _reset_monk_for_respawn_reintro(enemy_rt):
     if did_reset and enemy_rows_c_buf is not None:
         _sync_enemy_rows_c_from_rows(enemy_rows_c_buf, enemy_rows_c_stride, enemy_rows, enemy_meta)
     return did_reset
+
+
+def _monk_live_index_from_rt(enemy_rt):
+    monk_encounters = enemy_rt.get("monk_encounters") or []
+    ei = 0
+    while ei < len(monk_encounters):
+        encounter = monk_encounters[ei]
+        if encounter is not None:
+            live_enemy_i = int(encounter.get("live_enemy_i", -1) or -1)
+            if live_enemy_i >= 0:
+                return live_enemy_i
+        ei += 1
+    enemy_meta = enemy_rt.get("enemy_meta") or []
+    ei = 0
+    while ei < len(enemy_meta):
+        meta = enemy_meta[ei]
+        if meta is not None and str(meta.get("type", "bow") or "bow") == "monk":
+            return ei
+        ei += 1
+    return -1
+
+
+def _apply_monk_defeated_runtime(enemy_rt):
+    live_enemy_i = _monk_live_index_from_rt(enemy_rt)
+    enemy_rows = enemy_rt.get("enemy_rows") or []
+    enemy_rows_c_buf = enemy_rt.get("enemy_rows_c_buf")
+    enemy_rows_c_stride = int(enemy_rt.get("enemy_rows_c_stride", 0) or 0)
+    if live_enemy_i >= 0 and live_enemy_i < len(enemy_rows):
+        enemy_rows[live_enemy_i][4] = 0
+        enemy_rows[live_enemy_i][5] = 0
+    if enemy_rows_c_buf is not None and enemy_rows_c_stride >= _ENEMY_ROW_STRIDE and live_enemy_i >= 0:
+        base = live_enemy_i * enemy_rows_c_stride
+        if base >= 0 and (base + _ENEMY_ROW_STRIDE) <= len(enemy_rows_c_buf):
+            enemy_rows_c_buf[base + 8] = 0
+            enemy_rows_c_buf[base + 9] = 0
+    monk_encounters = enemy_rt.get("monk_encounters") or []
+    monk_intro_states = enemy_rt.get("monk_intro_states") or []
+    ei = 0
+    while ei < len(monk_encounters):
+        encounter = monk_encounters[ei]
+        if encounter is not None:
+            encounter["state"] = _MONK_ENCOUNTER_STATE_DEFEATED
+            encounter["orbs"] = []
+            encounter["orb_states"] = []
+        if ei < len(monk_intro_states):
+            intro_state = monk_intro_states[ei]
+            if intro_state is not None:
+                intro_state["state"] = _MONK_INTRO_STATE_DONE
+                intro_state["armed"] = 0
+        ei += 1
+    return live_enemy_i >= 0
+
+
+def _update_monk_defeated_state(enemy_rt):
+    if enemy_rt.get("monk_defeated"):
+        return True
+    live_enemy_i = _monk_live_index_from_rt(enemy_rt)
+    if live_enemy_i < 0:
+        return False
+    monk_attack_c_buf = enemy_rt.get("monk_attack_c_buf")
+    monk_attack_c_stride = int(enemy_rt.get("monk_attack_c_stride", 0) or 0)
+    monk_attack_c_count = int(enemy_rt.get("monk_attack_c_count", 0) or 0)
+    if monk_attack_c_buf is None or monk_attack_c_stride < _MONK_ATTACK_NATIVE_STRIDE or live_enemy_i >= monk_attack_c_count:
+        return False
+    abase = live_enemy_i * monk_attack_c_stride
+    if abase < 0 or (abase + _MONK_ATTACK_NATIVE_STRIDE) > len(monk_attack_c_buf):
+        return False
+    if int(monk_attack_c_buf[abase + 0]) != _MONK_ATTACK_NATIVE_FINAL_PHASE_DEATH:
+        return False
+    enemy_rows_c_buf = enemy_rt.get("enemy_rows_c_buf")
+    enemy_rows_c_stride = int(enemy_rt.get("enemy_rows_c_stride", 0) or 0)
+    if enemy_rows_c_buf is None or enemy_rows_c_stride < _ENEMY_ROW_STRIDE:
+        return False
+    ebase = live_enemy_i * enemy_rows_c_stride
+    if ebase < 0 or (ebase + _ENEMY_ROW_STRIDE) > len(enemy_rows_c_buf):
+        return False
+    if int(enemy_rows_c_buf[ebase + 8]) != 0:
+        return False
+    enemy_rt["monk_defeated"] = True
+    _apply_monk_defeated_runtime(enemy_rt)
+    print("MONK_DEFEATED_PERSISTENT idx=%d" % live_enemy_i)
+    return True
 
 
 def _update_monk_encounters(monk_encounters, enemy_rows, enemy_meta, enemy_states, enemy_rows_c_buf, enemy_rows_c_stride, monk_hover_c_buf, monk_hover_c_stride, monk_hover_c_count, monk_orb_states, camera_x, view_w, monk_orb_c_buf=None, monk_orb_c_stride=0):
@@ -4696,107 +4802,6 @@ def _sync_enemy_rows_c_from_rows(enemy_rows_c_buf, enemy_rows_c_stride, rows, me
     return limit
 
 
-def _pack_object_solids_for_c(object_solids):
-    if not object_solids:
-        return bytearray(), _OBJECT_SOLID_STRIDE, 0
-    out = bytearray(len(object_solids) * _OBJECT_SOLID_STRIDE)
-    i = 0
-    bi = 0
-    while i < len(object_solids):
-        ox, oy, ow, oh = object_solids[i]
-        _buf_set_i16_le(out, bi + 0, ox)
-        _buf_set_i16_le(out, bi + 2, oy)
-        _buf_set_i16_le(out, bi + 4, ow)
-        _buf_set_i16_le(out, bi + 6, oh)
-        bi += _OBJECT_SOLID_STRIDE
-        i += 1
-    return out, _OBJECT_SOLID_STRIDE, len(object_solids)
-
-
-def _sync_object_solids_c_from_list(object_solids_c_buf, object_solids_c_stride, object_solids):
-    if object_solids_c_buf is None or object_solids_c_stride < _OBJECT_SOLID_STRIDE:
-        return 0
-    limit = len(object_solids_c_buf) // int(object_solids_c_stride)
-    src_count = 0 if not object_solids else len(object_solids)
-    if src_count < limit:
-        limit = src_count
-    i = 0
-    while i < limit:
-        base = i * int(object_solids_c_stride)
-        ox, oy, ow, oh = object_solids[i]
-        _buf_set_i16_le(object_solids_c_buf, base + 0, ox)
-        _buf_set_i16_le(object_solids_c_buf, base + 2, oy)
-        _buf_set_i16_le(object_solids_c_buf, base + 4, ow)
-        _buf_set_i16_le(object_solids_c_buf, base + 6, oh)
-        i += 1
-    while i < (len(object_solids_c_buf) // int(object_solids_c_stride)):
-        base = i * int(object_solids_c_stride)
-        _buf_set_i16_le(object_solids_c_buf, base + 0, 0)
-        _buf_set_i16_le(object_solids_c_buf, base + 2, 0)
-        _buf_set_i16_le(object_solids_c_buf, base + 4, 0)
-        _buf_set_i16_le(object_solids_c_buf, base + 6, 0)
-        i += 1
-    return src_count
-
-
-def _pack_objects_for_c(rows, meta_rows=None):
-    if not rows:
-        return bytearray(), 12, 0
-    out = bytearray(len(rows) * 12)
-    oi = 0
-    bi = 0
-    while oi < len(rows):
-        wx, wy, _ow, _oh, _solid, _layer, visible, _swappable, sx, sy, sw, sh = rows[oi]
-        meta = meta_rows[oi] if (meta_rows is not None and oi < len(meta_rows)) else None
-        if _is_special_render_object(meta):
-            sx = 0
-            sy = 0
-            sw = 0
-            sh = 0
-        if visible:
-            for v in (wx, wy, sx, sy, sw, sh):
-                iv = int(v)
-                if iv < -32768:
-                    iv = -32768
-                if iv > 65535:
-                    iv = 65535
-                uv = iv & 0xFFFF
-                out[bi] = uv & 0xFF
-                out[bi + 1] = (uv >> 8) & 0xFF
-                bi += 2
-        oi += 1
-    if bi != len(out):
-        out = out[:bi]
-    count = bi // 12
-    return out, 12, count
-
-def _pick_swappable_object_index(objects_rows, player_x, player_y, player_w, player_h, pick_far, camera_x, band_top, view_w, view_h):
-    if not objects_rows:
-        return -1
-    best_i = -1
-    best_d2 = -1
-    oi = 0
-    while oi < len(objects_rows):
-        wx, wy, ow, oh, _solid, _layer, visible, swappable, _sx, _sy, _sw, _sh = objects_rows[oi]
-        if visible and swappable:
-            d2 = _visible_target_distance2(wx, wy, ow, oh, player_x, player_y, player_w, player_h, camera_x, band_top, view_w, view_h)
-            if d2 >= 0:
-                if best_i < 0:
-                    best_i = oi
-                    best_d2 = d2
-                else:
-                    if pick_far:
-                        if d2 > best_d2:
-                            best_i = oi
-                            best_d2 = d2
-                    else:
-                        if d2 < best_d2:
-                            best_i = oi
-                            best_d2 = d2
-        oi += 1
-    return best_i
-
-
 def _swap_preview_state_tuple(state):
     if state is None or len(state) < _SWAP_PREVIEW_STATE_STRIDE:
         return (0, 0, 0, _SWAP_TARGET_NONE, -1, -1, 0, 0, 0, 0, -1)
@@ -4928,6 +4933,26 @@ def _respawn_confirm_pressed(input_system):
     )
 
 
+def _map_exit_triggered(input_system, player_x):
+    if not bool(getattr(config, "MAP_EXIT_ENABLED", False)):
+        return False
+    if not getattr(input_system, "btn_a_pressed", False):
+        return False
+    px = int(player_x)
+    return int(getattr(config, "MAP_EXIT_X0", 2816)) <= px <= int(getattr(config, "MAP_EXIT_X1", 2879))
+
+
+def _request_stage_reset(stage):
+    try:
+        with open("/sd/game/save/next_stage.txt", "w") as fp:
+            fp.write(str(stage or "stage02"))
+        raise RuntimeError("STAGE_SWITCH")
+    except Exception as exc:
+        if str(exc) == "STAGE_SWITCH":
+            raise
+        print("MAP_EXIT_REQUEST_FAIL %r" % (exc,))
+
+
 def _swap_preview_update_native(
     preview_state,
     objects_rows,
@@ -5039,151 +5064,6 @@ def _respawn_checkpoint_row(checkpoint_index, objects_rows, saved_rows):
     if objects_rows is not None and checkpoint_index < len(objects_rows):
         return objects_rows[checkpoint_index]
     return None
-
-
-def _restore_objects_rows(rows, saved_rows, objects_c_buf, objects_c_stride, meta_rows=None):
-    if not rows or not saved_rows:
-        return
-    limit = len(rows)
-    if len(saved_rows) < limit:
-        limit = len(saved_rows)
-    oi = 0
-    while oi < limit:
-        meta = meta_rows[oi] if (meta_rows is not None and oi < len(meta_rows)) else None
-        if meta and meta.get("checkpoint"):
-            oi += 1
-            continue
-        saved = saved_rows[oi]
-        row = rows[oi]
-        row[0] = int(saved[0])
-        row[1] = int(saved[1])
-        row[2] = int(saved[2])
-        row[3] = int(saved[3])
-        row[4] = int(saved[4])
-        row[5] = int(saved[5])
-        row[6] = int(saved[6])
-        row[7] = int(saved[7])
-        row[8] = int(saved[8])
-        row[9] = int(saved[9])
-        row[10] = int(saved[10])
-        row[11] = int(saved[11])
-        if row[6]:
-            _repack_single_object_entry(
-                objects_c_buf,
-                objects_c_stride,
-                oi,
-                row[0],
-                row[1],
-                row[8],
-                row[9],
-                row[10],
-                row[11],
-                meta,
-            )
-        else:
-            _repack_single_object_entry(objects_c_buf, objects_c_stride, oi, row[0], row[1], 0, 0, 0, 0, meta)
-        oi += 1
-
-
-def _repack_single_object_entry(objects_c_buf, obj_stride, row_index, wx, wy, sx, sy, sw, sh, meta=None):
-    if objects_c_buf is None or obj_stride < 12 or row_index < 0:
-        return
-    base = row_index * obj_stride
-    if base + 12 > len(objects_c_buf):
-        return
-    if _is_special_render_object(meta):
-        sx = 0
-        sy = 0
-        sw = 0
-        sh = 0
-    vals = (wx, wy, sx, sy, sw, sh)
-    bi = base
-    for v in vals:
-        iv = int(v)
-        if iv < -32768:
-            iv = -32768
-        if iv > 65535:
-            iv = 65535
-        uv = iv & 0xFFFF
-        objects_c_buf[bi] = uv & 0xFF
-        objects_c_buf[bi + 1] = (uv >> 8) & 0xFF
-        bi += 2
-
-
-def _rebuild_object_solids(objects_rows):
-    out = []
-    if not objects_rows:
-        return out
-    i = 0
-    while i < len(objects_rows):
-        wx, wy, ow, oh, solid, _layer, visible, _swappable, _sx, _sy, _sw, _sh = objects_rows[i]
-        if visible and solid:
-            out.append((wx, wy, ow, oh))
-        i += 1
-    return out
-
-
-def _object_valid_after_swap(objects_rows, row_index, tilemap_idx, tilemap_w, tilemap_h, tile_size):
-    if row_index < 0 or row_index >= len(objects_rows):
-        return False
-    wx, wy, ow, oh, solid, _layer, visible, _swappable, _sx, _sy, _sw, _sh = objects_rows[row_index]
-    if not visible or ow <= 0 or oh <= 0:
-        return False
-    # Only solid objects must stay out of tilemap blocks.
-    # Decorative/non-solid objects are allowed to overlap map graphics.
-    if solid and tilemap_idx is not None and tilemap_w > 0 and tilemap_h > 0:
-        if _aabb_collides_tilemap(tilemap_idx, tilemap_w, tilemap_h, tile_size, int(wx), int(wy), int(ow), int(oh)):
-            return False
-    i = 0
-    while i < len(objects_rows):
-        if i != row_index:
-            x2, y2, w2, h2, _s2, _l2, v2, _sw2, _sx2, _sy2, _sw3, _sh3 = objects_rows[i]
-            if v2 and w2 > 0 and h2 > 0:
-                if int(wx) < int(x2) + int(w2) and int(wx) + int(ow) > int(x2) and int(wy) < int(y2) + int(h2) and int(wy) + int(oh) > int(y2):
-                    return False
-        i += 1
-    return True
-
-
-def _update_object_gravity_rows(objects_rows, objects_meta, objects_c_buf, objects_c_stride, object_solids, object_solids_c_buf, object_solids_c_stride, object_solids_c_count, tilemap_idx, tilemap_w, tilemap_h, tile_size, object_gravity_enabled, object_gravity_step, map_h_px, death_margin, camera_x, view_w, view_h, margin_x, margin_y):
-    if not (object_gravity_enabled and object_gravity_step > 0 and objects_rows and tilemap_idx is not None and tilemap_w > 0 and tilemap_h > 0):
-        return object_solids, object_solids_c_count
-    obj_moved = False
-    oi = 0
-    while oi < len(objects_rows):
-        row = objects_rows[oi]
-        meta = objects_meta[oi] if oi < len(objects_meta) else None
-        wx, wy, ow, oh, _solid, _layer, visible, _swappable, sx, sy, sw0, sh0 = row
-        gravity_on = 1 if meta is not None and int(meta.get("gravity", 0) or 0) != 0 else 0
-        if visible and gravity_on and ow > 0 and oh > 0 and _aabb_near_view(wx, wy, ow, oh, camera_x, view_w, view_h, margin_x, margin_y):
-            steps = object_gravity_step
-            moved_y = 0
-            object_removed = False
-            while steps > 0:
-                ny = int(wy) + 1
-                if _aabb_collides_tilemap(tilemap_idx, tilemap_w, tilemap_h, tile_size, int(wx), ny, int(ow), int(oh)):
-                    break
-                wy = ny
-                moved_y += 1
-                if int(wy) > (map_h_px + death_margin):
-                    object_removed = True
-                    break
-                steps -= 1
-            if object_removed:
-                row[1] = int(wy)
-                row[6] = 0
-                _repack_single_object_entry(objects_c_buf, objects_c_stride, oi, row[0], row[1], 0, 0, 0, 0, meta)
-                obj_moved = True
-            elif moved_y > 0:
-                row[1] = int(wy)
-                _repack_single_object_entry(objects_c_buf, objects_c_stride, oi, row[0], row[1], row[8], row[9], row[10], row[11], meta)
-                obj_moved = True
-        oi += 1
-    if obj_moved:
-        object_solids = _rebuild_object_solids(objects_rows)
-        object_solids_c_count = _sync_object_solids_c_from_list(object_solids_c_buf, object_solids_c_stride, object_solids)
-    return object_solids, object_solids_c_count
-
 
 
 def _blit_atlas_region_colorkey_into_scene(
@@ -5681,13 +5561,7 @@ def _normalize_mode(v):
     m = str(v).upper()
     if m == "MAP1_FULL_BULK":
         return _MODE_ROWS_SAFE_PROGRESSIVE
-    if m in (
-        _MODE_ROWS_SAFE_PROGRESSIVE,
-        _MODE_ROWS_SAFE_NEAR_TILE_TEST,
-        _MODE_FULL_BUFFER_TEST,
-        _MODE_SPI_TFT_SPEED_TEST,
-        _MODE_SPI_TFT_BULK_WAIT_TEST,
-    ):
+    if m == _MODE_ROWS_SAFE_PROGRESSIVE:
         return m
     return _MODE_ROWS_SAFE_PROGRESSIVE
 
@@ -5700,18 +5574,12 @@ def _ensure_prerequisites(mode):
     if os is None:
         raise RuntimeError("CAMERA_TEST_FAIL_NO_OS")
 
-    if mode not in (
-        _MODE_ROWS_SAFE_PROGRESSIVE,
-        _MODE_ROWS_SAFE_NEAR_TILE_TEST,
-        _MODE_FULL_BUFFER_TEST,
-        _MODE_SPI_TFT_SPEED_TEST,
-        _MODE_SPI_TFT_BULK_WAIT_TEST,
-    ):
+    if mode != _MODE_ROWS_SAFE_PROGRESSIVE:
         raise RuntimeError("CAMERA_TEST_FAIL_UNSUPPORTED_MODE")
 
 
 def _zero_profile_counters():
-    return (0,) * 35
+    return (0,) * 36
 
 
 def _unpack_band_profile_result(band_res):
@@ -5732,6 +5600,7 @@ def _unpack_band_profile_result(band_res):
     band_player_us = 0
     band_compose_each = [0, 0, 0, 0, 0, 0]
     band_wait_each = [0, 0, 0, 0, 0, 0]
+    dma_elapsed_us = 0
     if len(band_res) >= 10:
         sync_us = int(band_res[4])
         start_us = int(band_res[5])
@@ -5748,6 +5617,8 @@ def _unpack_band_profile_result(band_res):
     if len(band_res) >= 28:
         band_compose_each = [int(v) for v in band_res[16:22]]
         band_wait_each = [int(v) for v in band_res[22:28]]
+    if len(band_res) >= 29:
+        dma_elapsed_us = int(band_res[28])
     return (
         band_count,
         band_compose_us,
@@ -5776,6 +5647,7 @@ def _unpack_band_profile_result(band_res):
         band_wait_each[3],
         band_wait_each[4],
         band_wait_each[5],
+        dma_elapsed_us,
     )
 
 
@@ -5822,12 +5694,102 @@ def _print_profile_summary(
     avg_tail_overlap_total_wait_us,
     avg_descriptor_us=0,
     avg_swap_detail_us=0,
+    avg_dma_elapsed_us=0,
+    avg_tail_dma_elapsed_us=0,
 ):
     if not _runtime_verbose_enabled():
         return
     tail_hidden_us = avg_tail_overlap_total_wait_us - avg_tail_overlap_residual_wait_us
     if tail_hidden_us < 0:
         tail_hidden_us = 0
+    avg_wait_us = avg_submit_wait_us
+    dma_full_elapsed_us = avg_dma_elapsed_us + avg_tail_dma_elapsed_us
+    dma_full_exposed_us = avg_submit_dma_wait_us
+    dma_not_waitdma_us = dma_full_elapsed_us - dma_full_exposed_us
+    if dma_not_waitdma_us < 0:
+        dma_not_waitdma_us = 0
+    spi_hz = int(getattr(config, "CAMERA_SPI_HZ", 40000000) or 40000000)
+    dma_ideal_us = 0
+    screen_w = int(getattr(config, "SCREEN_W", 320) or 320)
+    screen_h = int(getattr(config, "SCREEN_H", 240) or 240)
+    frame_bytes = screen_w * screen_h * 2
+    if spi_hz > 0:
+        dma_ideal_us = (frame_bytes * 8 * 1000000) // spi_hz
+    dma_gap_us = dma_full_elapsed_us - dma_ideal_us
+    print(
+        "FRAME_WALL total_us=%d update_us=%d submit_call_us=%d tail_res_us=%d wait_exposed_us=%d fps=%.2f"
+        % (
+            avg_total_us,
+            avg_update_us,
+            avg_submit_us,
+            avg_tail_overlap_residual_wait_us,
+            avg_wait_us,
+            fps_prof,
+        )
+    )
+    print(
+        "CPU_WORK update_us=%d compose_us=%d desc_us=%d kick_cpu_us=%d sync_us=%d start_us=%d push_us=%d swap_us=%d"
+        % (
+            avg_update_us,
+            avg_submit_compose_us,
+            avg_descriptor_us,
+            avg_submit_kick_us,
+            avg_submit_sync_us,
+            avg_submit_start_us,
+            avg_submit_push_us,
+            avg_swap_detail_us,
+        )
+    )
+    print(
+        "CPU_COMP bg_us=%d tile_us=%d obj_us=%d enemy_us=%d special_us=%d player_us=%d"
+        % (
+            avg_band_bg_us,
+            avg_band_tilemap_us,
+            avg_band_object_us,
+            avg_band_enemy_us,
+            avg_band_special_us,
+            avg_band_player_us,
+        )
+    )
+    print(
+        "DMA_SUM bytes=%d spi_hz=%d ideal_us=%d elapsed_us=%d gap_us=%d exposed_dma_us=%d not_waitdma_us=%d kick_us=%d wait_dma_us=%d end_us=%d tail_dma_us=%d tail_total_us=%d tail_res_us=%d"
+        % (
+            frame_bytes,
+            spi_hz,
+            dma_ideal_us,
+            dma_full_elapsed_us,
+            dma_gap_us,
+            dma_full_exposed_us,
+            dma_not_waitdma_us,
+            avg_submit_kick_us,
+            avg_submit_dma_wait_us,
+            avg_submit_end_us,
+            avg_tail_dma_elapsed_us,
+            avg_tail_overlap_total_wait_us,
+            avg_tail_overlap_residual_wait_us,
+        )
+    )
+    print(
+        "PIPE_OVERLAP band_comp_us=%d,%d,%d,%d,%d,%d band_wait_exposed_us=%d,%d,%d,%d,%d,%d tail_update_us=%d tail_hidden_us=%d"
+        % (
+            avg_band0_compose_us,
+            avg_band1_compose_us,
+            avg_band2_compose_us,
+            avg_band3_compose_us,
+            avg_band4_compose_us,
+            avg_band5_compose_us,
+            avg_band0_wait_us,
+            avg_band1_wait_us,
+            avg_band2_wait_us,
+            avg_band3_wait_us,
+            avg_band4_wait_us,
+            avg_band5_wait_us,
+            avg_tail_overlap_update_us,
+            tail_hidden_us,
+        )
+    )
+    if not bool(getattr(config, "CAMERA_RENDER_PROFILE_DETAIL", False)):
+        return
     print(
         "RENDER_SUM fps=%.2f total_us=%d update_us=%d submit_us=%d compose_us=%d dma_wait_us=%d tail_res_us=%d"
         % (
@@ -5885,7 +5847,6 @@ def _print_profile_summary(
         )
     )
     avg_render_us = avg_submit_compose_us + avg_bg_us + avg_world_us + avg_sprite_us + avg_hud_us
-    avg_wait_us = avg_submit_wait_us + avg_tail_overlap_residual_wait_us
     print(
         "PROFILE_TABLE update_us=%d render_us=%d wait_us=%d desc_us=%d swap_us=%d total_us=%d fps=%.2f"
         % (
@@ -5898,8 +5859,6 @@ def _print_profile_summary(
             fps_prof,
         )
     )
-    if not bool(getattr(config, "CAMERA_RENDER_PROFILE_DETAIL", False)):
-        return
     print("PROFILE update_us=%d" % avg_update_us)
     print("PROFILE bg_us=%d" % avg_bg_us)
     print("PROFILE world_us=%d" % avg_world_us)
@@ -5942,6 +5901,8 @@ def _print_profile_summary(
     print("PROFILE tail_overlap_total_wait_us=%d" % avg_tail_overlap_total_wait_us)
     print("PROFILE descriptor_us=%d" % avg_descriptor_us)
     print("PROFILE swap_detail_us=%d" % avg_swap_detail_us)
+    print("PROFILE dma_elapsed_us=%d" % avg_dma_elapsed_us)
+    print("PROFILE tail_dma_elapsed_us=%d" % avg_tail_dma_elapsed_us)
 
 
 def _avg_update_breakdown(profile_every, prof_update_us, prof_update_break_us):
@@ -6096,6 +6057,8 @@ def _emit_step4_profile(
     avg_tail_overlap_total_wait_us,
     avg_descriptor_us=0,
     avg_swap_detail_us=0,
+    prof_dma_elapsed_us=0,
+    avg_tail_dma_elapsed_us=0,
 ):
     n = profile_every
     avg_update_us = prof_update_us // n
@@ -6131,6 +6094,7 @@ def _emit_step4_profile(
     avg_submit_dma_wait_us = prof_submit_dma_wait_us // n
     avg_submit_end_us = prof_submit_end_us // n
     avg_submit_swap_us = prof_submit_swap_us // n
+    avg_dma_elapsed_us = prof_dma_elapsed_us // n
     avg_total_us = prof_total_us // n
     avg_pace_us = prof_pace_us // n
     avg_other_us = avg_total_us - (
@@ -6184,6 +6148,8 @@ def _emit_step4_profile(
         avg_tail_overlap_total_wait_us,
         avg_descriptor_us,
         avg_swap_detail_us,
+        avg_dma_elapsed_us,
+        avg_tail_dma_elapsed_us,
     )
     if partial_rect_experiment_disabled:
         if not _runtime_verbose_enabled():
@@ -6634,6 +6600,7 @@ def _submit_native_band_frame(
         band3_wait_us,
         band4_wait_us,
         band5_wait_us,
+        dma_elapsed_us,
     ) = _unpack_band_profile_result(band_res)
     if dirty_log_countdown <= 0:
         print("BAND_PIPELINE_SUBMIT_OK")
@@ -6672,6 +6639,7 @@ def _submit_native_band_frame(
         band3_wait_us,
         band4_wait_us,
         band5_wait_us,
+        dma_elapsed_us,
         dirty_log_countdown,
         descriptor_us,
     )
@@ -6684,582 +6652,6 @@ def _print_camera_test_start(mode):
     print("CAMERA_TEST_MODE=%s" % mode)
     if mode == _MODE_ROWS_SAFE_PROGRESSIVE:
         print("CAMERA_ROWS_SAFE_POLICY_ACTIVE")
-    if mode == _MODE_FULL_BUFFER_TEST:
-        print("FULL_BUFFER_TEST_START")
-    if mode in (_MODE_SPI_TFT_SPEED_TEST, _MODE_SPI_TFT_BULK_WAIT_TEST):
-        print("SPI_TFT_SPEED_TEST_START")
-    if mode == _MODE_ROWS_SAFE_NEAR_TILE_TEST:
-        print("CAMERA_TEST_NEAR_START")
-
-
-def _run_pre_rows_safe_mode(mode, max_frames):
-    if mode == _MODE_ROWS_SAFE_NEAR_TILE_TEST:
-        if not hasattr(_lgfx, "blit_rect565_wait"):
-            print("CAMERA_TEST_NEAR_FAIL_NO_BLIT_WAIT")
-            raise RuntimeError("CAMERA_TEST_NEAR_FAIL_NO_BLIT_WAIT")
-
-        far_raw = str(getattr(config, "CAMERA_TEST_ROOT_BG_FAR_RGB565", "/bg_far.rgb565"))
-        try:
-            st = os.stat(far_raw)
-        except Exception:
-            print("CAMERA_TEST_NEAR_FAIL_MISSING_RGB565")
-            raise RuntimeError("CAMERA_TEST_NEAR_FAIL_MISSING_RGB565")
-
-        sw = int(config.SCREEN_W)
-        sh = int(config.SCREEN_H)
-        expected = sw * sh * 2
-        actual = int(st[6]) if len(st) > 6 else -1
-        if actual != expected:
-            print("CAMERA_TEST_NEAR_FAIL_RGB565_SIZE")
-            raise RuntimeError("CAMERA_TEST_NEAR_FAIL_RGB565_SIZE")
-
-        chunk_h = int(getattr(config, "CAMERA_TEST_RGB565_CHUNK_H", 40))
-        if chunk_h < 1:
-            chunk_h = 1
-        if chunk_h > sh:
-            chunk_h = sh
-        row_bytes = sw * 2
-        try:
-            buf = bytearray(row_bytes * chunk_h)
-        except Exception:
-            print("CAMERA_TEST_NEAR_FAIL_ALLOC")
-            raise RuntimeError("CAMERA_TEST_NEAR_FAIL_ALLOC")
-
-        try:
-            from engine.input import InputSystem
-
-            input_system = InputSystem()
-        except Exception:
-            print("CAMERA_TEST_NEAR_FAIL_NO_INPUT")
-            raise RuntimeError("CAMERA_TEST_NEAR_FAIL_NO_INPUT")
-
-        player_w = int(getattr(config, "CAMERA_TEST_PLAYER_W", 12))
-        player_h = int(getattr(config, "CAMERA_TEST_PLAYER_H", 16))
-        player_x = int(getattr(config, "CAMERA_TEST_PLAYER_START_X", 32))
-        default_player_y = sh - player_h - 16
-        player_y = int(getattr(config, "CAMERA_TEST_PLAYER_START_Y", default_player_y))
-        map_w = int(getattr(config, "CAMERA_TEST_MAP_W", 960))
-        screen_half = sw // 2
-        max_player_x = map_w - player_w
-        if max_player_x < 0:
-            max_player_x = 0
-        camera_max = map_w - sw
-        if camera_max < 0:
-            camera_max = 0
-        player_x = _clamp(player_x, 0, max_player_x)
-        speed = int(getattr(config, "PLAYER_SPEED_X", 2))
-        dbg_every = int(getattr(config, "CAMERA_TEST_NEAR_DBG_EVERY", 60))
-        if dbg_every < 1:
-            dbg_every = 60
-
-        ground_h = 16
-        ground_y0 = sh - ground_h
-        band_top = player_y
-        if band_top < 0:
-            band_top = 0
-        if band_top > ground_y0:
-            band_top = ground_y0
-        far_band_h = ground_y0 - band_top
-        scene_h = sh - band_top
-        if far_band_h <= 0 or scene_h <= 0:
-            print("CAMERA_TEST_NEAR_FAIL_PLAYER_BAND")
-            raise RuntimeError("CAMERA_TEST_NEAR_FAIL_PLAYER_BAND")
-
-        near_objects = [
-            (56, 214, 24, 8, 0xF800),
-            (148, 220, 20, 8, 0xFFE0),
-            (236, 228, 16, 8, 0x07FF),
-        ]
-        row_fill_cache = {}
-
-        with open(far_raw, "rb") as ff:
-            y = 0
-            while y < sh:
-                h = chunk_h
-                if y + h > sh:
-                    h = sh - y
-                need = row_bytes * h
-                view = memoryview(buf)[:need]
-                n = ff.readinto(view)
-                if n != need:
-                    print("CAMERA_TEST_NEAR_FAIL_READ")
-                    raise RuntimeError("CAMERA_TEST_NEAR_FAIL_READ")
-                _lgfx.blit_rect565_wait(0, y, sw, h, view)
-                y += h
-
-        far_band_buf = bytearray(sw * far_band_h * 2)
-        with open(far_raw, "rb") as far_bg:
-            row = 0
-            while row < far_band_h:
-                src_off = ((band_top + row) * sw) * 2
-                far_bg.seek(src_off)
-                row_off = row * sw * 2
-                row_view = memoryview(far_band_buf)[row_off : row_off + (sw * 2)]
-                n = far_bg.readinto(row_view)
-                if n != (sw * 2):
-                    print("CAMERA_TEST_NEAR_FAIL_READ")
-                    raise RuntimeError("CAMERA_TEST_NEAR_FAIL_READ")
-                row += 1
-
-        ground_rows = []
-        phase_off = 0
-        while phase_off < 32:
-            row_buf = bytearray(row_bytes)
-            gx = 0
-            i = 0
-            while gx < sw:
-                phase = ((phase_off + gx) // 16) & 1
-                color = config.COLOR_TILE_SOLID if phase == 0 else 0x31A6
-                row_buf[i] = color & 0xFF
-                row_buf[i + 1] = (color >> 8) & 0xFF
-                i += 2
-                gx += 1
-            ground_rows.append(row_buf)
-            phase_off += 1
-
-        scene_buf = bytearray(sw * scene_h * 2)
-        far_len = len(far_band_buf)
-        frame = 0
-        drew_once = False
-        last_tick = ticks_ms()
-        perf_window_start = last_tick
-
-        while True:
-            now = ticks_ms()
-            elapsed = ticks_diff(now, last_tick)
-            if elapsed < config.FRAME_MS:
-                sleep_ms(config.FRAME_MS - elapsed)
-                continue
-            last_tick = now
-
-            input_system.update(now)
-            input_lr = int(getattr(input_system, "joy_x_axis", 0))
-            if input_lr > 20:
-                player_x += speed
-            elif input_lr < -20:
-                player_x -= speed
-            player_x = _clamp(player_x, 0, max_player_x)
-            player_center_x = player_x + (player_w // 2)
-            target_camera_x = player_center_x - screen_half
-            camera_x = _clamp(target_camera_x, 0, camera_max)
-            player_screen_x = player_x - camera_x
-
-            scene_buf[:far_len] = far_band_buf
-            g_row = ground_rows[camera_x & 31]
-            gy = 0
-            while gy < ground_h:
-                off = (far_band_h + gy) * row_bytes
-                scene_buf[off : off + row_bytes] = g_row
-                gy += 1
-
-            visible_count = 0
-            first_screen_x = -9999
-            first_world_x = -9999
-            first_y = -9999
-            first_w = -9999
-            first_h = -9999
-            collect_detail = frame == 0
-            obj_debug_lines = [] if collect_detail else None
-            i = 0
-            while i < len(near_objects):
-                world_x, oy, ow, oh, ocolor = near_objects[i]
-                sx = int(world_x) - camera_x
-                ex = sx + int(ow)
-                sy = int(oy) - band_top
-                ey = sy + int(oh)
-                rx0 = 0 if sx < 0 else sx
-                ry0 = 0 if sy < 0 else sy
-                rx1 = sw if ex > sw else ex
-                ry1 = scene_h if ey > scene_h else ey
-                visible = 1 if (rx1 > rx0 and ry1 > ry0) else 0
-                if collect_detail:
-                    obj_debug_lines.append(
-                        "CAMERA_NEAR_OBJ idx=%d world_x=%d screen_x=%d y=%d w=%d h=%d visible=%d"
-                        % (i, int(world_x), sx, int(oy), int(ow), int(oh), visible)
-                    )
-                if visible:
-                    visible_count += 1
-                    if first_screen_x == -9999:
-                        first_world_x = int(world_x)
-                        first_screen_x = sx
-                        first_y = int(oy)
-                        first_w = int(ow)
-                        first_h = int(oh)
-                    _fill_buffer_rect565_rowcopy(
-                        scene_buf,
-                        sw,
-                        rx0,
-                        ry0,
-                        rx1 - rx0,
-                        ry1 - ry0,
-                        ocolor,
-                        row_fill_cache,
-                    )
-                i += 1
-
-            px0 = player_screen_x
-            py0 = player_y - band_top
-            px1 = px0 + player_w
-            py1 = py0 + player_h
-            sx0 = 0 if px0 < 0 else px0
-            sy0 = 0 if py0 < 0 else py0
-            sx1 = sw if px1 > sw else px1
-            sy1 = scene_h if py1 > scene_h else py1
-            if sx1 > sx0 and sy1 > sy0:
-                _fill_buffer_rect565_rowcopy(
-                    scene_buf,
-                    sw,
-                    sx0,
-                    sy0,
-                    sx1 - sx0,
-                    sy1 - sy0,
-                    config.COLOR_PLAYER,
-                    row_fill_cache,
-                )
-
-            _lgfx.blit_rect565_wait(0, band_top, sw, scene_h, scene_buf)
-
-            frame += 1
-            if not drew_once:
-                print("CAMERA_TEST_NEAR_DRAW_OK")
-                print("CAMERA_TEST_NEAR_HOLD")
-                print("CAMERA_NEAR_VISIBLE_COUNT=%d" % visible_count)
-                print("CAMERA_NEAR_FIRST_SCREEN_X=%d" % first_screen_x)
-                print(
-                    "CAMERA_NEAR_FIRST world_x=%d screen_x=%d y=%d w=%d h=%d"
-                    % (first_world_x, first_screen_x, first_y, first_w, first_h)
-                )
-                if visible_count == 0:
-                    print("CAMERA_TEST_NEAR_FAIL_NOT_VISIBLE")
-                j = 0
-                while j < len(obj_debug_lines):
-                    print(obj_debug_lines[j])
-                    j += 1
-                drew_once = True
-
-            if (frame % dbg_every) == 0:
-                win_ms = ticks_diff(now, perf_window_start)
-                if win_ms <= 0:
-                    win_ms = 1
-                avg_ms = win_ms / dbg_every
-                fps = 1000.0 / avg_ms
-                print("CAMERA_NEAR_VISIBLE_COUNT=%d" % visible_count)
-                print("CAMERA_NEAR_FIRST_SCREEN_X=%d" % first_screen_x)
-                if visible_count == 0:
-                    print("CAMERA_TEST_NEAR_FAIL_NOT_VISIBLE")
-                print("CAMERA_STEP_NEAR_PERF frame_ms=%.2f fps=%.2f" % (avg_ms, fps))
-                perf_window_start = now
-
-            if max_frames is not None and frame >= int(max_frames):
-                break
-
-        print("CAMERA_TEST_END")
-        print("APP_RUN_END_PHASE_CAMERA_TEST")
-        return True
-
-    if mode in (_MODE_SPI_TFT_SPEED_TEST, _MODE_SPI_TFT_BULK_WAIT_TEST):
-        if not hasattr(_lgfx, "blit_rect565_wait"):
-            print("SPI_TFT_FAIL_NO_WAIT_API")
-            raise RuntimeError("SPI_TFT_FAIL_NO_WAIT_API")
-        sw = int(config.SCREEN_W)
-        sh = int(config.SCREEN_H)
-        frame_bytes = sw * sh * 2
-        try:
-            frame_buf = bytearray(frame_bytes)
-            fill_buf = bytearray(frame_bytes)
-        except Exception:
-            print("SPI_TFT_FAIL_ALLOC")
-            raise RuntimeError("SPI_TFT_FAIL_ALLOC")
-
-        print("SPI_TFT_PATH=BULK_WAIT_DIRECT")
-        print("SPI_TFT_ALLOC_OK")
-        print("SPI_TFT_EXPERIMENTAL_PATH_H_GT_1")
-
-        _fill_buffer_color565(fill_buf, sw * sh, 0x0000)
-        _compose_full_grid_320x240(frame_buf)
-
-        frame = 0
-        dbg_every = int(getattr(config, "CAMERA_SPI_TEST_DBG_EVERY", 60))
-        if dbg_every < 1:
-            dbg_every = 60
-        last_tick = ticks_ms()
-        perf_window_start = last_tick
-        drew_once = False
-
-        while True:
-            now = ticks_ms()
-            elapsed = ticks_diff(now, last_tick)
-            if elapsed < config.FRAME_MS:
-                sleep_ms(config.FRAME_MS - elapsed)
-                continue
-            last_tick = now
-
-            buf = frame_buf
-
-            try:
-                _lgfx.blit_rect565_wait(0, 0, sw, sh, buf)
-            except Exception:
-                print("SPI_TFT_FAIL_DRAW")
-                raise RuntimeError("SPI_TFT_FAIL_DRAW")
-
-            frame += 1
-            if not drew_once:
-                print("SPI_TFT_DRAW_OK")
-                drew_once = True
-
-            if (frame % dbg_every) == 0:
-                win_ms = ticks_diff(now, perf_window_start)
-                if win_ms <= 0:
-                    win_ms = 1
-                avg_ms = win_ms / dbg_every
-                fps = 1000.0 / avg_ms
-                print("SPI_TFT_PERF frame_ms=%.2f fps=%.2f" % (avg_ms, fps))
-                perf_window_start = now
-
-            if max_frames is not None and frame >= int(max_frames):
-                break
-
-        print("CAMERA_TEST_END")
-        print("APP_RUN_END_PHASE_CAMERA_TEST")
-        return True
-
-    if mode == _MODE_FULL_BUFFER_TEST:
-        if not hasattr(_lgfx, "blit_rect565_wait"):
-            print("FULL_BUFFER_FAIL_DRAW")
-            raise RuntimeError("FULL_BUFFER_FAIL_DRAW")
-
-        sw = int(config.SCREEN_W)
-        sh = int(config.SCREEN_H)
-        frame_bytes = sw * sh * 2
-        row_bytes = sw * 2
-        dbg_every = int(getattr(config, "FULL_BUFFER_DBG_EVERY", 60))
-        if dbg_every < 1:
-            dbg_every = 60
-
-        enable_world = bool(getattr(config, "FULL_BUFFER_ENABLE_WORLD", True))
-        enable_sprite = bool(getattr(config, "FULL_BUFFER_ENABLE_SPRITE", True))
-        enable_hud = bool(getattr(config, "FULL_BUFFER_ENABLE_HUD", True))
-
-        try:
-            frame_buf = bytearray(frame_bytes)
-            far_cache = bytearray(frame_bytes)
-        except Exception:
-            print("FULL_BUFFER_FAIL_ALLOC")
-            raise RuntimeError("FULL_BUFFER_FAIL_ALLOC")
-        print("FULL_BUFFER_ALLOC_OK")
-
-        far_raw = str(getattr(config, "CAMERA_TEST_ROOT_BG_FAR_RGB565", "/bg_far.rgb565"))
-        try:
-            st = os.stat(far_raw)
-        except Exception:
-            print("FULL_BUFFER_FAIL_FAR_SIZE")
-            raise RuntimeError("FULL_BUFFER_FAIL_FAR_SIZE")
-        size = int(st[6]) if len(st) > 6 else -1
-        if size != frame_bytes:
-            print("FULL_BUFFER_FAIL_FAR_SIZE")
-            raise RuntimeError("FULL_BUFFER_FAIL_FAR_SIZE")
-        with open(far_raw, "rb") as ff:
-            n = ff.readinto(far_cache)
-            if n != frame_bytes:
-                print("FULL_BUFFER_FAIL_FAR_SIZE")
-                raise RuntimeError("FULL_BUFFER_FAIL_FAR_SIZE")
-        print("FULL_BUFFER_FAR_CACHE_OK")
-
-        try:
-            from engine.input import InputSystem
-
-            input_system = InputSystem()
-        except Exception:
-            input_system = None
-
-        map_w = int(getattr(config, "CAMERA_TEST_MAP_W", 960))
-        player_w = int(getattr(config, "CAMERA_TEST_PLAYER_W", 12))
-        player_h = int(getattr(config, "CAMERA_TEST_PLAYER_H", 16))
-        player_x = int(getattr(config, "CAMERA_TEST_PLAYER_START_X", 32))
-        default_player_y = sh - player_h - 16
-        player_y = int(getattr(config, "CAMERA_TEST_PLAYER_START_Y", default_player_y))
-        speed = int(getattr(config, "PLAYER_SPEED_X", 2))
-        max_player_x = map_w - player_w
-        if max_player_x < 0:
-            max_player_x = 0
-        camera_max = map_w - sw
-        if camera_max < 0:
-            camera_max = 0
-        player_x = _clamp(player_x, 0, max_player_x)
-        screen_half = sw // 2
-        camera_x = 0
-        facing = 1
-        anim_counter = 0
-        anim_idx = 0
-
-        draw_off_x = int(getattr(config, "PLAYER_DRAW_OFFSET_X", -((32 - player_w) // 2)))
-        draw_off_y = int(getattr(config, "PLAYER_DRAW_OFFSET_Y", -(32 - player_h)))
-        sprite_left = []
-        sprite_right = []
-        sprite_mask_left = []
-        sprite_mask_right = []
-        c_compose_ok_logged = False
-
-        if enable_sprite:
-            side = "left"
-            while side in ("left", "right"):
-                i = 0
-                while i < 4:
-                    sprite_wire_suffix = "_wire" if (bool(getattr(config, "CAMERA_FULL_BULK_WIRE_ORDER", False)) and not bool(getattr(config, "CAMERA_FULL_BULK_WIRE_RUNTIME_SWAP", True))) else ""
-                    rgb_path = "/player_walk_%s_%d%s.rgb565" % (side, i, sprite_wire_suffix)
-                    mask_path = "/player_walk_%s_%d.mask1" % (side, i)
-                    try:
-                        with open(rgb_path, "rb") as rf:
-                            rb = rf.read()
-                        with open(mask_path, "rb") as mf:
-                            mb = mf.read()
-                    except Exception:
-                        print("FULL_BUFFER_FAIL_DRAW")
-                        raise RuntimeError("FULL_BUFFER_FAIL_DRAW")
-                    if len(rb) != 2048 or len(mb) != 128:
-                        print("FULL_BUFFER_FAIL_DRAW")
-                        raise RuntimeError("FULL_BUFFER_FAIL_DRAW")
-                    if side == "left":
-                        sprite_left.append(rb)
-                        sprite_mask_left.append(mb)
-                    else:
-                        sprite_right.append(rb)
-                        sprite_mask_right.append(mb)
-                    i += 1
-                side = "right" if side == "left" else "done"
-
-        hud_fps_text = "0"
-        hud_coord_text = "0,0"
-        if enable_hud and (_draw_digits_to_buf is None or _get_digits_text_width is None):
-            print("FULL_BUFFER_FAIL_DRAW")
-            raise RuntimeError("FULL_BUFFER_FAIL_DRAW")
-
-        frame = 0
-        drew_once = False
-        last_tick = ticks_ms()
-        perf_window_start = last_tick
-        while True:
-            now = ticks_ms()
-            elapsed = ticks_diff(now, last_tick)
-            if elapsed < config.FRAME_MS:
-                sleep_ms(config.FRAME_MS - elapsed)
-                continue
-            last_tick = now
-
-            input_lr = 0
-            if input_system is not None:
-                input_system.update(now)
-                input_lr = int(getattr(input_system, "joy_x_axis", 0))
-            if input_lr > 20:
-                player_x += speed
-                facing = 1
-            elif input_lr < -20:
-                player_x -= speed
-                facing = -1
-            player_x = _clamp(player_x, 0, max_player_x)
-            player_center_x = player_x + (player_w // 2)
-            target_camera_x = player_center_x - screen_half
-            camera_x = _clamp(target_camera_x, 0, camera_max)
-            player_screen_x = player_x - camera_x
-
-            if enable_sprite:
-                moving = 1 if (input_lr > 20 or input_lr < -20) else 0
-                if moving:
-                    anim_counter += 1
-                    anim_idx = (anim_counter // 4) & 0x03
-                else:
-                    anim_counter = 0
-                    anim_idx = 0
-
-            frame_buf[:] = far_cache
-
-            if enable_world:
-                ground_h = 16
-                ground_y0 = sh - ground_h
-                phase_off = camera_x & 31
-                gy = 0
-                while gy < ground_h:
-                    row_y = ground_y0 + gy
-                    row_off = row_y * row_bytes
-                    gx = 0
-                    gi = row_off
-                    while gx < sw:
-                        phase = ((phase_off + gx) // 16) & 1
-                        color = config.COLOR_TILE_SOLID if phase == 0 else 0x31A6
-                        frame_buf[gi] = color & 0xFF
-                        frame_buf[gi + 1] = (color >> 8) & 0xFF
-                        gi += 2
-                        gx += 1
-                    gy += 1
-
-            if enable_sprite:
-                sprite_x = player_screen_x + draw_off_x
-                sprite_y = player_y + draw_off_y
-                if facing < 0:
-                    spr_rgb = sprite_left[anim_idx]
-                    spr_mask = sprite_mask_left[anim_idx]
-                else:
-                    spr_rgb = sprite_right[anim_idx]
-                    spr_mask = sprite_mask_right[anim_idx]
-                _blend_sprite32_mask1_into_scene(
-                    frame_buf,
-                    sw,
-                    sh,
-                    sprite_x,
-                    sprite_y,
-                    spr_rgb,
-                    spr_mask,
-                )
-                if not c_compose_ok_logged:
-                    print("FULL_BUFFER_PLAYER_C_API_OK")
-                    c_compose_ok_logged = True
-
-            if enable_hud:
-                if (frame % 15) == 0:
-                    hud_coord_text = "%d,%d" % (player_x, player_y)
-                _draw_digits_to_buf(frame_buf, sw, sh, 4, 4, hud_fps_text, 0xFFFF)
-                coord_w = _get_digits_text_width(hud_coord_text)
-                coord_x = sw - coord_w - 4
-                if coord_x < 0:
-                    coord_x = 0
-                _draw_digits_to_buf(frame_buf, sw, sh, coord_x, 4, hud_coord_text, 0xFFFF)
-
-            try:
-                _lgfx.blit_rect565_wait(0, 0, sw, sh, frame_buf)
-            except Exception:
-                print("FULL_BUFFER_FAIL_DRAW")
-                raise RuntimeError("FULL_BUFFER_FAIL_DRAW")
-
-            frame += 1
-            if not drew_once:
-                if enable_hud:
-                    print("FULL_BUFFER_HUD_OK")
-                print("FULL_BUFFER_DRAW_OK")
-                drew_once = True
-
-            if (frame % dbg_every) == 0:
-                win_ms = ticks_diff(now, perf_window_start)
-                if win_ms <= 0:
-                    win_ms = 1
-                avg_ms = win_ms / dbg_every
-                fps = 1000.0 / avg_ms
-                if fps < 20.0:
-                    print("FULL_BUFFER_FAIL_PERF")
-                fps_i = int(fps + 0.5)
-                if fps_i < 0:
-                    fps_i = 0
-                hud_fps_text = str(fps_i)
-                print("FULL_BUFFER_PERF frame_ms=%.2f fps=%.2f" % (avg_ms, fps))
-                perf_window_start = now
-
-            if max_frames is not None and frame >= int(max_frames):
-                break
-
-        print("CAMERA_TEST_END")
-        print("APP_RUN_END_PHASE_CAMERA_TEST")
-        return True
-
-    return False
 
 
 def run(max_frames=None):
@@ -7274,9 +6666,6 @@ def run(max_frames=None):
         _lgfx.rotation(1)
     except Exception:
         pass
-
-    if _run_pre_rows_safe_mode(mode, max_frames):
-        return
 
     if mode == _MODE_ROWS_SAFE_PROGRESSIVE:
         step = int(getattr(config, "CAMERA_TEST_STEP", 1))
@@ -7607,6 +6996,7 @@ def run(max_frames=None):
             if swap_min_interval_ms < 0:
                 swap_min_interval_ms = 0
             last_swap_ms = -1000000
+            map_exit_latched = False
             swap_preview_state = bytearray(_SWAP_PREVIEW_STATE_STRIDE)
             swap_input_state = bytearray(_SWAP_INPUT_STATE_STRIDE)
             prev_sprite_x = None
@@ -7660,6 +7050,7 @@ def run(max_frames=None):
                 prof_submit_swap_us,
                 prof_total_us,
                 prof_pace_us,
+                prof_dma_elapsed_us,
             ) = _zero_profile_counters()
             prof_desc_us = 0
             partial_rect_experiment_disabled = False
@@ -7677,6 +7068,7 @@ def run(max_frames=None):
             tail_overlap_update_acc = 0
             tail_overlap_residual_wait_acc = 0
             tail_overlap_total_wait_acc = 0
+            tail_dma_elapsed_acc = 0
             prof_update_break_us = [0, 0, 0, 0, 0, 0, 0, 0]
             native_tail_inflight = False
             floor_layer_enabled = bool(getattr(config, "FLOOR_LAYER_ENABLED", False))
@@ -7739,30 +7131,21 @@ def run(max_frames=None):
             )
             object_animations = _load_object_animations(object_animations_path)
             special_object_render_enabled = True if object_animations else False
-            objects_c_buf = bytearray()
-            objects_c_stride = 12
-            objects_c_count = 0
-            object_solids = []
-            object_solids_c_buf = bytearray()
-            object_solids_c_stride = _OBJECT_SOLID_STRIDE
-            object_solids_c_count = 0
-            if objects_rows and objects_atlas is not None:
-                object_solids = _rebuild_object_solids(objects_rows)
-                object_solids_c_buf, object_solids_c_stride, object_solids_c_count = _pack_object_solids_for_c(object_solids)
-                objects_c_buf, objects_c_stride, objects_c_count = _pack_objects_for_c(objects_rows, objects_meta)
-                print("OBJECT_MODE_ON")
-                print("OBJECT_COUNT=%d" % len(objects_rows))
-                print("OBJECT_C_COUNT=%d" % objects_c_count)
-                print("OBJECT_COMPOSE_IMPL_CFG=%s" % objects_compose_impl_cfg)
-                print("OBJECT_SOLID_COUNT=%d" % len(object_solids))
-            else:
-                objects_rows = []
-                objects_meta = []
-                objects_atlas = None
-                object_solids_c_buf = bytearray()
-                object_solids_c_stride = _OBJECT_SOLID_STRIDE
-                object_solids_c_count = 0
-                print("OBJECT_MODE_OFF")
+            (
+                objects_rows,
+                objects_meta,
+                objects_atlas,
+                objects_c_buf,
+                objects_c_stride,
+                objects_c_count,
+                object_state_c_buf,
+                object_state_c_stride,
+                object_state_c_count,
+                object_solids,
+                object_solids_c_buf,
+                object_solids_c_stride,
+                object_solids_c_count,
+            ) = object_native.init_buffers(objects_rows, objects_meta, objects_atlas, objects_compose_impl_cfg, _lgfx)
             enemy_rt = _load_enemy_runtime_assets(objects_atlas, objects_atlas_w, objects_atlas_h, objects_atlas_path)
             enemy_detect_x = enemy_rt["enemy_detect_x"]
             enemy_flee_x = enemy_rt["enemy_flee_x"]
@@ -7970,8 +7353,8 @@ def run(max_frames=None):
             if partial_rect_experiment_disabled:
                 print("PARTIAL_RECT_EXPERIMENT_DISABLED")
 
-            submit_async_cfg = bool(getattr(config, "CAMERA_FULL_BULK_DOUBLE_BUFFER", True))
-            submit_wire_order_cfg = bool(getattr(config, "CAMERA_FULL_BULK_WIRE_ORDER", False))
+            submit_async_cfg = bool(getattr(config, "CAMERA_RENDER_BACK_BUFFER", True))
+            submit_wire_order_cfg = bool(getattr(config, "CAMERA_RENDER_WIRE_ORDER", True))
             submit_wire_runtime_swap = False
             has_async_api = hasattr(_lgfx, "blit_rect565_async") and hasattr(_lgfx, "blit_wait_done")
             has_wire_api = (
@@ -8158,6 +7541,15 @@ def run(max_frames=None):
                     move_x = -speed
                     facing = -1
 
+                if death_state == 0 and _map_exit_triggered(input_system, player_x):
+                    if not map_exit_latched:
+                        map_exit_latched = True
+                        next_stage = str(getattr(config, "MAP_EXIT_NEXT_STAGE", "stage02") or "stage02")
+                        print("MAP_EXIT_TRIGGER next=%s x=%d" % (next_stage, int(player_x)))
+                        _request_stage_reset(next_stage)
+                elif not getattr(input_system, "btn_a_down", False):
+                    map_exit_latched = False
+
                 # User-mapped keys: B=far swap, Y=near swap.
                 if death_state == 0:
                     swap_triggered, swap_pick_far, swap_locked_target = _swap_hold_step(input_system, swap_preview_state, swap_input_state)
@@ -8183,9 +7575,14 @@ def run(max_frames=None):
                     map_w_px = sw
                 update_part_t0 = _profile_update_part(prof_update_break_us, 0, update_part_t0)
 
-                object_solids, object_solids_c_count = _update_object_gravity_rows(
+                object_solids, object_solids_c_count = object_native.update_frame(
                     objects_rows,
                     objects_meta,
+                    _lgfx,
+                    _runtime_verbose_enabled(),
+                    object_state_c_buf,
+                    object_state_c_stride,
+                    object_state_c_count,
                     objects_c_buf,
                     objects_c_stride,
                     object_solids,
@@ -8205,6 +7602,8 @@ def run(max_frames=None):
                     sh,
                     object_gravity_update_margin_x,
                     object_gravity_update_margin_y,
+                    _aabb_near_view,
+                    _aabb_collides_tilemap,
                 )
                 update_part_t0 = _profile_update_part(prof_update_break_us, 1, update_part_t0)
                 if death_state == 0:
@@ -8339,6 +7738,8 @@ def run(max_frames=None):
                             sh,
                         )
                         _sync_enemy_rows_from_c(enemy_rows, enemy_rows_c_buf, enemy_rows_c_stride)
+                        if _update_monk_defeated_state(enemy_rt):
+                            monk_platform_camera_locked = False
                     if not _update_monk_orbs_native(
                         monk_orb_states,
                         monk_orb_c_buf,
@@ -8384,6 +7785,8 @@ def run(max_frames=None):
                             sh,
                         )
                         _sync_enemy_rows_from_c(enemy_rows, enemy_rows_c_buf, enemy_rows_c_stride)
+                        if _update_monk_defeated_state(enemy_rt):
+                            monk_platform_camera_locked = False
                     update_part_t0 = _profile_update_part(prof_update_break_us, 3, update_part_t0)
 
                     if swap_input_state[2]:
@@ -8449,7 +7852,8 @@ def run(max_frames=None):
                     )
                     if swap_triggered:
                         _sync_enemy_rows_c_from_rows(enemy_rows_c_buf, enemy_rows_c_stride, enemy_rows, enemy_meta)
-                        object_solids_c_count = _sync_object_solids_c_from_list(object_solids_c_buf, object_solids_c_stride, object_solids)
+                        object_solids_c_count = object_native.sync_solids_from_list(object_solids_c_buf, object_solids_c_stride, object_solids)
+                        object_native.sync_states_from_rows(object_state_c_buf, object_state_c_stride, objects_rows, objects_meta)
                     update_part_t0 = _profile_update_part(prof_update_break_us, 4, update_part_t0)
 
                     if tilemap_enabled or object_solids:
@@ -8550,11 +7954,11 @@ def run(max_frames=None):
                     if death_state == 0:
                         player_center_x = player_x + (player_w // 2)
                         target_camera_x = player_center_x - screen_half
-                        if monk_platform_camera_locked:
+                        if monk_platform_camera_locked and not enemy_rt.get("monk_defeated"):
                             camera_x = 1600
                         else:
                             camera_x = _clamp(target_camera_x, 0, camera_max)
-                            if camera_x >= 1600:
+                            if camera_x >= 1600 and not enemy_rt.get("monk_defeated"):
                                 camera_x = 1600
                                 monk_platform_camera_locked = True
                                 if monk_intro_states:
@@ -8594,7 +7998,7 @@ def run(max_frames=None):
                                     if new_monk_hover_c_count > monk_hover_c_count:
                                         monk_hover_c_count = new_monk_hover_c_count
                                 ei += 1
-                        if monk_platform_camera_locked:
+                        if monk_platform_camera_locked and not enemy_rt.get("monk_defeated"):
                             _update_monk_intro_states(
                                 monk_intro_states,
                                 monk_encounters,
@@ -8673,30 +8077,34 @@ def run(max_frames=None):
                             vel_y = 0
                             anchor_active = False
                             anchor_anim_counter = 0
-                            _restore_objects_rows(
+                            object_native.restore_rows(
                                 objects_rows,
                                 objects_rows_initial,
                                 objects_c_buf,
                                 objects_c_stride,
                                 objects_meta,
+                                object_state_c_buf,
+                                object_state_c_stride,
                             )
                             _restore_enemy_rows(enemy_rows, enemy_rows_initial, enemy_states, enemy_meta)
                             _sync_enemy_rows_c_from_rows(enemy_rows_c_buf, enemy_rows_c_stride, enemy_rows, enemy_meta)
+                            if enemy_rt.get("monk_defeated"):
+                                _apply_monk_defeated_runtime(enemy_rt)
                             _clear_enemy_bullets(enemy_bullets)
                             if hasattr(enemy_bullets, "ensure_capacity"):
                                 enemy_bullets.ensure_capacity(enemy_max_bullets)
-                            object_solids = _rebuild_object_solids(objects_rows)
-                            object_solids_c_count = _sync_object_solids_c_from_list(object_solids_c_buf, object_solids_c_stride, object_solids)
+                            object_solids = object_native.rebuild_solids(objects_rows)
+                            object_solids_c_count = object_native.sync_solids_from_list(object_solids_c_buf, object_solids_c_stride, object_solids)
                             monk_respawn_min_x = int(getattr(config, "MONK_RESPAWN_REINTRO_MIN_X", 1500) or 1500)
-                            if int(player_x) >= monk_respawn_min_x and _reset_monk_for_respawn_reintro(enemy_rt):
+                            if (not enemy_rt.get("monk_defeated")) and int(player_x) >= monk_respawn_min_x and _reset_monk_for_respawn_reintro(enemy_rt):
                                 monk_platform_camera_locked = True
                                 camera_x = 1600
                                 print("MONK_RESPAWN_REINTRO_RESET player_x=%d" % int(player_x))
                             death_state = 0
-                            monk_platform_camera_locked = True if camera_x >= 1600 else False
+                            monk_platform_camera_locked = True if (camera_x >= 1600 and not enemy_rt.get("monk_defeated")) else False
                             player_center_x = player_x + (player_w // 2)
                             target_camera_x = player_center_x - screen_half
-                            if monk_platform_camera_locked:
+                            if monk_platform_camera_locked and not enemy_rt.get("monk_defeated"):
                                 camera_x = 1600
                             else:
                                 camera_x = _clamp(target_camera_x, 0, camera_max)
@@ -8707,9 +8115,16 @@ def run(max_frames=None):
 
                 frame_update_us = ticks_diff(ticks_us(), seg_t0)
                 prof_update_us += frame_update_us
-                if native_tail_overlap_enabled and native_tail_inflight:
+                if native_band_pipeline_enabled and hasattr(_lgfx, "band_pipeline_tail_wait"):
                     try:
-                        tail_total_wait_us, tail_residual_wait_us, tail_residual_dma_wait_us, tail_end_us = _lgfx.band_pipeline_tail_wait()
+                        tail_wait_res = _lgfx.band_pipeline_tail_wait()
+                        tail_total_wait_us = int(tail_wait_res[0])
+                        tail_residual_wait_us = int(tail_wait_res[1])
+                        tail_residual_dma_wait_us = int(tail_wait_res[2])
+                        tail_end_us = int(tail_wait_res[3])
+                        tail_dma_elapsed_us = tail_total_wait_us
+                        if len(tail_wait_res) >= 5:
+                            tail_dma_elapsed_us = int(tail_wait_res[4])
                     except Exception:
                         native_tail_inflight = False
                         native_tail_overlap_enabled = False
@@ -8724,6 +8139,7 @@ def run(max_frames=None):
                         tail_overlap_update_acc += overlap_update_us
                         tail_overlap_residual_wait_acc += tail_residual_wait_us
                         tail_overlap_total_wait_acc += tail_total_wait_us
+                        tail_dma_elapsed_acc += tail_dma_elapsed_us
                         prof_submit_wait_us += tail_residual_wait_us
                         prof_submit_dma_wait_us += tail_residual_dma_wait_us
                         prof_submit_end_us += tail_end_us
@@ -8763,6 +8179,7 @@ def run(max_frames=None):
                         band3_wait_us,
                         band4_wait_us,
                         band5_wait_us,
+                        dma_elapsed_us,
                         dirty_log_countdown,
                         descriptor_us,
                     ) = _submit_native_band_frame(
@@ -8888,6 +8305,7 @@ def run(max_frames=None):
                     prof_submit_end_us += end_us
                     prof_submit_swap_us += swap_us
                     prof_desc_us += descriptor_us
+                    prof_dma_elapsed_us += dma_elapsed_us
                     native_tail_inflight = native_tail_overlap_enabled
                     dirty_last_rects_count = band_count
                     dirty_last_bands_count = band_count
@@ -9486,10 +8904,12 @@ def run(max_frames=None):
                     avg_tail_overlap_update_us = 0
                     avg_tail_overlap_residual_wait_us = 0
                     avg_tail_overlap_total_wait_us = 0
+                    avg_tail_dma_elapsed_us = 0
                     if native_tail_overlap_enabled:
                         avg_tail_overlap_update_us = tail_overlap_update_acc // profile_every
                         avg_tail_overlap_residual_wait_us = tail_overlap_residual_wait_acc // profile_every
                         avg_tail_overlap_total_wait_us = tail_overlap_total_wait_acc // profile_every
+                        avg_tail_dma_elapsed_us = tail_dma_elapsed_acc // profile_every
                     _input_us, _object_us, _enemy_us, _monk_us, avg_swap_detail_us, _physics_us, _camera_us, _respawn_us, _misc_us = _avg_update_breakdown(
                         profile_every,
                         prof_update_us,
@@ -9544,6 +8964,8 @@ def run(max_frames=None):
                         avg_tail_overlap_total_wait_us,
                         prof_desc_us // profile_every,
                         avg_swap_detail_us,
+                        prof_dma_elapsed_us,
+                        avg_tail_dma_elapsed_us,
                     )
                     _emit_update_breakdown(profile_every, prof_update_us, prof_update_break_us)
                     prof_update_break_us = [0, 0, 0, 0, 0, 0, 0, 0]
@@ -9552,6 +8974,7 @@ def run(max_frames=None):
                         tail_overlap_update_acc = 0
                         tail_overlap_residual_wait_acc = 0
                         tail_overlap_total_wait_acc = 0
+                        tail_dma_elapsed_acc = 0
                     (
                         prof_update_us,
                         prof_bg_us,
@@ -9588,6 +9011,7 @@ def run(max_frames=None):
                         prof_submit_swap_us,
                         prof_total_us,
                         prof_pace_us,
+                        prof_dma_elapsed_us,
                     ) = profile_counters
 
                 if max_frames is not None and frame >= int(max_frames):

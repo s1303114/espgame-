@@ -2,6 +2,8 @@
 # Keep game code and assets on /sd/game; internal flash only boots the SD app.
 
 GAME_PATH = "/sd/game"
+STAGE_REQUEST_PATH = GAME_PATH + "/save/next_stage.txt"
+BOOT_STAGE_PATH = GAME_PATH + "/save/boot_stage.txt"
 
 try:
     from time import sleep_ms
@@ -60,7 +62,7 @@ def _reset_game_imports():
 
     purge = []
     for name in sys.modules:
-        if name in ("app", "app_camera_test", "config", "assets", "state"):
+        if name in ("app", "app_camera_test", "map2_app", "map2_elevator", "config", "assets", "state"):
             purge.append(name)
             continue
         if name == "engine" or name.startswith("engine."):
@@ -114,13 +116,40 @@ def _exec_module_from_path(name, path):
     return module
 
 
+def _read_stage_request():
+    try:
+        with open(STAGE_REQUEST_PATH, "r") as handle:
+            stage = handle.read().strip()
+    except Exception:
+        stage = ""
+    if stage:
+        try:
+            import os
+            os.remove(STAGE_REQUEST_PATH)
+        except Exception:
+            pass
+        if stage == "stage02":
+            return stage
+    try:
+        with open(BOOT_STAGE_PATH, "r") as handle:
+            stage = handle.read().strip()
+    except Exception:
+        return "map1"
+    if stage == "stage02":
+        return stage
+    return "map1"
+
+
 def _load_sd_app():
     import os
     import sys
 
     os.stat(GAME_PATH + "/app.py")
     os.stat(GAME_PATH + "/config.py")
-    os.stat(GAME_PATH + "/app_camera_test.py")
+    stage = _read_stage_request()
+    app_name = "map2_app" if stage == "stage02" else "app_camera_test"
+    app_path = GAME_PATH + "/" + app_name + ".py"
+    os.stat(app_path)
     os.chdir(GAME_PATH)
     while GAME_PATH in sys.path:
         sys.path.remove(GAME_PATH)
@@ -128,8 +157,15 @@ def _load_sd_app():
         sys.path.remove(".frozen")
     sys.path.insert(0, GAME_PATH)
     _reset_game_imports()
-    _exec_module_from_path("config", GAME_PATH + "/config.py")
-    return _exec_module_from_path("app_camera_test", GAME_PATH + "/app_camera_test.py")
+    config = _exec_module_from_path("config", GAME_PATH + "/config.py")
+    if stage == "map1":
+        try:
+            import asset_cache
+            asset_cache.preload_map2(config, int(config.SCREEN_W), int(config.SCREEN_H))
+        except Exception as exc:
+            print("MAP2_PRELOAD_EXCEPTION %r" % (exc,))
+    print("LAUNCHER_STAGE=%s" % stage)
+    return _exec_module_from_path(app_name, app_path)
 
 
 def main():
@@ -144,39 +180,50 @@ def main():
         _safe_mode("sd mount failed")
         return
 
-    try:
-        _trace("LOAD_SD_APP_BEGIN")
-        app = _load_sd_app()
-        _trace("LOAD_SD_APP_OK")
+    while True:
         try:
-            print("LAUNCHER_APP_TYPE=%s" % type(app).__name__)
-        except Exception:
-            print("LAUNCHER_APP_TYPE=?")
-        try:
-            print("LAUNCHER_APP_FILE=%s" % app.__file__)
-        except Exception:
-            print("LAUNCHER_APP_FILE=?")
-        try:
-            print("LAUNCHER_APP_RUN=%r" % (app.run,))
-        except Exception:
-            print("LAUNCHER_APP_RUN=?")
-        print("Launcher source: sd")
-        try:
-            app._boot_source_tag = "SD"
-        except Exception:
-            pass
-        _trace("APP_RUN_BEGIN")
-        app.run()
-        _trace("APP_RUN_RETURN")
-    except Exception as exc:
-        _trace("APP_RUN_EXCEPTION:%r" % (exc,))
-        try:
-            import sys
-            print("Launcher run crashed")
-            sys.print_exception(exc)
-        except Exception:
-            print("Launcher run crashed: %r" % (exc,))
-        _safe_mode("sd app run failed")
+            _trace("LOAD_SD_APP_BEGIN")
+            app = _load_sd_app()
+            _trace("LOAD_SD_APP_OK")
+            try:
+                print("LAUNCHER_APP_TYPE=%s" % type(app).__name__)
+            except Exception:
+                print("LAUNCHER_APP_TYPE=?")
+            try:
+                print("LAUNCHER_APP_FILE=%s" % app.__file__)
+            except Exception:
+                print("LAUNCHER_APP_FILE=?")
+            try:
+                print("LAUNCHER_APP_RUN=%r" % (app.run,))
+            except Exception:
+                print("LAUNCHER_APP_RUN=?")
+            print("Launcher source: sd")
+            try:
+                app._boot_source_tag = "SD"
+            except Exception:
+                pass
+            _trace("APP_RUN_BEGIN")
+            app.run()
+            _trace("APP_RUN_RETURN")
+            break
+        except Exception as exc:
+            if str(exc) == "STAGE_SWITCH":
+                try:
+                    import lgfx
+                    if hasattr(lgfx, "band_pipeline_tail_wait"):
+                        lgfx.band_pipeline_tail_wait()
+                except Exception:
+                    pass
+                print("LAUNCHER_STAGE_SWITCH")
+                continue
+            _trace("APP_RUN_EXCEPTION:%r" % (exc,))
+            try:
+                import sys
+                print("Launcher run crashed")
+                sys.print_exception(exc)
+            except Exception:
+                print("Launcher run crashed: %r" % (exc,))
+            _safe_mode("sd app run failed")
 
 
 if __name__ == "__main__":

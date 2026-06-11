@@ -1,4 +1,5 @@
 id,type,world_x,world_y,w,h,swappable,facing,spawn_mode
 enemy_bow_01,bow,1024,192,32,32,1,-1,live
 enemy_bow_02,bow,1248,96,32,32,1,1,live
+enemy_bow_03,bow,2160,80,32,32,1,1,live
 enemy_monk_01,monk,1744,96,48,64,1,1,encounter

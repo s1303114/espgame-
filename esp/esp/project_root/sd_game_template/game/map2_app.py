@@ -111,6 +111,7 @@ def run(max_frames=None):
         last_tick = now
         input_system.update(now)
         input_lr = int(getattr(input_system, "joy_x_axis", 0))
+        btn_a_pressed = bool(getattr(input_system, "btn_a_pressed", False))
         if input_lr > 20:
             facing = 1
         elif input_lr < -20:
@@ -126,7 +127,9 @@ def run(max_frames=None):
             input_lr,
             speed,
             player_x,
+            player_w,
             player_h,
+            btn_a_pressed,
             sprite_left,
             sprite_right,
             anim_counter,
@@ -139,7 +142,7 @@ def run(max_frames=None):
             False,
         )
         if not drew_once:
-            print("MAP2_STAGE_DRAW_OK door_y=%d wall_scroll_y=%d player_x=%d player_y=%d" % (int(runtime.get("door_y", 0) or 0), int(runtime.get("wall_scroll_y", 0) or 0), int(player_x), int(player_y)))
+            print("MAP2_STAGE_DRAW_OK door_y=%d wall_scroll_y=%d lever_on=%d player_x=%d player_y=%d" % (int(runtime.get("door_y", 0) or 0), int(runtime.get("wall_scroll_y", 0) or 0), 1 if bool(runtime.get("lever_on", False)) else 0, int(player_x), int(player_y)))
             drew_once = True
         frame += 1
         if max_frames is not None and frame >= int(max_frames):

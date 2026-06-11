@@ -81,10 +81,9 @@ Python (`app_camera_test.py`) 負責：
 
 - `run()` 不再直接塞滿所有 mode branch
 - 啟動 banner 已抽成 `_print_camera_test_start(...)`
-- `ROWS_SAFE_NEAR_TILE_TEST`、`SPI_TFT_*`、`FULL_BUFFER_TEST` 已先抽到 `_run_pre_rows_safe_mode(...)`
-- `SPI_TFT_*` 內已清掉目前不會被走到的 `CHUNK_WAIT_*` / `COMPAT_*` dead branches，保留現行固定的 `BULK_WAIT_DIRECT`
+- `ROWS_SAFE_NEAR_TILE_TEST`、`SPI_TFT_*`、`FULL_BUFFER_TEST` 已從 SD runtime 主線移除；若要再用，應另開發期 bring-up 檔案或手動恢復
 - 已移除目前未使用的 `BOARD_GENERATED_*`、`ROOT_RGB565_*`、`BLIT_*` mode families，避免歷史 bring-up/testing 分支繼續佔用 bytecode 與維護成本
-- 已再移除舊的 `PNG_SINGLE` / `PNG_FULL` / `FAR_ONLY` / `SINGLE_IMAGE_*` / `DIRECT_*` fallback renderer family，`run()` 現在只保留主線與少數仍可用的 bring-up mode
+- 已再移除舊的 `PNG_SINGLE` / `PNG_FULL` / `FAR_ONLY` / `SINGLE_IMAGE_*` / `DIRECT_*` fallback renderer family，`run()` 現在只保留主線 renderer
 - 已再把 `ROWS_SAFE_PROGRESSIVE` step 4 內的 native band submit 路徑與 profile/report/reset 路徑抽成 helper，繼續縮小 `run()` 的 bytecode 壓力
 - `run()` 目前先做 mode normalize、prerequisite check、`_lgfx.init()`、rotation、dispatcher 轉交
 - `ROWS_SAFE_PROGRESSIVE` 仍是下一個主要拆分目標，因為它仍是目前最大的 bytecode 風險來源
@@ -115,7 +114,8 @@ C++ (`lgfx` user module) 負責：
 - `CAMERA_TEST_MODE = "ROWS_SAFE_PROGRESSIVE"`
 - `CAMERA_BAND_PIPELINE_NATIVE = True`
 - `CAMERA_BAND_PIPELINE_H = 48`
-- `CAMERA_FULL_BULK_WIRE_ORDER = True`
+- `CAMERA_RENDER_WIRE_ORDER = True`
+- `CAMERA_RENDER_BACK_BUFFER = True`
 - `SUBMIT_MODE=NATIVE_BAND_PIPELINE`
 - `BAND_PIPELINE_NATIVE_ON h=48`
 - `lgfx_config.hpp` 內 `cfg.freq_write = 40000000`
@@ -298,16 +298,11 @@ internal flash boot.py/main.py
 本次實際整理內容：
 
 1. 將 `run()` 前段的啟動 log / mode banner 抽成 `_print_camera_test_start(...)`
-2. 將三條較早返回的測試路徑抽出：
-	- `ROWS_SAFE_NEAR_TILE_TEST`
-	- `SPI_TFT_SPEED_TEST` / `SPI_TFT_BULK_WAIT_TEST`
-	- `FULL_BUFFER_TEST`
-3. 新增 `_run_pre_rows_safe_mode(...)` 作為前段 dispatcher，讓 `run()` 先把非主線測試模式導走
-4. 保持現有行為不變，這一刀只做搬移與 dispatcher 整理，沒有改渲染策略、native band pipeline 或 profile tuple 格式
-5. 清掉 `SPI_TFT_*` 中目前不會被走到的多條 experimental path 分支，並移除未再使用的 `CAMERA_SPI_TEST_PATH` 設定
-6. 清掉未再使用的 `BOARD_GENERATED_*`、`ROOT_RGB565_*`、`BLIT_*` modes，並同步移除它們在 mode normalize、prerequisite、startup banner、`run()` 與 config 內的殘留引用
-7. 已清掉舊的 `PNG_SINGLE` / `PNG_FULL` / `FAR_ONLY` / `SINGLE_IMAGE_*` / `DIRECT_*` fallback renderer family，`run()` 只保留主線與少數仍可用的 bring-up mode
-8. 再把 `ROWS_SAFE_PROGRESSIVE` step 4 內兩塊可獨立切出的路徑抽成 helper：
+2. 清掉非主線 bring-up renderer：`ROWS_SAFE_NEAR_TILE_TEST`、`SPI_TFT_SPEED_TEST` / `SPI_TFT_BULK_WAIT_TEST`、`FULL_BUFFER_TEST` 不再留在 SD runtime 主線
+3. 清掉 `SPI_TFT_*` 中目前不會被走到的多條 experimental path 分支，並移除未再使用的 `CAMERA_SPI_TEST_PATH` 設定
+4. 清掉未再使用的 `BOARD_GENERATED_*`、`ROOT_RGB565_*`、`BLIT_*` modes，並同步移除它們在 mode normalize、prerequisite、startup banner、`run()` 與 config 內的殘留引用
+5. 已清掉舊的 `PNG_SINGLE` / `PNG_FULL` / `FAR_ONLY` / `SINGLE_IMAGE_*` / `DIRECT_*` fallback renderer family，`run()` 只保留主線 renderer
+6. 再把 `ROWS_SAFE_PROGRESSIVE` step 4 內兩塊可獨立切出的路徑抽成 helper：
 	- native band submit 分支
 	- profile / stall / dirty-profile 統計輸出與 reset 分支
 	- 這一刀先只做 move-only refactor，不改主線 renderer 行為

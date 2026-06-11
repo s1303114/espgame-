@@ -256,11 +256,15 @@ static void compose_objects_band(
     }
 }
 
-static constexpr int32_t kMonkOrbSrcX = 96;
-static constexpr int32_t kMonkOrbOrbitSrcY = 16;
-static constexpr int32_t kMonkOrbActionSrcY = 32;
+static constexpr int32_t kMonkOrbOrbitSrcX = 16;
+static constexpr int32_t kMonkOrbActionSrcX = 32;
+static constexpr int32_t kMonkOrbSrcY = 112;
 static constexpr int32_t kMonkOrbW = 16;
 static constexpr int32_t kMonkOrbH = 16;
+static constexpr int32_t kSwapPreviewSrcX = 0;
+static constexpr int32_t kSwapPreviewSrcY = 128;
+static constexpr int32_t kSwapPreviewW = 32;
+static constexpr int32_t kSwapPreviewH = 32;
 static constexpr int32_t kMonkOrbRadius = 28;
 static constexpr int32_t kMonkOrbPulseRadius = 128;
 static constexpr int32_t kMonkOrbPulseExpandFrames = 60;
@@ -290,6 +294,10 @@ static constexpr int32_t kMonkOrbFinalRushSpeed = 12;
 static constexpr int32_t kMonkOrbFinalReturnSpeed = 12;
 static constexpr int32_t kMonkOrbFinalDefaultMonkSpeedQ8 = 512;
 static constexpr uint8_t kMonkOrbFinalSwapPending = 1;
+
+static constexpr int32_t kEnemyStateShoot = 2;
+static constexpr int32_t kEnemyStateDeath = 3;
+static constexpr int32_t kBowDeathFrameCount = 5;
 static constexpr uint8_t kMonkHoverStateFinalLocked = 0xFE;
 static constexpr int32_t kMonkOrbFinalTableSize = 60;
 static constexpr int32_t kMonkOrbFinalScale = 1024;
@@ -350,8 +358,8 @@ static void compose_monk_orb_sprite_band(
         orb_atlas,
         orb_atlas_w,
         orb_atlas_h,
-        kMonkOrbSrcX,
-        monk_orb_mode_uses_action_sprite(orb_mode) ? kMonkOrbActionSrcY : kMonkOrbOrbitSrcY,
+        monk_orb_mode_uses_action_sprite(orb_mode) ? kMonkOrbActionSrcX : kMonkOrbOrbitSrcX,
+        kMonkOrbSrcY,
         kMonkOrbW,
         kMonkOrbH,
         transparent_key
@@ -467,12 +475,21 @@ static void compose_enemy_band(
         int32_t frame_idx = anim_counter / enemy_frame_hold;
         int32_t src_x = 0;
         int32_t src_y = bow_frame_h * 2;
-        if (enemy_state == 2) {
+        if (enemy_state == kEnemyStateShoot) {
             if (frame_idx > 9) {
                 frame_idx = 9;
             }
             src_x = frame_idx * bow_frame_w;
             src_y = face_right ? 0 : bow_frame_h;
+        } else if (enemy_state == kEnemyStateDeath) {
+            if (enemy_sheet_h < (4 * bow_frame_h)) {
+                continue;
+            }
+            if (frame_idx >= kBowDeathFrameCount) {
+                frame_idx = kBowDeathFrameCount - 1;
+            }
+            src_x = (face_right ? frame_idx : (kBowDeathFrameCount + frame_idx)) * bow_frame_w;
+            src_y = bow_frame_h * 3;
         } else {
             frame_idx %= 5;
             src_x = (face_right ? frame_idx : (5 + frame_idx)) * bow_frame_w;
@@ -540,6 +557,119 @@ static void compose_sprite_band(
             }
         }
     }
+}
+
+static void compose_repeating_vertical_strip_band(
+    uint8_t *dst,
+    int32_t dst_w,
+    int32_t dst_h,
+    int32_t band_top,
+    int32_t dst_x,
+    const uint8_t *src,
+    int32_t src_w,
+    int32_t src_h,
+    int32_t src_x,
+    int32_t strip_w,
+    int32_t scroll_y,
+    int32_t transparent_key
+) {
+    if (!src || dst_w <= 0 || dst_h <= 0 || src_w <= 0 || src_h <= 0 || strip_w <= 0) return;
+    if (src_x < 0 || src_x + strip_w > src_w) return;
+    if (dst_x >= dst_w || (dst_x + strip_w) <= 0) return;
+    int32_t src_x0 = 0;
+    int32_t dx = dst_x;
+    int32_t vis_w = strip_w;
+    if (dx < 0) { src_x0 = -dx; vis_w -= src_x0; dx = 0; }
+    if (dx + vis_w > dst_w) vis_w = dst_w - dx;
+    if (vis_w <= 0) return;
+
+    for (int32_t y = 0; y < dst_h; ++y) {
+        int32_t sy = (band_top + y - scroll_y) % src_h;
+        if (sy < 0) sy += src_h;
+        const uint8_t *src_row = src + ((((size_t)sy * (size_t)src_w) + (size_t)(src_x + src_x0)) * 2u);
+        uint8_t *dst_row = dst + ((((size_t)y * (size_t)dst_w) + (size_t)dx) * 2u);
+        if (transparent_key < 0) {
+            memcpy(dst_row, src_row, (size_t)vis_w * 2u);
+        } else {
+            for (int32_t x = 0; x < vis_w; ++x) {
+                size_t b = (size_t)x * 2u;
+                uint16_t px = (uint16_t)src_row[b] | ((uint16_t)src_row[b + 1] << 8);
+                if (px != (uint16_t)transparent_key) {
+                    dst_row[b] = src_row[b];
+                    dst_row[b + 1] = src_row[b + 1];
+                }
+            }
+        }
+    }
+}
+
+static void compose_elevator_scene_band(
+    uint8_t *dst,
+    int32_t dst_w,
+    int32_t dst_h,
+    int32_t band_y,
+    const uint8_t *far,
+    const uint8_t *wall,
+    int32_t wall_w,
+    int32_t wall_h,
+    const uint8_t *door,
+    int32_t door_w,
+    int32_t door_h,
+    const uint8_t *floor,
+    int32_t floor_w,
+    int32_t floor_h,
+    const uint8_t *object_atlas,
+    int32_t object_atlas_w,
+    int32_t object_atlas_h,
+    int32_t lever_x,
+    int32_t lever_y,
+    int32_t lever_w,
+    int32_t lever_h,
+    int32_t lever_src_x,
+    int32_t lever_src_y,
+    int32_t floor_x,
+    int32_t floor_y,
+    int32_t floor_left_w,
+    int32_t floor_middle_w,
+    int32_t floor_left_y,
+    int32_t floor_right_y,
+    const uint8_t *sprite,
+    int32_t sprite_w,
+    int32_t sprite_h,
+    int32_t sprite_x,
+    int32_t sprite_y,
+    int32_t sprite_key,
+    int32_t wall_scroll_y,
+    int32_t door_y,
+    int32_t door_enabled,
+    int32_t transparent_key,
+    uint32_t *band_bg_us,
+    uint32_t *band_tilemap_us,
+    uint32_t *band_player_us
+) {
+    int64_t t0 = esp_timer_get_time();
+    copy_far_band(dst, dst_w, band_y, dst_h, far);
+    int64_t t1 = esp_timer_get_time();
+    compose_repeating_vertical_strip_band(dst, dst_w, dst_h, band_y, 0, wall, wall_w, wall_h, 0, 32, wall_scroll_y, -1);
+    compose_repeating_vertical_strip_band(dst, dst_w, dst_h, band_y, dst_w - 32, wall, wall_w, wall_h, 32, 32, wall_scroll_y, -1);
+    if (door_enabled) {
+        compose_sprite_band(dst, dst_w, dst_h, 32, door_y - band_y, door, door_w, door_h, transparent_key);
+    }
+    int32_t floor_right_w = floor_w - floor_left_w - floor_middle_w;
+    if (floor_left_w > 0 && floor_middle_w > 0 && floor_right_w > 0) {
+        compose_atlas_region_band(dst, dst_w, dst_h, 0, band_y, (int16_t)floor_x, (int16_t)floor_left_y, floor, floor_w, floor_h, 0, 0, floor_left_w, floor_h, -1);
+        compose_atlas_region_band(dst, dst_w, dst_h, 0, band_y, (int16_t)(floor_x + floor_left_w), (int16_t)floor_y, floor, floor_w, floor_h, floor_left_w, 0, floor_middle_w, floor_h, -1);
+        compose_atlas_region_band(dst, dst_w, dst_h, 0, band_y, (int16_t)(floor_x + floor_left_w + floor_middle_w), (int16_t)floor_right_y, floor, floor_w, floor_h, floor_left_w + floor_middle_w, 0, floor_right_w, floor_h, -1);
+    } else {
+        compose_sprite_band(dst, dst_w, dst_h, floor_x, floor_y - band_y, floor, floor_w, floor_h, -1);
+    }
+    compose_atlas_region_band(dst, dst_w, dst_h, 0, band_y, (int16_t)lever_x, (int16_t)lever_y, object_atlas, object_atlas_w, object_atlas_h, lever_src_x, lever_src_y, lever_w, lever_h, transparent_key);
+    int64_t t2 = esp_timer_get_time();
+    compose_sprite_band(dst, dst_w, dst_h, sprite_x, sprite_y - band_y, sprite, sprite_w, sprite_h, sprite_key);
+    int64_t t3 = esp_timer_get_time();
+    *band_bg_us += (uint32_t)(t1 - t0);
+    *band_tilemap_us += (uint32_t)(t2 - t1);
+    *band_player_us += (uint32_t)(t3 - t2);
 }
 
 static void compose_special_objects_band(
@@ -655,39 +785,6 @@ static void compose_special_objects_band(
             }
             continue;
         } else if (kind == 4) {
-            int32_t frame_w = frame_index;
-            int32_t frame_h = aux0;
-            int32_t thickness = aux1 < 1 ? 2 : aux1;
-            if (thickness > 6) thickness = 6;
-            if (frame_w <= 0 || frame_h <= 0) {
-                continue;
-            }
-            int32_t dx = (int32_t)wx - camera_x;
-            int32_t dy = (int32_t)wy - band_top;
-            if (dx >= dst_w || (dx + frame_w) <= 0 || dy >= dst_h || (dy + frame_h) <= 0) {
-                continue;
-            }
-            int32_t top0 = dy;
-            int32_t top1 = dy + thickness;
-            int32_t bottom0 = dy + frame_h - thickness;
-            int32_t bottom1 = dy + frame_h;
-            int32_t left0 = dx;
-            int32_t left1 = dx + thickness;
-            int32_t right0 = dx + frame_w - thickness;
-            int32_t right1 = dx + frame_w;
-            for (int32_t yy = top0; yy < bottom1; ++yy) {
-                if (yy < 0 || yy >= dst_h) continue;
-                bool y_border = (yy >= top0 && yy < top1) || (yy >= bottom0 && yy < bottom1);
-                for (int32_t xx = left0; xx < right1; ++xx) {
-                    if (xx < 0 || xx >= dst_w) continue;
-                    if (!y_border && !((xx >= left0 && xx < left1) || (xx >= right0 && xx < right1))) {
-                        continue;
-                    }
-                    size_t off = (((size_t)yy * (size_t)dst_w) + (size_t)xx) * 2u;
-                    dst[off] = 0x07u;
-                    dst[off + 1] = 0xE0u;
-                }
-            }
             continue;
         } else {
             continue;
@@ -723,6 +820,60 @@ static void compose_special_objects_band(
             frame_w,
             frame_h,
             special_key
+        );
+    }
+}
+
+static void compose_swap_preview_underlay_band(
+    uint8_t *dst,
+    int32_t dst_w,
+    int32_t dst_h,
+    int32_t camera_x,
+    int32_t band_top,
+    const uint8_t *special_desc,
+    int32_t special_stride,
+    int32_t special_count,
+    const uint8_t *obj_atlas,
+    int32_t obj_atlas_w,
+    int32_t obj_atlas_h,
+    int32_t object_key
+) {
+    if (!special_desc || special_count <= 0 || special_stride < 8 || !obj_atlas || obj_atlas_w <= 0 || obj_atlas_h <= 0) {
+        return;
+    }
+    if ((kSwapPreviewSrcX + kSwapPreviewW) > obj_atlas_w || (kSwapPreviewSrcY + kSwapPreviewH) > obj_atlas_h) {
+        return;
+    }
+    for (int32_t i = 0; i < special_count; ++i) {
+        const uint8_t *sb = special_desc + ((size_t)i * (size_t)special_stride);
+        if ((int32_t)sb[4] != 4) {
+            continue;
+        }
+        int16_t wx = (int16_t)((uint16_t)sb[0] | ((uint16_t)sb[1] << 8));
+        int16_t wy = (int16_t)((uint16_t)sb[2] | ((uint16_t)sb[3] << 8));
+        int32_t target_w = (int32_t)sb[5];
+        int32_t target_h = (int32_t)sb[6];
+        if (target_w <= 0 || target_h <= 0) {
+            continue;
+        }
+        int32_t draw_x = (int32_t)wx + (target_w / 2) - (kSwapPreviewW / 2);
+        int32_t draw_y = (int32_t)wy + (target_h / 2) - (kSwapPreviewH / 2);
+        compose_atlas_region_band(
+            dst,
+            dst_w,
+            dst_h,
+            camera_x,
+            band_top,
+            (int16_t)draw_x,
+            (int16_t)draw_y,
+            obj_atlas,
+            obj_atlas_w,
+            obj_atlas_h,
+            kSwapPreviewSrcX,
+            kSwapPreviewSrcY,
+            kSwapPreviewW,
+            kSwapPreviewH,
+            object_key
         );
     }
 }
@@ -863,6 +1014,7 @@ static void compose_scene_band(
     int64_t t1 = esp_timer_get_time();
     compose_tilemap_band(dst, screen_w, band_h, camera_x, band_y, tilemap, map_w, map_h, tileset, tileset_len, tile_size, tileset_w, tile_key);
     int64_t t2 = esp_timer_get_time();
+    compose_swap_preview_underlay_band(dst, screen_w, band_h, camera_x, band_y, special_desc, special_stride, special_count, obj_atlas, obj_atlas_w, obj_atlas_h, object_key);
     compose_objects_band(dst, screen_w, band_h, camera_x, band_y, objbuf, obj_stride, object_count, obj_atlas, obj_atlas_w, obj_atlas_h, object_key);
     int64_t t3 = esp_timer_get_time();
     compose_enemy_band(dst, screen_w, band_h, camera_x, band_y, enemy_desc, enemy_stride, enemy_count, enemy_sheet, enemy_sheet_w, enemy_sheet_h, enemy_monk_sheet, enemy_monk_frame_w, enemy_monk_frame_h, enemy_monk_frame_count, enemy_monk_frame_hold, enemy_monk_orb_atlas, enemy_monk_orb_atlas_w, enemy_monk_orb_atlas_h, enemy_key, enemy_frame_hold);
@@ -881,7 +1033,7 @@ static void compose_scene_band(
     *band_player_us += (uint32_t)(t7 - t6);
 }
 
-static void submit_band_start(
+static int64_t submit_band_start(
     uint8_t *buf,
     int32_t screen_w,
     int32_t band_y,
@@ -909,9 +1061,10 @@ static void submit_band_start(
     *start_us += (uint32_t)(t2 - t1);
     *push_us += (uint32_t)(t3 - t2);
     *kick_us += (uint32_t)(t3 - t0);
+    return t2;
 }
 
-static void submit_band_wait(bool prev_swap, uint32_t *wait_us, uint32_t *wait_dma_us, uint32_t *end_us) {
+static int64_t submit_band_wait(bool prev_swap, uint32_t *wait_us, uint32_t *wait_dma_us, uint32_t *end_us) {
     int64_t t0 = esp_timer_get_time();
     lcd.waitDMA();
     int64_t t1 = esp_timer_get_time();
@@ -921,27 +1074,30 @@ static void submit_band_wait(bool prev_swap, uint32_t *wait_us, uint32_t *wait_d
     *wait_dma_us += (uint32_t)(t1 - t0);
     *end_us += (uint32_t)(t2 - t1);
     *wait_us += (uint32_t)(t2 - t0);
+    return t1;
 }
 
 typedef struct {
     bool active;
     bool prev_swap;
     int64_t wait_t0;
+    int64_t dma_t0;
 } lgfx_tail_wait_state_t;
 
-static lgfx_tail_wait_state_t g_tail_wait_state = {false, false, 0};
+static lgfx_tail_wait_state_t g_tail_wait_state = {false, false, 0, 0};
 
 extern "C" {
 
 mp_obj_t lgfx_band_pipeline_tail_wait(void) {
     if (!g_tail_wait_state.active) {
-        mp_obj_t out[4] = {
+        mp_obj_t out[5] = {
+            mp_obj_new_int(0),
             mp_obj_new_int(0),
             mp_obj_new_int(0),
             mp_obj_new_int(0),
             mp_obj_new_int(0),
         };
-        return mp_obj_new_tuple(4, out);
+        return mp_obj_new_tuple(5, out);
     }
     int64_t t_enter = esp_timer_get_time();
     lcd.waitDMA();
@@ -953,14 +1109,19 @@ mp_obj_t lgfx_band_pipeline_tail_wait(void) {
     uint32_t residual_wait_us = (uint32_t)(t_done - t_enter);
     uint32_t residual_dma_wait_us = (uint32_t)(t_dma - t_enter);
     uint32_t end_us = (uint32_t)(t_done - t_dma);
+    uint32_t tail_dma_elapsed_us = 0;
+    if (g_tail_wait_state.dma_t0 > 0) {
+        tail_dma_elapsed_us = (uint32_t)(t_dma - g_tail_wait_state.dma_t0);
+    }
     g_tail_wait_state.active = false;
-    mp_obj_t out[4] = {
+    mp_obj_t out[5] = {
         mp_obj_new_int_from_uint(total_wait_us),
         mp_obj_new_int_from_uint(residual_wait_us),
         mp_obj_new_int_from_uint(residual_dma_wait_us),
         mp_obj_new_int_from_uint(end_us),
+        mp_obj_new_int_from_uint(tail_dma_elapsed_us),
     };
-    return mp_obj_new_tuple(4, out);
+    return mp_obj_new_tuple(5, out);
 }
 
 static mp_obj_t lgfx_band_submit_probe_rgb565(size_t n_args, const mp_obj_t *args) {
@@ -1430,6 +1591,8 @@ static mp_obj_t lgfx_render_scene_bands_rgb565(size_t n_args, const mp_obj_t *ar
     uint32_t push_us = 0;
     uint32_t wait_dma_us = 0;
     uint32_t end_us = 0;
+    uint32_t dma_elapsed_us = 0;
+    int64_t dma_t0 = 0;
     uint32_t bands = 0;
     int64_t all_t0 = esp_timer_get_time();
 
@@ -1443,7 +1606,7 @@ static mp_obj_t lgfx_render_scene_bands_rgb565(size_t n_args, const mp_obj_t *ar
     band_compose_each[0] = compose_delta;
 
     bool prev_swap = false;
-    submit_band_start(band_a, screen_w, y, bh, &prev_swap, &kick_us, &sync_us, &start_us, &push_us);
+    dma_t0 = submit_band_start(band_a, screen_w, y, bh, &prev_swap, &kick_us, &sync_us, &start_us, &push_us);
     if (verbose) {
         mp_printf(&mp_plat_print, "BAND_PIPE band=0 y=%d h=%d\n", (int)y, (int)bh);
     }
@@ -1462,12 +1625,13 @@ static mp_obj_t lgfx_render_scene_bands_rgb565(size_t n_args, const mp_obj_t *ar
             band_compose_each[bands] = compose_delta;
         }
         int64_t wt0 = esp_timer_get_time();
-        submit_band_wait(prev_swap, &wait_us, &wait_dma_us, &end_us);
+        int64_t dma_done_t = submit_band_wait(prev_swap, &wait_us, &wait_dma_us, &end_us);
+        dma_elapsed_us += (uint32_t)(dma_done_t - dma_t0);
         uint32_t wait_delta = (uint32_t)(esp_timer_get_time() - wt0);
         if ((bands - 1) < kProfileBands) {
             band_wait_each[bands - 1] = wait_delta;
         }
-        submit_band_start(next_buf, screen_w, y, bh, &prev_swap, &kick_us, &sync_us, &start_us, &push_us);
+        dma_t0 = submit_band_start(next_buf, screen_w, y, bh, &prev_swap, &kick_us, &sync_us, &start_us, &push_us);
         if (verbose) {
             mp_printf(&mp_plat_print, "BAND_PIPE band=%u y=%d h=%d\n", (unsigned)bands, (int)y, (int)bh);
         }
@@ -1479,9 +1643,11 @@ static mp_obj_t lgfx_render_scene_bands_rgb565(size_t n_args, const mp_obj_t *ar
         g_tail_wait_state.active = true;
         g_tail_wait_state.prev_swap = prev_swap;
         g_tail_wait_state.wait_t0 = esp_timer_get_time();
+        g_tail_wait_state.dma_t0 = dma_t0;
     } else {
         int64_t wt0 = esp_timer_get_time();
-        submit_band_wait(prev_swap, &wait_us, &wait_dma_us, &end_us);
+        int64_t dma_done_t = submit_band_wait(prev_swap, &wait_us, &wait_dma_us, &end_us);
+        dma_elapsed_us += (uint32_t)(dma_done_t - dma_t0);
         uint32_t wait_delta = (uint32_t)(esp_timer_get_time() - wt0);
         if ((bands - 1) < kProfileBands) {
             band_wait_each[bands - 1] = wait_delta;
@@ -1489,7 +1655,7 @@ static mp_obj_t lgfx_render_scene_bands_rgb565(size_t n_args, const mp_obj_t *ar
     }
 
     uint32_t total_us = (uint32_t)(esp_timer_get_time() - all_t0);
-    mp_obj_t out[28] = {
+    mp_obj_t out[29] = {
         mp_obj_new_int_from_uint(bands),
         mp_obj_new_int_from_uint(compose_us),
         mp_obj_new_int_from_uint(kick_us),
@@ -1518,10 +1684,237 @@ static mp_obj_t lgfx_render_scene_bands_rgb565(size_t n_args, const mp_obj_t *ar
         mp_obj_new_int_from_uint(band_wait_each[3]),
         mp_obj_new_int_from_uint(band_wait_each[4]),
         mp_obj_new_int_from_uint(band_wait_each[5]),
+        mp_obj_new_int_from_uint(dma_elapsed_us),
     };
-    return mp_obj_new_tuple(28, out);
+    return mp_obj_new_tuple(29, out);
 }
 MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lgfx_render_scene_bands_rgb565_obj, 28, 62, lgfx_render_scene_bands_rgb565);
+
+static mp_obj_t lgfx_render_elevator_scene_bands_rgb565(size_t n_args, const mp_obj_t *args) {
+    if (n_args != 26 && n_args != 35 && n_args != 41) {
+        mp_raise_ValueError(MP_ERROR_TEXT("need 26, 35 or 41 args"));
+    }
+    if (g_tail_wait_state.active) {
+        mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("tail wait pending"));
+    }
+
+    mp_buffer_info_t band_a_info, band_b_info, far_info, wall_info, door_info, floor_info, object_atlas_info, sprite_info;
+    mp_get_buffer_raise(args[0], &band_a_info, MP_BUFFER_RW);
+    mp_get_buffer_raise(args[1], &band_b_info, MP_BUFFER_RW);
+    int32_t screen_w = (int32_t)mp_obj_get_int(args[2]);
+    int32_t screen_h = (int32_t)mp_obj_get_int(args[3]);
+    int32_t band_h_cfg = (int32_t)mp_obj_get_int(args[4]);
+    mp_get_buffer_raise(args[5], &far_info, MP_BUFFER_READ);
+    mp_get_buffer_raise(args[6], &wall_info, MP_BUFFER_READ);
+    int32_t wall_w = (int32_t)mp_obj_get_int(args[7]);
+    int32_t wall_h = (int32_t)mp_obj_get_int(args[8]);
+    mp_get_buffer_raise(args[9], &door_info, MP_BUFFER_READ);
+    int32_t door_w = (int32_t)mp_obj_get_int(args[10]);
+    int32_t door_h = (int32_t)mp_obj_get_int(args[11]);
+    mp_get_buffer_raise(args[12], &floor_info, MP_BUFFER_READ);
+    int32_t floor_w = (int32_t)mp_obj_get_int(args[13]);
+    int32_t floor_h = (int32_t)mp_obj_get_int(args[14]);
+    bool has_lever = n_args == 35 || n_args == 41;
+    bool has_floor_segments = n_args == 41;
+    int32_t object_atlas_w = 0;
+    int32_t object_atlas_h = 0;
+    int32_t lever_x = 0;
+    int32_t lever_y = 0;
+    int32_t lever_w = 0;
+    int32_t lever_h = 0;
+    int32_t lever_src_x = 0;
+    int32_t lever_src_y = 0;
+    int32_t floor_x = 32;
+    int32_t floor_y = 208;
+    int32_t floor_left_w = 0;
+    int32_t floor_middle_w = 0;
+    int32_t floor_left_y = 208;
+    int32_t floor_right_y = 208;
+    int32_t sprite_arg = 15;
+    if (has_lever) {
+        mp_get_buffer_raise(args[15], &object_atlas_info, MP_BUFFER_READ);
+        object_atlas_w = (int32_t)mp_obj_get_int(args[16]);
+        object_atlas_h = (int32_t)mp_obj_get_int(args[17]);
+        lever_x = (int32_t)mp_obj_get_int(args[18]);
+        lever_y = (int32_t)mp_obj_get_int(args[19]);
+        lever_w = (int32_t)mp_obj_get_int(args[20]);
+        lever_h = (int32_t)mp_obj_get_int(args[21]);
+        lever_src_x = (int32_t)mp_obj_get_int(args[22]);
+        lever_src_y = (int32_t)mp_obj_get_int(args[23]);
+        if (has_floor_segments) {
+            floor_x = (int32_t)mp_obj_get_int(args[24]);
+            floor_y = (int32_t)mp_obj_get_int(args[25]);
+            floor_left_w = (int32_t)mp_obj_get_int(args[26]);
+            floor_middle_w = (int32_t)mp_obj_get_int(args[27]);
+            floor_left_y = (int32_t)mp_obj_get_int(args[28]);
+            floor_right_y = (int32_t)mp_obj_get_int(args[29]);
+            sprite_arg = 30;
+        } else {
+            floor_x = 32;
+            floor_y = 208;
+            floor_left_y = floor_y;
+            floor_right_y = floor_y;
+            sprite_arg = 24;
+        }
+    }
+    mp_get_buffer_raise(args[sprite_arg], &sprite_info, MP_BUFFER_READ);
+    int32_t sprite_w = (int32_t)mp_obj_get_int(args[sprite_arg + 1]);
+    int32_t sprite_h = (int32_t)mp_obj_get_int(args[sprite_arg + 2]);
+    int32_t sprite_x = (int32_t)mp_obj_get_int(args[sprite_arg + 3]);
+    int32_t sprite_y = (int32_t)mp_obj_get_int(args[sprite_arg + 4]);
+    int32_t sprite_key = (int32_t)mp_obj_get_int(args[sprite_arg + 5]);
+    int32_t wall_scroll_y = (int32_t)mp_obj_get_int(args[sprite_arg + 6]);
+    int32_t door_y = (int32_t)mp_obj_get_int(args[sprite_arg + 7]);
+    int32_t door_enabled = mp_obj_is_true(args[sprite_arg + 8]) ? 1 : 0;
+    int32_t transparent_key = (int32_t)mp_obj_get_int(args[sprite_arg + 9]);
+    bool verbose = mp_obj_is_true(args[sprite_arg + 10]);
+
+    if (screen_w <= 0 || screen_h <= 0 || band_h_cfg <= 0 || band_h_cfg > screen_h) {
+        mp_raise_ValueError(MP_ERROR_TEXT("invalid dims"));
+    }
+    size_t max_band_len = (size_t)screen_w * (size_t)band_h_cfg * 2u;
+    size_t full_len = (size_t)screen_w * (size_t)screen_h * 2u;
+    if (band_a_info.len < max_band_len || band_b_info.len < max_band_len) {
+        mp_raise_ValueError(MP_ERROR_TEXT("band buf too small"));
+    }
+    if (far_info.len < full_len) {
+        mp_raise_ValueError(MP_ERROR_TEXT("far buf too small"));
+    }
+    if (wall_w < 64 || wall_h <= 0 || wall_info.len < (size_t)wall_w * (size_t)wall_h * 2u) {
+        mp_raise_ValueError(MP_ERROR_TEXT("wall buf too small"));
+    }
+    if (door_w <= 0 || door_h <= 0 || door_info.len < (size_t)door_w * (size_t)door_h * 2u) {
+        mp_raise_ValueError(MP_ERROR_TEXT("door buf too small"));
+    }
+    if (floor_w <= 0 || floor_h <= 0 || floor_info.len < (size_t)floor_w * (size_t)floor_h * 2u) {
+        mp_raise_ValueError(MP_ERROR_TEXT("floor buf too small"));
+    }
+    if (has_lever) {
+        if (object_atlas_w <= 0 || object_atlas_h <= 0 || object_atlas_info.len < (size_t)object_atlas_w * (size_t)object_atlas_h * 2u) {
+            mp_raise_ValueError(MP_ERROR_TEXT("object atlas buf too small"));
+        }
+    }
+    if (sprite_info.len < (size_t)sprite_w * (size_t)sprite_h * 2u) {
+        mp_raise_ValueError(MP_ERROR_TEXT("sprite buf too small"));
+    }
+
+    uint8_t *band_a = (uint8_t *)band_a_info.buf;
+    uint8_t *band_b = (uint8_t *)band_b_info.buf;
+    const uint8_t *far = (const uint8_t *)far_info.buf;
+    const uint8_t *wall = (const uint8_t *)wall_info.buf;
+    const uint8_t *door = (const uint8_t *)door_info.buf;
+    const uint8_t *floor = (const uint8_t *)floor_info.buf;
+    const uint8_t *object_atlas = has_lever ? (const uint8_t *)object_atlas_info.buf : nullptr;
+    const uint8_t *sprite = (const uint8_t *)sprite_info.buf;
+
+    static const uint32_t kProfileBands = 6;
+    uint32_t compose_us = 0;
+    uint32_t band_bg_us = 0;
+    uint32_t band_tilemap_us = 0;
+    uint32_t band_object_us = 0;
+    uint32_t band_special_us = 0;
+    uint32_t band_enemy_us = 0;
+    uint32_t band_player_us = 0;
+    uint32_t band_compose_each[kProfileBands] = {0};
+    uint32_t band_wait_each[kProfileBands] = {0};
+    uint32_t kick_us = 0;
+    uint32_t wait_us = 0;
+    uint32_t sync_us = 0;
+    uint32_t start_us = 0;
+    uint32_t push_us = 0;
+    uint32_t wait_dma_us = 0;
+    uint32_t end_us = 0;
+    uint32_t dma_elapsed_us = 0;
+    int64_t dma_t0 = 0;
+    uint32_t bands = 0;
+    int64_t all_t0 = esp_timer_get_time();
+
+    int32_t y = 0;
+    int32_t bh = band_h_cfg;
+    if (y + bh > screen_h) bh = screen_h - y;
+    int64_t ct0 = esp_timer_get_time();
+    compose_elevator_scene_band(band_a, screen_w, bh, y, far, wall, wall_w, wall_h, door, door_w, door_h, floor, floor_w, floor_h, object_atlas, object_atlas_w, object_atlas_h, lever_x, lever_y, lever_w, lever_h, lever_src_x, lever_src_y, floor_x, floor_y, floor_left_w, floor_middle_w, floor_left_y, floor_right_y, sprite, sprite_w, sprite_h, sprite_x, sprite_y, sprite_key, wall_scroll_y, door_y, door_enabled, transparent_key, &band_bg_us, &band_tilemap_us, &band_player_us);
+    uint32_t compose_delta = (uint32_t)(esp_timer_get_time() - ct0);
+    compose_us += compose_delta;
+    band_compose_each[0] = compose_delta;
+
+    bool prev_swap = false;
+    dma_t0 = submit_band_start(band_a, screen_w, y, bh, &prev_swap, &kick_us, &sync_us, &start_us, &push_us);
+    if (verbose) {
+        mp_printf(&mp_plat_print, "ELEVATOR_PIPE band=0 y=%d h=%d\n", (int)y, (int)bh);
+    }
+    bands = 1;
+    y += bh;
+
+    uint8_t *next_buf = band_b;
+    while (y < screen_h) {
+        bh = band_h_cfg;
+        if (y + bh > screen_h) bh = screen_h - y;
+        ct0 = esp_timer_get_time();
+        compose_elevator_scene_band(next_buf, screen_w, bh, y, far, wall, wall_w, wall_h, door, door_w, door_h, floor, floor_w, floor_h, object_atlas, object_atlas_w, object_atlas_h, lever_x, lever_y, lever_w, lever_h, lever_src_x, lever_src_y, floor_x, floor_y, floor_left_w, floor_middle_w, floor_left_y, floor_right_y, sprite, sprite_w, sprite_h, sprite_x, sprite_y, sprite_key, wall_scroll_y, door_y, door_enabled, transparent_key, &band_bg_us, &band_tilemap_us, &band_player_us);
+        compose_delta = (uint32_t)(esp_timer_get_time() - ct0);
+        compose_us += compose_delta;
+        if (bands < kProfileBands) {
+            band_compose_each[bands] = compose_delta;
+        }
+        int64_t wt0 = esp_timer_get_time();
+        int64_t dma_done_t = submit_band_wait(prev_swap, &wait_us, &wait_dma_us, &end_us);
+        dma_elapsed_us += (uint32_t)(dma_done_t - dma_t0);
+        uint32_t wait_delta = (uint32_t)(esp_timer_get_time() - wt0);
+        if ((bands - 1) < kProfileBands) {
+            band_wait_each[bands - 1] = wait_delta;
+        }
+        dma_t0 = submit_band_start(next_buf, screen_w, y, bh, &prev_swap, &kick_us, &sync_us, &start_us, &push_us);
+        if (verbose) {
+            mp_printf(&mp_plat_print, "ELEVATOR_PIPE band=%u y=%d h=%d\n", (unsigned)bands, (int)y, (int)bh);
+        }
+        ++bands;
+        y += bh;
+        next_buf = (next_buf == band_a) ? band_b : band_a;
+    }
+    int64_t wt0 = esp_timer_get_time();
+    int64_t dma_done_t = submit_band_wait(prev_swap, &wait_us, &wait_dma_us, &end_us);
+    dma_elapsed_us += (uint32_t)(dma_done_t - dma_t0);
+    uint32_t wait_delta = (uint32_t)(esp_timer_get_time() - wt0);
+    if ((bands - 1) < kProfileBands) {
+        band_wait_each[bands - 1] = wait_delta;
+    }
+
+    uint32_t total_us = (uint32_t)(esp_timer_get_time() - all_t0);
+    mp_obj_t out[29] = {
+        mp_obj_new_int_from_uint(bands),
+        mp_obj_new_int_from_uint(compose_us),
+        mp_obj_new_int_from_uint(kick_us),
+        mp_obj_new_int_from_uint(wait_us),
+        mp_obj_new_int_from_uint(sync_us),
+        mp_obj_new_int_from_uint(start_us),
+        mp_obj_new_int_from_uint(push_us),
+        mp_obj_new_int_from_uint(wait_dma_us),
+        mp_obj_new_int_from_uint(end_us),
+        mp_obj_new_int_from_uint(total_us),
+        mp_obj_new_int_from_uint(band_bg_us),
+        mp_obj_new_int_from_uint(band_tilemap_us),
+        mp_obj_new_int_from_uint(band_object_us),
+        mp_obj_new_int_from_uint(band_special_us),
+        mp_obj_new_int_from_uint(band_enemy_us),
+        mp_obj_new_int_from_uint(band_player_us),
+        mp_obj_new_int_from_uint(band_compose_each[0]),
+        mp_obj_new_int_from_uint(band_compose_each[1]),
+        mp_obj_new_int_from_uint(band_compose_each[2]),
+        mp_obj_new_int_from_uint(band_compose_each[3]),
+        mp_obj_new_int_from_uint(band_compose_each[4]),
+        mp_obj_new_int_from_uint(band_compose_each[5]),
+        mp_obj_new_int_from_uint(band_wait_each[0]),
+        mp_obj_new_int_from_uint(band_wait_each[1]),
+        mp_obj_new_int_from_uint(band_wait_each[2]),
+        mp_obj_new_int_from_uint(band_wait_each[3]),
+        mp_obj_new_int_from_uint(band_wait_each[4]),
+        mp_obj_new_int_from_uint(band_wait_each[5]),
+        mp_obj_new_int_from_uint(dma_elapsed_us),
+    };
+    return mp_obj_new_tuple(29, out);
+}
+MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lgfx_render_elevator_scene_bands_rgb565_obj, 26, 41, lgfx_render_elevator_scene_bands_rgb565);
 
 static int16_t lgfx_band_rd_i16(const uint8_t *p) {
     uint16_t v = (uint16_t)p[0] | ((uint16_t)p[1] << 8);

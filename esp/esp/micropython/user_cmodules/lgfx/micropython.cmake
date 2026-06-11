@@ -17,6 +17,7 @@ target_compile_definitions(usermod_lgfx INTERFACE
 target_compile_options(usermod_lgfx INTERFACE
     $<$<COMPILE_LANGUAGE:CXX>:-std=gnu++17>
     $<$<COMPILE_LANGUAGE:CXX>:-fno-rtti>
+    $<$<COMPILE_LANGUAGE:CXX>:-mtext-section-literals>
 )
 
 target_link_libraries(usermod_lgfx INTERFACE

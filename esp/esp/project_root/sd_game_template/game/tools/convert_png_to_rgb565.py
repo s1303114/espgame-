@@ -32,9 +32,26 @@ def rgb565_le_to_rgb888(lo, hi):
     return r, g, b
 
 
-def convert_png_to_rgb565(src_path, dst_path, byte_order="le"):
+def parse_rgb565(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text.lower().startswith("0x"):
+        return int(text, 16) & 0xFFFF
+    return int(text) & 0xFFFF
+
+
+def rgb565_to_bytes(value, byte_order="le"):
+    value &= 0xFFFF
+    if byte_order == "wire":
+        return bytes(((value >> 8) & 0xFF, value & 0xFF))
+    return bytes((value & 0xFF, (value >> 8) & 0xFF))
+
+
+def convert_png_to_rgb565(src_path, dst_path, byte_order="le", alpha_colorkey=None, alpha_threshold=1):
     with Image.open(src_path) as src:
-        img = src.convert("RGB")
+        has_alpha = src.mode in ("RGBA", "LA") or (src.mode == "P" and "transparency" in src.info)
+        img = src.convert("RGBA" if has_alpha else "RGB")
 
     if byte_order not in ("le", "wire"):
         raise ValueError("byte_order must be le or wire")
@@ -44,10 +61,18 @@ def convert_png_to_rgb565(src_path, dst_path, byte_order="le"):
     pix = img.load()
     out = bytearray(w * h * 2)
     i = 0
+    key_px = rgb565_to_bytes(alpha_colorkey, byte_order) if alpha_colorkey is not None else None
     for y in range(h):
         for x in range(w):
-            r, g, b = pix[x, y]
-            px = encode(r, g, b)
+            if has_alpha:
+                r, g, b, a = pix[x, y]
+                if key_px is not None and a < alpha_threshold:
+                    px = key_px
+                else:
+                    px = encode(r, g, b)
+            else:
+                r, g, b = pix[x, y]
+                px = encode(r, g, b)
             out[i] = px[0]
             out[i + 1] = px[1]
             i += 2
@@ -91,9 +116,12 @@ def main():
     parser.add_argument("--width", type=int, default=None, help="Preview decode width (default: source PNG width)")
     parser.add_argument("--height", type=int, default=None, help="Preview decode height (default: source PNG height)")
     parser.add_argument("--byte-order", choices=("le", "wire"), default="le", help="Output byte order: le for little-endian, wire for panel byte order")
+    parser.add_argument("--alpha-colorkey", default=None, help="RGB565 value used for fully transparent pixels, e.g. 0xF81F")
+    parser.add_argument("--alpha-threshold", type=int, default=1, help="Alpha values below this threshold become the colorkey")
     args = parser.parse_args()
 
-    w, h, size = convert_png_to_rgb565(args.src, args.dst, args.byte_order)
+    alpha_colorkey = parse_rgb565(args.alpha_colorkey) if args.alpha_colorkey is not None else None
+    w, h, size = convert_png_to_rgb565(args.src, args.dst, args.byte_order, alpha_colorkey, args.alpha_threshold)
     expected = w * h * 2
     if size != expected:
         raise SystemExit("size mismatch: got=%d expected=%d" % (size, expected))
@@ -107,6 +135,8 @@ def main():
     print("INPUT_SIZE=%dx%d" % (w, h))
     print("OUTPUT_RGB565=%s" % args.dst)
     print("BYTE_ORDER=%s" % args.byte_order)
+    if alpha_colorkey is not None:
+        print("ALPHA_COLORKEY=0x%04X" % alpha_colorkey)
     print("OUTPUT_SIZE=%d" % size)
     print("EXPECTED_SIZE=%d" % expected)
     print("SIZE_MATCH=%s" % ("YES" if size == expected else "NO"))
