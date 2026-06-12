@@ -1,10 +1,12 @@
 # 目前專案架構（主線）
 
-本文件整理目前板上實際主線。核心原則：internal flash 只做 launcher；遊戲程式與資產全部從 `/sd/game` 載入；一般高層遊戲狀態仍由 Python 編排，重型畫面合成、live enemy update 與 TFT submit 交給 C++ native API。monk 目前已不是單一 live enemy，而是 `inactive -> intro_drop -> live` 的 encounter actor。
+本文件整理目前板上實際主線。核心原則：internal flash 只做 launcher；遊戲程式與資產全部從 `/sd/game` 載入；一般高層遊戲狀態仍由 Python 編排，重型畫面合成、object gravity / solids sync、live enemy update 與 TFT submit 交給 C++ native API。monk 目前已不是單一 live enemy，而是 `inactive -> intro_drop -> live` 的 encounter actor。
 
 ## 0. 最新現況快照（2026-06-07）
 
 目前板上主線仍是 SD-only runtime：internal flash 只放 `/boot.py`、`/main.py`，正式遊戲從 `/sd/game/config.py` 與 `/sd/game/app_camera_test.py` 啟動。正式 renderer 是 `ROWS_SAFE_PROGRESSIVE` + `NATIVE_BAND_PIPELINE`，band 高度 `48`，wire-order submit 開啟。
+
+2026-06-11 補充：object gravity 與 object solids sync 已完成第一階段 native 化。Python 仍負責 object lifecycle / swap / checkpoint orchestration，但每幀 object gravity 優先走 `object_native.update_frame(...) -> lgfx.update_objects_native(...)`；`object_native.py` 保存 Python fallback 與 persistent buffer helper，避免再把 bytecode 壓回 `app_camera_test.py`。
 
 目前 monk/orb 最新行為：
 
@@ -42,6 +44,7 @@
 
 - `app.py`
 - `app_camera_test.py`
+- `object_native.py`
 - `config.py`
 - `assets.py`
 - `state.py`
@@ -66,7 +69,7 @@ Python (`app_camera_test.py`) 負責：
 
 - input update
 - player movement / gravity
-- object gravity
+- object lifecycle orchestration；object gravity 優先走 native，Python fallback 已拆到 `object_native.py`
 - B/Y swap
 - camera tracking
 - respawn / checkpoint
@@ -75,6 +78,7 @@ Python (`app_camera_test.py`) 負責：
 - monk intro / live handoff
 - monk-area respawn reintro reset
 - object / overlay / enemy render descriptor 打包
+- object render/state/solid persistent buffer 初始化與 restore helper 呼叫
 - 主迴圈 profile 與 fallback 控制
 
 目前 Python runtime 的控制流整理方向已開始落地：
@@ -85,13 +89,16 @@ Python (`app_camera_test.py`) 負責：
 - 已移除目前未使用的 `BOARD_GENERATED_*`、`ROOT_RGB565_*`、`BLIT_*` mode families，避免歷史 bring-up/testing 分支繼續佔用 bytecode 與維護成本
 - 已再移除舊的 `PNG_SINGLE` / `PNG_FULL` / `FAR_ONLY` / `SINGLE_IMAGE_*` / `DIRECT_*` fallback renderer family，`run()` 現在只保留主線 renderer
 - 已再把 `ROWS_SAFE_PROGRESSIVE` step 4 內的 native band submit 路徑與 profile/report/reset 路徑抽成 helper，繼續縮小 `run()` 的 bytecode 壓力
+- object native helper 已拆到 `object_native.py`；後續 runtime 新邏輯仍應優先放 helper module，主檔只留 orchestration 呼叫
 - `run()` 目前先做 mode normalize、prerequisite check、`_lgfx.init()`、rotation、dispatcher 轉交
 - `ROWS_SAFE_PROGRESSIVE` 仍是下一個主要拆分目標，因為它仍是目前最大的 bytecode 風險來源
 
 C++ (`lgfx` user module) 負責：
 
 - `update_enemies_native(...)`
+- `update_objects_native(...)`
 - `render_scene_bands_rgb565(...)`
+- object state / render / solids buffer 原地更新
 - tilemap / object atlas / player colorkey compose
 - enemy compose
 - bullet overlay compose
@@ -168,6 +175,8 @@ enemy update 已搬到 C++：
 - `enemy_rows_c_buf`
 - `enemy_states`
 - `enemy_bullets`
+- `objects_c_buf`
+- `object_state_c_buf`
 - `object_solids_c_buf`
 - `monk_orb_c_buf`
 - `monk_attack_c_buf`
@@ -181,7 +190,9 @@ enemy update 已搬到 C++：
 其中：
 
 - `enemy_rows_c_buf` 不再每幀重 pack，只在初始化、swap、respawn、Python fallback 後同步
-- `object_solids_c_buf` 不再每幀重 pack，只在初始化、object gravity 變動、swap、respawn 後同步
+- `objects_c_buf` 現在與 `objects_rows` index-aligned；不可見 / special-render object 會保留 slot，但 render source 尺寸寫 0
+- `object_state_c_buf` 是 native object update 的 state buffer，保存 world rect、source rect、visible/solid/swappable/gravity/special flags
+- `object_solids_c_buf` 不再靠 Python 每幀重 pack；native object update 會在 gravity 後重建 solids buffer，swap / respawn 仍由 Python orchestration 觸發同步
 - `enemy_bullets` 先 `ensure_capacity(enemy_max_bullets)`，讓 native update 直接重用 pool
 - `monk_hover_c_buf` 在 monk 進入 live 時會擴充一筆新 row，並同步更新 `monk_hover_c_count`
 - `monk_orb_c_buf` 在 monk 進入 live 時會擴充，live orb 的 authoritative state 目前在這個 buffer
@@ -212,6 +223,36 @@ live orb state 則已 native 化：
 - Python `monk_orb_damage.action_hit_player(...)` 將 mode `2 captured_return`、`4 scripted_attack`、`5 pulse_damage` 視為第二色 damage orb；碰到玩家會沿用既有死亡 / respawn 流程。mode `9 final_orbit` 是第二色但不造成傷害；mode `1 detached` 與 `6 pulse_hold` 是公轉色，不造成傷害
 - 一般 live path 不再每幀把 C buffer sync 回 Python dict；dict 只保留 fallback / intro scripted / debug shadow 用途
 - attack orb swap 時，`monk_orb_c_buf` 保持 `scripted_attack` mode，render descriptor 仍必須走 native C API，不能因 Python shadow 有 `scripted_attack` 而 fallback
+
+## 6.5 下一階段可搬的熱路徑
+
+原則仍是「Python 當 director，C++ 吃穩定且每幀重複的 hot path」。`app_camera_test.py` 已接近 MicroPython bytecode 上限，下一階段新增 runtime 行為要先放 helper module；只有已穩定、資料形狀固定、需要每幀跑的部分才搬進 `lgfx`。
+
+優先順序建議：
+
+1. `update_player_native(...)`
+	- 範圍：player gravity、grounded check、`_move_axis_world(...)`、unembed guard、tilemap + object solids collision。
+	- 收益：這是每幀固定跑的 nested collision path，且目前仍完整在 Python。
+	- 做法：先讓 C++ 回傳 `(player_x, player_y, vel_y, hit_x, hit_y, grounded)`，death / respawn / camera / swap sequencing 仍留 Python。
+
+2. `apply_swap_native(...)` 的 object/enemy/bullet 子集
+	- 範圍：一般 object、enemy、bullet 的位置交換、buffer sync、bullet owner reset。
+	- 收益：swap burst 目前會拉高 update peak，且會觸發多個 Python list + C buffer 同步。
+	- 做法：先不碰 monk orb final/scripted special case；一般 target kind 穩定後再擴 monk orb。
+
+3. `update_swap_preview_native(...)` 的 object buffer allocation 清理
+	- 範圍：目前 Python 呼叫前仍會臨時打包 object target buffer；可改成直接餵 `object_state_c_buf` 或常駐 preview target buffer。
+	- 收益：降低 hold swap 時的 per-frame allocation / packing 成本，也減少主檔 bytecode。
+
+4. respawn/checkpoint object restore 的 native/helper 化
+	- 範圍：restore object rows、state/render/solid buffer rebuild、checkpoint skip。
+	- 收益：不是最大 CPU hot path，但可繼續降低 `run()` bytecode 壓力，並避免 restore 後 buffer 漏同步。
+
+5. descriptor packing 剩餘 Python path
+	- 範圍：special object / anchor / respawn overlay descriptor、monk final path descriptor 等仍由 Python 組資料的部分。
+	- 收益：只有在 `CPU_WORK.desc_us` 或 `UPDATE_BREAK` 顯示 descriptor 成本上升時才值得優先搬；render compose 本身已在 C++。
+
+暫不建議搬：完整 monk encounter lifecycle、stage switching、SD launcher、asset cache。這些是低頻 orchestration，留 Python 比較好調整，也不值得增加 native state complexity。
 
 ## 7. 主要資產
 

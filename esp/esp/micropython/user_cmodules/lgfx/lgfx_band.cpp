@@ -12,6 +12,16 @@ extern "C" {
 
 #include "lgfx_shared.hpp"
 
+#ifndef LGFX_MONK_ATTACK_DEBUG_LOG
+#define LGFX_MONK_ATTACK_DEBUG_LOG 0
+#endif
+
+#if LGFX_MONK_ATTACK_DEBUG_LOG
+#define LGFX_MONK_ATTACK_LOGF(...) mp_printf(&mp_plat_print, __VA_ARGS__)
+#else
+#define LGFX_MONK_ATTACK_LOGF(...) do {} while (0)
+#endif
+
 
 static void copy_far_band(uint8_t *dst, int32_t dst_w, int32_t band_y, int32_t band_h, const uint8_t *far) {
     size_t row_bytes = (size_t)dst_w * 2u;
@@ -3105,7 +3115,7 @@ static mp_obj_t lgfx_update_monk_attack_native(size_t n_args, const mp_obj_t *ar
                 lgfx_final_reset_attack(atk, has_dive_fields);
                 lgfx_final_release_monk_waypoint(hover);
                 atk[1] = current_cd;
-                mp_printf(&mp_plat_print, "MONK_ATTACK_NATIVE_FINAL_CANCEL enemy=%d slot=%d\n", (int)ei, (int)final_slot);
+                LGFX_MONK_ATTACK_LOGF("MONK_ATTACK_NATIVE_FINAL_CANCEL enemy=%d slot=%d\n", (int)ei, (int)final_slot);
                 changed += 1;
                 continue;
             }
@@ -3157,7 +3167,7 @@ static mp_obj_t lgfx_update_monk_attack_native(size_t n_args, const mp_obj_t *ar
                     start_y = oy;
                     local_step = 0;
                     total_step = 0;
-                    mp_printf(&mp_plat_print, "MONK_ATTACK_NATIVE_FINAL_SWAP_EJECT enemy=%d slot=%d vx=%d vy=%d\n", (int)ei, (int)final_slot, (int)path_vx, (int)path_vy);
+                    LGFX_MONK_ATTACK_LOGF("MONK_ATTACK_NATIVE_FINAL_SWAP_EJECT enemy=%d slot=%d vx=%d vy=%d\n", (int)ei, (int)final_slot, (int)path_vx, (int)path_vy);
                 } else {
                     angle_step = lgfx_final_angle_for_center(monk_center_x, monk_center_y, ox, oy);
                     phase = (uint8_t)kMonkOrbFinalPhaseOrbit;
@@ -3190,7 +3200,7 @@ static mp_obj_t lgfx_update_monk_attack_native(size_t n_args, const mp_obj_t *ar
                     next_total_step = 0;
                     next_local_step = 0;
                     lgfx_attack_set_scripted_orb(final_orb, final_slot, ox, oy);
-                    mp_printf(&mp_plat_print, "MONK_ATTACK_NATIVE_FINAL_RANDOM_RUSH enemy=%d slot=%d vx=%d vy=%d\n", (int)ei, (int)final_slot, (int)next_vx, (int)next_vy);
+                    LGFX_MONK_ATTACK_LOGF("MONK_ATTACK_NATIVE_FINAL_RANDOM_RUSH enemy=%d slot=%d vx=%d vy=%d\n", (int)ei, (int)final_slot, (int)next_vx, (int)next_vy);
                 }
             } else if (phase == (uint8_t)kMonkOrbFinalPhaseRush) {
                 if (path_vx == 0 && path_vy == 0) {
@@ -3249,7 +3259,7 @@ static mp_obj_t lgfx_update_monk_attack_native(size_t n_args, const mp_obj_t *ar
                     int32_t player_center_y = (int32_t)player_y + ((int32_t)player_h / 2);
                     lgfx_final_pos_from_center_for_radius(player_center_x, player_center_y, player_orbit_angle, kMonkOrbPlayerOrbitRadius, &ox, &oy);
                     lgfx_attack_set_player_orbit_orb(final_orb, final_slot, ox, oy, player_orbit_angle);
-                    mp_printf(&mp_plat_print, "MONK_ATTACK_NATIVE_FINAL_DEATH enemy=%d slot=%d x=%d y=%d\n", (int)ei, (int)final_slot, (int)ox, (int)oy);
+                    LGFX_MONK_ATTACK_LOGF("MONK_ATTACK_NATIVE_FINAL_DEATH enemy=%d slot=%d x=%d y=%d\n", (int)ei, (int)final_slot, (int)ox, (int)oy);
                 }
             } else if (phase == (uint8_t)kMonkOrbFinalPhaseDeath) {
                 lgfx_final_update_player_orbit_orb(final_orb, final_slot, (int32_t)player_x, (int32_t)player_y, (int32_t)player_w, (int32_t)player_h);
@@ -3259,7 +3269,7 @@ static mp_obj_t lgfx_update_monk_attack_native(size_t n_args, const mp_obj_t *ar
                     row[8] = 0u;
                     row[9] = 0u;
                     lgfx_final_release_monk_waypoint(hover);
-                    mp_printf(&mp_plat_print, "MONK_ATTACK_NATIVE_FINAL_DEATH_DONE enemy=%d slot=%d\n", (int)ei, (int)final_slot);
+                    LGFX_MONK_ATTACK_LOGF("MONK_ATTACK_NATIVE_FINAL_DEATH_DONE enemy=%d slot=%d\n", (int)ei, (int)final_slot);
                 }
             }
 
@@ -3327,7 +3337,7 @@ static mp_obj_t lgfx_update_monk_attack_native(size_t n_args, const mp_obj_t *ar
                 lgfx_final_lock_monk_waypoint((uint8_t *)row, hover, monk_center_x, monk_center_y);
                 lgfx_attack_set_final_orb(final_orb, final_slot, curr_x, curr_y);
                 atk[1] = current_cd;
-                mp_printf(&mp_plat_print, "MONK_ATTACK_NATIVE_FINAL_START enemy=%d slot=%d x=%d y=%d\n", (int)ei, (int)final_slot, (int)curr_x, (int)curr_y);
+                LGFX_MONK_ATTACK_LOGF("MONK_ATTACK_NATIVE_FINAL_START enemy=%d slot=%d x=%d y=%d\n", (int)ei, (int)final_slot, (int)curr_x, (int)curr_y);
                 changed += 1;
                 continue;
             }
@@ -3337,7 +3347,7 @@ static mp_obj_t lgfx_update_monk_attack_native(size_t n_args, const mp_obj_t *ar
             uint8_t cadence = atk[14];
             atk[14] = (uint8_t)((cadence + 1u) & 0x01u);
             if ((cadence & 0x01u) != 0u) {
-                mp_printf(&mp_plat_print, "MONK_ATTACK_NATIVE_SKIP enemy=%d cadence=%d\n", (int)ei, (int)cadence);
+                LGFX_MONK_ATTACK_LOGF("MONK_ATTACK_NATIVE_SKIP enemy=%d cadence=%d\n", (int)ei, (int)cadence);
                 atk[1] = current_cd;
                 continue;
             }
@@ -3378,7 +3388,7 @@ static mp_obj_t lgfx_update_monk_attack_native(size_t n_args, const mp_obj_t *ar
                         }
                     }
                     atk[3] = stagger_pulse ? pulse_slot_mask : 0xFFu;
-                    mp_printf(&mp_plat_print, "MONK_ATTACK_NATIVE_PULSE_START enemy=%d active=%d lost=%d stagger=%d double=%d mask=%d radius=%d target=%d expand=%d hold=%d shrink=%d\n",
+                    LGFX_MONK_ATTACK_LOGF("MONK_ATTACK_NATIVE_PULSE_START enemy=%d active=%d lost=%d stagger=%d double=%d mask=%d radius=%d target=%d expand=%d hold=%d shrink=%d\n",
                         (int)ei,
                         (int)pulse_orbit_count,
                         (int)pulse_lost_count,
@@ -3396,9 +3406,9 @@ static mp_obj_t lgfx_update_monk_attack_native(size_t n_args, const mp_obj_t *ar
                     changed += 1;
                 } else if (!has_blocking_orb && pulse_lost_count > 0) {
                     atk[15] = 0u;
-                    mp_printf(&mp_plat_print, "MONK_ATTACK_NATIVE_PULSE_SKIP enemy=%d reason=too_few_orbs active=%d lost=%d\n", (int)ei, (int)pulse_orbit_count, (int)pulse_lost_count);
+                    LGFX_MONK_ATTACK_LOGF("MONK_ATTACK_NATIVE_PULSE_SKIP enemy=%d reason=too_few_orbs active=%d lost=%d\n", (int)ei, (int)pulse_orbit_count, (int)pulse_lost_count);
                 } else {
-                    mp_printf(&mp_plat_print, "MONK_ATTACK_NATIVE_PULSE_SKIP enemy=%d reason=orbs_not_ready active=%d lost=%d\n", (int)ei, (int)pulse_orbit_count, (int)pulse_lost_count);
+                    LGFX_MONK_ATTACK_LOGF("MONK_ATTACK_NATIVE_PULSE_SKIP enemy=%d reason=orbs_not_ready active=%d lost=%d\n", (int)ei, (int)pulse_orbit_count, (int)pulse_lost_count);
                     atk[1] = current_cd;
                     continue;
                 }
@@ -3482,7 +3492,7 @@ static mp_obj_t lgfx_update_monk_attack_native(size_t n_args, const mp_obj_t *ar
                     lgfx_band_wr_i16(atk + 20, kMonkAttackDiveDropY);
                     lgfx_band_wr_i16(atk + 22, kMonkAttackDiveTopY);
                     lgfx_attack_set_scripted_orb(dive_orb, best_dive_slot, dx, dy);
-                    mp_printf(&mp_plat_print, "MONK_ATTACK_NATIVE_START3 enemy=%d left_slot=%d right_slot=%d dive_slot=%d lx=%d ly=%d rx=%d ry=%d dx=%d dy=%d\n",
+                    LGFX_MONK_ATTACK_LOGF("MONK_ATTACK_NATIVE_START3 enemy=%d left_slot=%d right_slot=%d dive_slot=%d lx=%d ly=%d rx=%d ry=%d dx=%d dy=%d\n",
                         (int)ei,
                         (int)best_left_slot,
                         (int)best_right_slot,
@@ -3498,9 +3508,9 @@ static mp_obj_t lgfx_update_monk_attack_native(size_t n_args, const mp_obj_t *ar
                     atk[17] = 0u;
                 }
                 if (has_dive_fields && !enable_type1_dive) {
-                    mp_printf(&mp_plat_print, "MONK_ATTACK_NATIVE_START2 enemy=%d orbit=%d lost=%d blocking=%d\n", (int)ei, (int)type1_orbit_count, (int)type1_lost_count, type1_has_blocking_orb ? 1 : 0);
+                    LGFX_MONK_ATTACK_LOGF("MONK_ATTACK_NATIVE_START2 enemy=%d orbit=%d lost=%d blocking=%d\n", (int)ei, (int)type1_orbit_count, (int)type1_lost_count, type1_has_blocking_orb ? 1 : 0);
                 }
-                mp_printf(&mp_plat_print, "MONK_ATTACK_NATIVE_START enemy=%d left_slot=%d right_slot=%d lx=%d ly=%d rx=%d ry=%d\n",
+                LGFX_MONK_ATTACK_LOGF("MONK_ATTACK_NATIVE_START enemy=%d left_slot=%d right_slot=%d lx=%d ly=%d rx=%d ry=%d\n",
                     (int)ei,
                     (int)best_left_slot,
                     (int)best_right_slot,
@@ -3533,7 +3543,7 @@ static mp_obj_t lgfx_update_monk_attack_native(size_t n_args, const mp_obj_t *ar
                     if (dy == kMonkAttackDiveTopY) {
                         atk[17] = 2u;
                         lgfx_band_wr_i16(atk + 18, dive_target_x);
-                        mp_printf(&mp_plat_print, "MONK_ATTACK_NATIVE_DIVE_PHASE enemy=%d phase=track slot=%d tx=%d\n", (int)ei, (int)slot_dive, (int)dive_target_x);
+                        LGFX_MONK_ATTACK_LOGF("MONK_ATTACK_NATIVE_DIVE_PHASE enemy=%d phase=track slot=%d tx=%d\n", (int)ei, (int)slot_dive, (int)dive_target_x);
                     }
                     changed += 1;
                 } else if (dive_phase == 2u) {
@@ -3543,7 +3553,7 @@ static mp_obj_t lgfx_update_monk_attack_native(size_t n_args, const mp_obj_t *ar
                     if (lgfx_attack_abs_i32(dx - dive_target_x) == 0) {
                         atk[17] = 3u;
                         lgfx_band_wr_i16(atk + 20, kMonkAttackDiveDropY);
-                        mp_printf(&mp_plat_print, "MONK_ATTACK_NATIVE_DIVE_PHASE enemy=%d phase=drop slot=%d y=%d\n", (int)ei, (int)slot_dive, (int)kMonkAttackDiveDropY);
+                        LGFX_MONK_ATTACK_LOGF("MONK_ATTACK_NATIVE_DIVE_PHASE enemy=%d phase=drop slot=%d y=%d\n", (int)ei, (int)slot_dive, (int)kMonkAttackDiveDropY);
                     }
                     changed += 1;
                 } else if (dive_phase == 3u) {
@@ -3554,7 +3564,7 @@ static mp_obj_t lgfx_update_monk_attack_native(size_t n_args, const mp_obj_t *ar
                         lgfx_attack_set_detached_orb(dive_orb, slot_dive, dx, dy);
                         atk[16] = 0xFFu;
                         atk[17] = 0u;
-                        mp_printf(&mp_plat_print, "MONK_ATTACK_NATIVE_DIVE_DONE enemy=%d slot=%d x=%d y=%d\n", (int)ei, (int)slot_dive, (int)dx, (int)dy);
+                        LGFX_MONK_ATTACK_LOGF("MONK_ATTACK_NATIVE_DIVE_DONE enemy=%d slot=%d x=%d y=%d\n", (int)ei, (int)slot_dive, (int)dx, (int)dy);
                     }
                     changed += 1;
                 } else {
@@ -3579,7 +3589,7 @@ static mp_obj_t lgfx_update_monk_attack_native(size_t n_args, const mp_obj_t *ar
                 atk[3] = 0xFFu;
                 atk[12] = 0u;
                 atk[13] = 0u;
-                mp_printf(&mp_plat_print, "MONK_ATTACK_NATIVE_PULSE_EMPTY enemy=%d\n", (int)ei);
+                LGFX_MONK_ATTACK_LOGF("MONK_ATTACK_NATIVE_PULSE_EMPTY enemy=%d\n", (int)ei);
                 changed += 1;
             } else {
                 bool double_pulse = atk[12] == 3u;
@@ -3614,8 +3624,10 @@ static mp_obj_t lgfx_update_monk_attack_native(size_t n_args, const mp_obj_t *ar
                     next_phase = 5u;
                 }
                 if (next_phase != phase) {
+#if LGFX_MONK_ATTACK_DEBUG_LOG
                     const char *phase_name = next_phase == 5u ? "hold" : "shrink";
-                    mp_printf(&mp_plat_print, "MONK_ATTACK_NATIVE_PULSE_PHASE enemy=%d phase=%s stagger=%d double=%d\n", (int)ei, phase_name, stagger_pulse ? 1 : 0, double_pulse ? 1 : 0);
+                    LGFX_MONK_ATTACK_LOGF("MONK_ATTACK_NATIVE_PULSE_PHASE enemy=%d phase=%s stagger=%d double=%d\n", (int)ei, phase_name, stagger_pulse ? 1 : 0, double_pulse ? 1 : 0);
+#endif
                 }
                 if (total_step >= total_duration) {
                     for (int32_t si = 0; si < per_enemy_orbs; ++si) {
@@ -3631,7 +3643,7 @@ static mp_obj_t lgfx_update_monk_attack_native(size_t n_args, const mp_obj_t *ar
                         atk[16] = 0xFFu;
                         atk[17] = 0u;
                     }
-                    mp_printf(&mp_plat_print, "MONK_ATTACK_NATIVE_PULSE_DONE enemy=%d stagger=%d double=%d\n", (int)ei, stagger_pulse ? 1 : 0, double_pulse ? 1 : 0);
+                    LGFX_MONK_ATTACK_LOGF("MONK_ATTACK_NATIVE_PULSE_DONE enemy=%d stagger=%d double=%d\n", (int)ei, stagger_pulse ? 1 : 0, double_pulse ? 1 : 0);
                 } else {
                     atk[0] = next_phase;
                     atk[2] = (uint8_t)(total_step & 0xFF);
@@ -3684,7 +3696,7 @@ static mp_obj_t lgfx_update_monk_attack_native(size_t n_args, const mp_obj_t *ar
                     atk[0] = 2u;
                     lgfx_band_wr_i16(atk + 8, left_y);
                     lgfx_band_wr_i16(atk + 10, right_y);
-                    mp_printf(&mp_plat_print, "MONK_ATTACK_NATIVE_PHASE enemy=%d phase=drop left_slot=%d right_slot=%d\n",
+                    LGFX_MONK_ATTACK_LOGF("MONK_ATTACK_NATIVE_PHASE enemy=%d phase=drop left_slot=%d right_slot=%d\n",
                         (int)ei,
                         (int)slot_left,
                         (int)slot_right);
@@ -3707,7 +3719,7 @@ static mp_obj_t lgfx_update_monk_attack_native(size_t n_args, const mp_obj_t *ar
                     atk[13] = (uint8_t)(int8_t)-1;
                     lgfx_band_wr_i16(atk + 4, right_x);
                     lgfx_band_wr_i16(atk + 6, left_x);
-                    mp_printf(&mp_plat_print, "MONK_ATTACK_NATIVE_PHASE enemy=%d phase=sweep left_slot=%d right_slot=%d\n",
+                    LGFX_MONK_ATTACK_LOGF("MONK_ATTACK_NATIVE_PHASE enemy=%d phase=sweep left_slot=%d right_slot=%d\n",
                         (int)ei,
                         (int)slot_left,
                         (int)slot_right);
@@ -3735,13 +3747,13 @@ static mp_obj_t lgfx_update_monk_attack_native(size_t n_args, const mp_obj_t *ar
                     atk[12] = 0u;
                     atk[13] = 0u;
                     if (dive_active) {
-                        mp_printf(&mp_plat_print, "MONK_ATTACK_NATIVE_DONE_WAIT_DIVE enemy=%d left_slot=%d right_slot=%d dive_slot=%d\n",
+                        LGFX_MONK_ATTACK_LOGF("MONK_ATTACK_NATIVE_DONE_WAIT_DIVE enemy=%d left_slot=%d right_slot=%d dive_slot=%d\n",
                             (int)ei,
                             (int)slot_left,
                             (int)slot_right,
                             (int)slot_dive);
                     } else {
-                        mp_printf(&mp_plat_print, "MONK_ATTACK_NATIVE_DONE enemy=%d left_slot=%d right_slot=%d\n",
+                        LGFX_MONK_ATTACK_LOGF("MONK_ATTACK_NATIVE_DONE enemy=%d left_slot=%d right_slot=%d\n",
                             (int)ei,
                             (int)slot_left,
                             (int)slot_right);

@@ -2,6 +2,34 @@ import config
 import object_native
 
 try:
+    import asset_cache
+except Exception:
+    asset_cache = None
+
+_raw_print = print
+
+
+def _quiet_logs_enabled():
+    try:
+        return bool(getattr(config, "CAMERA_QUIET_LOGS", False))
+    except Exception:
+        return False
+
+
+def print(*args):
+    if not _quiet_logs_enabled():
+        _raw_print(*args)
+        return
+    text = ""
+    if args:
+        try:
+            text = str(args[0])
+        except Exception:
+            text = ""
+    if "FAIL" in text or "ERROR" in text or "CRASH" in text:
+        _raw_print(*args)
+
+try:
     import monk_orb_damage
 except Exception:
     monk_orb_damage = None
@@ -68,6 +96,7 @@ _BULLET_DEBUG_LIMIT = 12
 _bullet_debug_count = 0
 _bullet_debug_last_active_ms = -1000000
 _enemy_native_update_disabled = False
+_last_joy_centers = None
 _ENEMY_STATE_KEYS = ("facing", "state", "anim_counter", "shoot_cooldown", "shot_fired", "vel_y")
 _ENEMY_ROW_STRIDE = 12
 _ENEMY_STATE_STRIDE = 8
@@ -108,6 +137,22 @@ _SPECIAL_KIND_SWAP_PREVIEW = 4
 _boot_source_tag = "ROOT"
 _draw_digits_to_buf = None
 _get_digits_text_width = None
+_special_object_desc_scratch = bytearray(16 * 8)
+_monk_orb_desc_scratch = bytearray(24 * 8)
+_monk_orb_fallback_desc_scratch = bytearray(24 * 8)
+_monk_intro_orb_desc_scratch = bytearray(8 * 8)
+_monk_intro_body_desc_scratch = bytearray(2 * 10)
+_special_desc_scratch = bytearray(48 * 8)
+_swap_preview_desc_scratch = bytearray(8)
+_enemy_desc_scratch = bytearray(16 * 10)
+_enemy_merged_desc_scratch = bytearray(16 * 10)
+_overlay_desc_scratch = bytearray(16 * 10)
+_swap_preview_object_scratch = bytearray(64 * 10)
+_overlay_frames_cache = ()
+_overlay_frames_cache_right = None
+_overlay_frames_cache_left = None
+_empty_desc8 = bytearray(0)
+_empty_desc10 = bytearray(0)
 
 
 def _buf_get_i16_le(buf, off):
@@ -151,6 +196,49 @@ def _buf_set_i32_le(buf, off, value):
     buf[off + 1] = (uv >> 8) & 0xFF
     buf[off + 2] = (uv >> 16) & 0xFF
     buf[off + 3] = (uv >> 24) & 0xFF
+
+
+def _ensure_special_desc_capacity(count, stride=8):
+    global _special_desc_scratch
+    need = int(count) * int(stride)
+    if need < 0:
+        need = 0
+    if len(_special_desc_scratch) < need:
+        _special_desc_scratch = bytearray(need)
+    return _special_desc_scratch
+
+
+def _ensure_buf_capacity(buf, need):
+    need = int(need)
+    if need < 0:
+        need = 0
+    if len(buf) < need:
+        old = buf
+        buf = bytearray(need)
+        i = 0
+        limit = len(old)
+        while i < limit:
+            buf[i] = old[i]
+            i += 1
+    return buf
+
+
+def _copy_desc_rows(dst, dst_count, src, src_stride, src_count, dst_stride=8):
+    if src is None or src_count <= 0:
+        return dst_count
+    dst_off = int(dst_count) * int(dst_stride)
+    src_stride = int(src_stride)
+    src_count = int(src_count)
+    i = 0
+    while i < src_count:
+        so = i * src_stride
+        do = dst_off + (i * dst_stride)
+        j = 0
+        while j < dst_stride:
+            dst[do + j] = src[so + j]
+            j += 1
+        i += 1
+    return dst_count + src_count
 
 
 class _PackedEnemyStateView:
@@ -333,6 +421,10 @@ def _monk_attack_enabled():
         return bool(getattr(config, "MONK_ATTACK_ENABLED", False))
     except Exception:
         return False
+
+
+def get_joy_centers():
+    return _last_joy_centers
 
 
 def _bullet_debug_active(enemy_bullets, camera_x, screen_w, screen_h):
@@ -1111,6 +1203,13 @@ def _load_objects_rows_and_meta(path):
 
 
 def _load_rgb565_blob(path, exp_bytes):
+    if asset_cache is not None:
+        try:
+            data = asset_cache.get_blob(path, exp_bytes)
+            if data is not None:
+                return data
+        except Exception:
+            pass
     try:
         with open(path, "rb") as fp:
             data = fp.read()
@@ -1119,6 +1218,23 @@ def _load_rgb565_blob(path, exp_bytes):
     if data is None or len(data) != exp_bytes:
         return None
     return data
+
+
+def _load_far_band_blob(path, screen_w, screen_h, band_top, band_h):
+    data = None
+    if asset_cache is not None:
+        try:
+            data = asset_cache.get_blob(path, screen_w * screen_h * 2)
+        except Exception:
+            data = None
+    if data is None:
+        return None
+    if int(band_top) == 0 and int(band_h) == int(screen_h):
+        return data
+    row_bytes = int(screen_w) * 2
+    start = int(band_top) * row_bytes
+    end = start + int(band_h) * row_bytes
+    return data[start:end]
 
 
 def _load_object_animations(path):
@@ -1489,7 +1605,12 @@ def _pick_swappable_bullet_index(enemy_bullets, player_x, player_y, player_w, pl
     best_d2 = -1
     bi = 0
     while bi < len(enemy_bullets):
-        bx, by, _vx, _vy, bw, bh, active = enemy_bullets[bi][0:7]
+        row = enemy_bullets[bi]
+        bx = row[0]
+        by = row[1]
+        bw = row[4]
+        bh = row[5]
+        active = row[6]
         if active:
             d2 = _visible_target_distance2(bx, by, bw, bh, player_x, player_y, player_w, player_h, camera_x, band_top, view_w, view_h)
             if d2 >= 0:
@@ -1729,9 +1850,11 @@ def _aabb_near_view(wx, wy, w, h, camera_x, view_w, view_h, margin_x=0, margin_y
 
 
 def _pack_enemy_render_descriptors(enemy_rows, enemy_states, enemy_meta=None, camera_x=0, view_w=320, view_h=240, margin_x=48, margin_y=32, monk_frame_w=0, monk_frame_h=0):
+    global _enemy_desc_scratch
     if not enemy_rows or not enemy_states:
-        return bytearray(), 10, 0
-    out = bytearray()
+        return _empty_desc10, 10, 0
+    stride = 10
+    out = _enemy_desc_scratch
     count = 0
     ei = 0
     while ei < len(enemy_rows):
@@ -1751,16 +1874,19 @@ def _pack_enemy_render_descriptors(enemy_rows, enemy_states, enemy_meta=None, ca
                         draw_x = int(wx) + ((int(ow) - int(monk_frame_w)) // 2)
                     if int(monk_frame_h) > 0 and int(oh) != int(monk_frame_h):
                         draw_y = int(wy) + (int(oh) - int(monk_frame_h))
-                _append_i16_le(out, draw_x)
-                _append_i16_le(out, draw_y)
-                _append_u16_le(out, int(state.get("anim_counter", 0) or 0))
-                out.append(int(state.get("state", _ENEMY_STATE_IDLE)) & 0xFF)
-                out.append(1 if int(state.get("facing", 1)) >= 0 else 0)
-                out.append(enemy_type_code & 0xFF)
-                out.append(ei & 0xFF)
+                out = _ensure_buf_capacity(out, (count + 1) * stride)
+                base = count * stride
+                _buf_set_i16_le(out, base, draw_x)
+                _buf_set_i16_le(out, base + 2, draw_y)
+                _buf_set_u16_le(out, base + 4, int(state.get("anim_counter", 0) or 0))
+                out[base + 6] = int(state.get("state", _ENEMY_STATE_IDLE)) & 0xFF
+                out[base + 7] = 1 if int(state.get("facing", 1)) >= 0 else 0
+                out[base + 8] = enemy_type_code & 0xFF
+                out[base + 9] = ei & 0xFF
                 count += 1
         ei += 1
-    return out, 10, count
+    _enemy_desc_scratch = out
+    return out, stride, count
 
 
 def _apply_monk_death_render_state(enemy_desc_buf, enemy_desc_stride, enemy_desc_count, monk_attack_c_buf, monk_attack_c_stride, monk_attack_c_count):
@@ -2167,7 +2293,12 @@ def _render_enemy_bullets_into_scene(
         return
     bi = 0
     while bi < len(enemy_bullets):
-        bx, by, _vx, _vy, bw, bh, active = enemy_bullets[bi][0:7]
+        row = enemy_bullets[bi]
+        bx = row[0]
+        by = row[1]
+        bw = row[4]
+        bh = row[5]
+        active = row[6]
         if active:
             clip = _clip_rect_screen_xywh(int(bx) - int(camera_x), int(by) - int(band_top), int(bw), int(bh), scene_w, scene_h)
             if clip is not None:
@@ -4444,7 +4575,8 @@ def _pack_special_object_descriptors(
     view_w=320,
     view_h=240,
 ):
-    out = bytearray()
+    global _special_object_desc_scratch
+    out = _special_object_desc_scratch
     stride = 8
     count = 0
     if objects_rows and object_meta_rows and object_animations:
@@ -4461,24 +4593,29 @@ def _pack_special_object_descriptors(
                     frame_w = int(anim_spec.get("frame_w", 0) or 0) if anim_spec else 0
                     frame_h = int(anim_spec.get("frame_h", 0) or 0) if anim_spec else 0
                     if visible and frame_w > 0 and frame_h > 0 and _aabb_near_view(wx, wy, ow, oh, camera_x, view_w, view_h, 48, 32):
-                        _append_i16_le(out, wx)
-                        _append_i16_le(out, wy)
-                        out.append(kind & 0xFF)
-                        out.append(frame_index & 0xFF)
-                        out.append(0)
-                        out.append(0)
+                        out = _ensure_buf_capacity(out, (count + 1) * stride)
+                        base = count * stride
+                        _buf_set_i16_le(out, base, wx)
+                        _buf_set_i16_le(out, base + 2, wy)
+                        out[base + 4] = kind & 0xFF
+                        out[base + 5] = frame_index & 0xFF
+                        out[base + 6] = 0
+                        out[base + 7] = 0
                         count += 1
             oi += 1
     if anchor_active and anchor_anim_spec:
         frame_index = _pick_animation_frame_index(anchor_anim_spec, anchor_anim_counter)
         if frame_index >= 0:
-            _append_i16_le(out, anchor_x)
-            _append_i16_le(out, anchor_y)
-            out.append(_SPECIAL_KIND_ANCHOR)
-            out.append(frame_index & 0xFF)
-            out.append(0)
-            out.append(0)
+            out = _ensure_buf_capacity(out, (count + 1) * stride)
+            base = count * stride
+            _buf_set_i16_le(out, base, anchor_x)
+            _buf_set_i16_le(out, base + 2, anchor_y)
+            out[base + 4] = _SPECIAL_KIND_ANCHOR
+            out[base + 5] = frame_index & 0xFF
+            out[base + 6] = 0
+            out[base + 7] = 0
             count += 1
+    _special_object_desc_scratch = out
     return out, stride, count
 
 def _pack_monk_orb_descriptors(
@@ -4492,11 +4629,12 @@ def _pack_monk_orb_descriptors(
     monk_frame_w=32,
     monk_frame_h=48,
 ):
-    out = bytearray()
+    global _monk_orb_fallback_desc_scratch
+    out = _monk_orb_fallback_desc_scratch
     stride = 8
     count = 0
     if not enemy_rows or not enemy_states:
-        return out, stride, count
+        return _empty_desc8, stride, count
     ei = 0
     while ei < len(enemy_rows):
         row = enemy_rows[ei]
@@ -4522,15 +4660,18 @@ def _pack_monk_orb_descriptors(
                         oi += 1
                         continue
                     orb_x, orb_y = _monk_orb_current_world_pos(wx, wy, ow, oh, int(state.get("anim_counter", 0) or 0), oi, monk_frame_w, monk_frame_h, orb_state)
-                    _append_i16_le(out, orb_x)
-                    _append_i16_le(out, orb_y)
-                    out.append(_SPECIAL_KIND_MONK_ORB)
-                    out.append(oi & 0xFF)
-                    out.append(orb_mode & 0xFF)
-                    out.append(0)
+                    out = _ensure_buf_capacity(out, (count + 1) * stride)
+                    base = count * stride
+                    _buf_set_i16_le(out, base, orb_x)
+                    _buf_set_i16_le(out, base + 2, orb_y)
+                    out[base + 4] = _SPECIAL_KIND_MONK_ORB
+                    out[base + 5] = oi & 0xFF
+                    out[base + 6] = orb_mode & 0xFF
+                    out[base + 7] = 0
                     count += 1
                     oi += 1
         ei += 1
+    _monk_orb_fallback_desc_scratch = out
     return out, stride, count
 
 
@@ -4569,15 +4710,19 @@ def _pack_monk_orb_descriptors_native(
     monk_frame_w=32,
     monk_frame_h=48,
 ):
+    global _monk_orb_desc_scratch
     stride = 8
     if not _monk_orb_descriptors_native_ready():
         return None
     if monk_orb_c_buf is None or monk_orb_c_count <= 0 or enemy_rows_c_buf is None or enemy_rows_c_count <= 0:
-        return bytearray(), stride, 0
+        return _monk_orb_desc_scratch, stride, 0
     if _monk_orb_states_have_scripted_mode(monk_orb_states):
         return None
     max_count = int(monk_orb_c_count)
-    out = bytearray(max_count * stride)
+    need = max_count * stride
+    if len(_monk_orb_desc_scratch) < need:
+        _monk_orb_desc_scratch = bytearray(need)
+    out = _monk_orb_desc_scratch
     try:
         count = _lgfx.pack_monk_orb_descriptors_native(
             out,
@@ -4598,8 +4743,6 @@ def _pack_monk_orb_descriptors_native(
         count = int(count)
         if count < 0:
             count = 0
-        if count < max_count:
-            out = out[:count * stride]
         return out, stride, count
     except Exception as exc:
         print("MONK_ORB_DESC_NATIVE_FAIL %r" % (exc,))
@@ -4607,11 +4750,12 @@ def _pack_monk_orb_descriptors_native(
 
 
 def _pack_monk_encounter_intro_orb_descriptors(monk_encounters, camera_x=0, view_w=320, view_h=240):
-    out = bytearray()
+    global _monk_intro_orb_desc_scratch
     stride = 8
     count = 0
     if not monk_encounters:
-        return out, stride, count
+        return _empty_desc8, stride, count
+    out = _monk_intro_orb_desc_scratch
     ei = 0
     while ei < len(monk_encounters):
         encounter = monk_encounters[ei]
@@ -4623,28 +4767,32 @@ def _pack_monk_encounter_intro_orb_descriptors(monk_encounters, camera_x=0, view
                 orb_x = int(orb.get("x", 0) or 0)
                 orb_y = int(orb.get("y", 0) or 0)
                 if _aabb_near_view(orb_x, orb_y, _MONK_ORB_W, _MONK_ORB_H, camera_x, view_w, view_h, 48, 32):
-                    _append_i16_le(out, orb_x)
-                    _append_i16_le(out, orb_y)
-                    out.append(_SPECIAL_KIND_MONK_ORB)
-                    out.append(oi & 0xFF)
-                    out.append(_MONK_ORB_NATIVE_MODE_SCRIPTED_INTRO)
-                    out.append(0)
+                    out = _ensure_buf_capacity(out, (count + 1) * stride)
+                    base = count * stride
+                    _buf_set_i16_le(out, base, orb_x)
+                    _buf_set_i16_le(out, base + 2, orb_y)
+                    out[base + 4] = _SPECIAL_KIND_MONK_ORB
+                    out[base + 5] = oi & 0xFF
+                    out[base + 6] = _MONK_ORB_NATIVE_MODE_SCRIPTED_INTRO
+                    out[base + 7] = 0
                     count += 1
                 oi += 1
         ei += 1
+    _monk_intro_orb_desc_scratch = out
     return out, stride, count
 
 
 def _pack_monk_final_path_descriptors(monk_attack_c_buf, monk_attack_c_stride, monk_attack_c_count, camera_x=0, view_w=320, view_h=240):
-    return bytearray(), 8, 0
+    return _empty_desc8, 8, 0
 
 
 def _pack_monk_encounter_intro_body_descriptors(monk_encounters, camera_x=0, view_w=320, view_h=240, monk_frame_w=32, monk_frame_h=48):
-    out = bytearray()
+    global _monk_intro_body_desc_scratch
     stride = 10
     count = 0
     if not monk_encounters:
-        return out, stride, count
+        return _empty_desc10, stride, count
+    out = _monk_intro_body_desc_scratch
     ei = 0
     while ei < len(monk_encounters):
         encounter = monk_encounters[ei]
@@ -4656,15 +4804,18 @@ def _pack_monk_encounter_intro_body_descriptors(monk_encounters, camera_x=0, vie
             body_h = int(template_row[3])
             draw_x, draw_y = _monk_enemy_draw_origin(body_x, body_y, body_w, body_h, monk_frame_w, monk_frame_h)
             if _aabb_near_view(draw_x, draw_y, monk_frame_w, monk_frame_h, camera_x, view_w, view_h, 48, 32):
-                _append_i16_le(out, draw_x)
-                _append_i16_le(out, draw_y)
-                _append_u16_le(out, int(encounter.get("anim_counter", 0) or 0))
-                out.append(_ENEMY_STATE_IDLE & 0xFF)
-                out.append(1)
-                out.append(1)
-                out.append(0)
+                out = _ensure_buf_capacity(out, (count + 1) * stride)
+                base = count * stride
+                _buf_set_i16_le(out, base, draw_x)
+                _buf_set_i16_le(out, base + 2, draw_y)
+                _buf_set_u16_le(out, base + 4, int(encounter.get("anim_counter", 0) or 0))
+                out[base + 6] = _ENEMY_STATE_IDLE & 0xFF
+                out[base + 7] = 1
+                out[base + 8] = 1
+                out[base + 9] = 0
                 count += 1
         ei += 1
+    _monk_intro_body_desc_scratch = out
     return out, stride, count
 
 
@@ -4973,18 +5124,20 @@ def _swap_preview_update_native(
     view_w,
     view_h,
 ):
+    global _swap_preview_object_scratch
     if preview_state is None or len(preview_state) < _SWAP_PREVIEW_STATE_STRIDE:
         return False
     if _lgfx is None or not hasattr(_lgfx, "update_swap_preview_native"):
         return False
-    bullet_buf = enemy_bullets._buf if hasattr(enemy_bullets, "_buf") else bytearray()
+    bullet_buf = enemy_bullets._buf if hasattr(enemy_bullets, "_buf") else _empty_desc8
     bullet_count = len(enemy_bullets) if enemy_bullets is not None else 0
-    object_buf = bytearray()
+    object_buf = _empty_desc10
     object_stride = 10
     object_count = 0
     if objects_rows:
         object_count = len(objects_rows)
-        object_buf = bytearray(object_count * object_stride)
+        _swap_preview_object_scratch = _ensure_buf_capacity(_swap_preview_object_scratch, object_count * object_stride)
+        object_buf = _swap_preview_object_scratch
         oi = 0
         while oi < object_count:
             row = objects_rows[oi]
@@ -5002,13 +5155,13 @@ def _swap_preview_update_native(
             object_buf,
             object_stride,
             object_count,
-            enemy_rows_c_buf if enemy_rows_c_buf is not None else bytearray(),
+            enemy_rows_c_buf if enemy_rows_c_buf is not None else _empty_desc8,
             enemy_rows_c_stride,
             enemy_rows_c_count,
             bullet_buf,
             _BULLET_STATE_STRIDE,
             bullet_count,
-            monk_orb_c_buf if monk_orb_c_buf is not None else bytearray(),
+            monk_orb_c_buf if monk_orb_c_buf is not None else _empty_desc8,
             monk_orb_c_stride,
             monk_orb_c_count,
             player_x,
@@ -5030,23 +5183,22 @@ def _swap_preview_update_native(
 
 
 def _pack_swap_preview_descriptor(preview_state, camera_x=0, view_w=320, view_h=240):
-    target = _swap_preview_state_tuple(preview_state)
     stride = 8
-    if int(target[1]) == 0:
-        return bytearray(), stride, 0
-    x = int(target[6]) + 1
-    y = int(target[7]) + 1
-    w = int(target[8]) - 2
-    h = int(target[9]) - 2
+    if preview_state is None or len(preview_state) < _SWAP_PREVIEW_STATE_STRIDE or int(preview_state[1]) == 0:
+        return _empty_desc8, stride, 0
+    x = _buf_get_i16_le(preview_state, 8) + 1
+    y = _buf_get_i16_le(preview_state, 10) + 1
+    w = _buf_get_i16_le(preview_state, 12) - 2
+    h = _buf_get_i16_le(preview_state, 14) - 2
     if w <= 0 or h <= 0 or not _aabb_near_view(x, y, w, h, camera_x, view_w, view_h, 8, 8):
-        return bytearray(), stride, 0
-    out = bytearray()
-    _append_i16_le(out, x)
-    _append_i16_le(out, y)
-    out.append(_SPECIAL_KIND_SWAP_PREVIEW)
-    out.append(w & 0xFF)
-    out.append(h & 0xFF)
-    out.append(2)
+        return _empty_desc8, stride, 0
+    out = _swap_preview_desc_scratch
+    _buf_set_i16_le(out, 0, x)
+    _buf_set_i16_le(out, 2, y)
+    out[4] = _SPECIAL_KIND_SWAP_PREVIEW
+    out[5] = w & 0xFF
+    out[6] = h & 0xFF
+    out[7] = 2
     return out, stride, 1
 
 
@@ -5261,22 +5413,37 @@ def _pack_special_render_overlays(
     view_h=240,
     bullet_margin=32,
 ):
-    overlay_desc = bytearray()
-    overlay_frames = []
+    global _overlay_desc_scratch, _overlay_frames_cache, _overlay_frames_cache_right, _overlay_frames_cache_left
+    overlay_desc = _overlay_desc_scratch
     overlay_stride = 10
     overlay_count = 0
     bullet_frame_right_index = -1
     bullet_frame_left_index = -1
     if enemy_bullets and bullet_w > 0 and bullet_h > 0:
         if bullet_frame_right is not None:
-            bullet_frame_right_index = len(overlay_frames)
-            overlay_frames.append(bullet_frame_right)
+            bullet_frame_right_index = 0
         if bullet_frame_left is not None:
-            bullet_frame_left_index = len(overlay_frames)
-            overlay_frames.append(bullet_frame_left)
+            bullet_frame_left_index = 0 if bullet_frame_right is None else 1
+        if _overlay_frames_cache_right is not bullet_frame_right or _overlay_frames_cache_left is not bullet_frame_left:
+            if bullet_frame_right is not None and bullet_frame_left is not None:
+                _overlay_frames_cache = (bullet_frame_right, bullet_frame_left)
+            elif bullet_frame_right is not None:
+                _overlay_frames_cache = (bullet_frame_right,)
+            elif bullet_frame_left is not None:
+                _overlay_frames_cache = (bullet_frame_left,)
+            else:
+                _overlay_frames_cache = ()
+            _overlay_frames_cache_right = bullet_frame_right
+            _overlay_frames_cache_left = bullet_frame_left
         bi = 0
         while bi < len(enemy_bullets):
-            bx, by, vx, _vy, bw, bh, active = enemy_bullets[bi][0:7]
+            row = enemy_bullets[bi]
+            bx = row[0]
+            by = row[1]
+            vx = row[2]
+            bw = row[4]
+            bh = row[5]
+            active = row[6]
             if active and _aabb_near_view(bx, by, bw, bh, camera_x, view_w, view_h, bullet_margin, bullet_margin):
                 frame_index = bullet_frame_right_index
                 if int(vx) < 0 and bullet_frame_left_index >= 0:
@@ -5288,11 +5455,13 @@ def _pack_special_render_overlays(
                 if frame_index < 0:
                     bi += 1
                     continue
-                _append_i16_le(overlay_desc, bx)
-                _append_i16_le(overlay_desc, by)
-                _append_u16_le(overlay_desc, bullet_w)
-                _append_u16_le(overlay_desc, bullet_h)
-                _append_u16_le(overlay_desc, frame_index)
+                overlay_desc = _ensure_buf_capacity(overlay_desc, (overlay_count + 1) * overlay_stride)
+                base = overlay_count * overlay_stride
+                _buf_set_i16_le(overlay_desc, base, bx)
+                _buf_set_i16_le(overlay_desc, base + 2, by)
+                _buf_set_u16_le(overlay_desc, base + 4, bullet_w)
+                _buf_set_u16_le(overlay_desc, base + 6, bullet_h)
+                _buf_set_u16_le(overlay_desc, base + 8, frame_index)
                 overlay_count += 1
                 if overlay_count <= 3:
                     _bullet_debug(
@@ -5310,7 +5479,8 @@ def _pack_special_render_overlays(
                         ),
                     )
             bi += 1
-    return overlay_desc, overlay_stride, overlay_count, tuple(overlay_frames)
+    _overlay_desc_scratch = overlay_desc
+    return overlay_desc, overlay_stride, overlay_count, _overlay_frames_cache
 
 
 def _aabb_collides_objects(px, py, pw, ph, object_solids):
@@ -5370,23 +5540,12 @@ def _swap16(v):
 
 
 def _load_tileset_raw_rgb565(path, atlas_w=64, atlas_h=64):
-    try:
-        with open(path, 'rb') as fp:
-            data = fp.read()
-    except Exception:
-        return None
     exp = atlas_w * atlas_h * 2
-    if data is None or len(data) != exp:
-        return None
-    return data
+    return _load_rgb565_blob(path, exp)
 
 def _load_tileset_rgb565(path, tile_size=16, atlas_w=64, atlas_h=64):
-    try:
-        with open(path, 'rb') as fp:
-            data = fp.read()
-    except Exception:
-        return None
     exp = atlas_w * atlas_h * 2
+    data = _load_rgb565_blob(path, exp)
     if data is None or len(data) != exp:
         return None
     cols = atlas_w // tile_size
@@ -5598,8 +5757,18 @@ def _unpack_band_profile_result(band_res):
     band_special_us = 0
     band_enemy_us = 0
     band_player_us = 0
-    band_compose_each = [0, 0, 0, 0, 0, 0]
-    band_wait_each = [0, 0, 0, 0, 0, 0]
+    band0_compose_us = 0
+    band1_compose_us = 0
+    band2_compose_us = 0
+    band3_compose_us = 0
+    band4_compose_us = 0
+    band5_compose_us = 0
+    band0_wait_us = 0
+    band1_wait_us = 0
+    band2_wait_us = 0
+    band3_wait_us = 0
+    band4_wait_us = 0
+    band5_wait_us = 0
     dma_elapsed_us = 0
     if len(band_res) >= 10:
         sync_us = int(band_res[4])
@@ -5615,8 +5784,18 @@ def _unpack_band_profile_result(band_res):
         band_enemy_us = int(band_res[14])
         band_player_us = int(band_res[15])
     if len(band_res) >= 28:
-        band_compose_each = [int(v) for v in band_res[16:22]]
-        band_wait_each = [int(v) for v in band_res[22:28]]
+        band0_compose_us = int(band_res[16])
+        band1_compose_us = int(band_res[17])
+        band2_compose_us = int(band_res[18])
+        band3_compose_us = int(band_res[19])
+        band4_compose_us = int(band_res[20])
+        band5_compose_us = int(band_res[21])
+        band0_wait_us = int(band_res[22])
+        band1_wait_us = int(band_res[23])
+        band2_wait_us = int(band_res[24])
+        band3_wait_us = int(band_res[25])
+        band4_wait_us = int(band_res[26])
+        band5_wait_us = int(band_res[27])
     if len(band_res) >= 29:
         dma_elapsed_us = int(band_res[28])
     return (
@@ -5635,18 +5814,18 @@ def _unpack_band_profile_result(band_res):
         band_special_us,
         band_enemy_us,
         band_player_us,
-        band_compose_each[0],
-        band_compose_each[1],
-        band_compose_each[2],
-        band_compose_each[3],
-        band_compose_each[4],
-        band_compose_each[5],
-        band_wait_each[0],
-        band_wait_each[1],
-        band_wait_each[2],
-        band_wait_each[3],
-        band_wait_each[4],
-        band_wait_each[5],
+        band0_compose_us,
+        band1_compose_us,
+        band2_compose_us,
+        band3_compose_us,
+        band4_compose_us,
+        band5_compose_us,
+        band0_wait_us,
+        band1_wait_us,
+        band2_wait_us,
+        band3_wait_us,
+        band4_wait_us,
+        band5_wait_us,
         dma_elapsed_us,
     )
 
@@ -6326,14 +6505,6 @@ def _submit_native_band_frame(
         sw,
         sh,
     )
-    if intro_orb_desc_count > 0:
-        if monk_orb_desc_count <= 0:
-            monk_orb_desc_buf = intro_orb_desc_buf
-            monk_orb_desc_stride = intro_orb_desc_stride
-            monk_orb_desc_count = intro_orb_desc_count
-        else:
-            monk_orb_desc_buf.extend(intro_orb_desc_buf)
-            monk_orb_desc_count += intro_orb_desc_count
     final_path_desc_buf, final_path_desc_stride, final_path_desc_count = _pack_monk_final_path_descriptors(
         monk_attack_c_buf,
         monk_attack_c_stride,
@@ -6342,36 +6513,24 @@ def _submit_native_band_frame(
         sw,
         sh,
     )
-    if final_path_desc_count > 0:
-        if special_desc_count <= 0:
-            special_desc_buf = final_path_desc_buf
-            special_desc_stride = final_path_desc_stride
-            special_desc_count = final_path_desc_count
-        else:
-            special_desc_buf.extend(final_path_desc_buf)
-            special_desc_count += final_path_desc_count
-    if monk_orb_desc_count > 0:
-        if special_desc_count <= 0:
-            special_desc_buf = monk_orb_desc_buf
-            special_desc_stride = monk_orb_desc_stride
-            special_desc_count = monk_orb_desc_count
-        else:
-            special_desc_buf.extend(monk_orb_desc_buf)
-            special_desc_count += monk_orb_desc_count
     preview_desc_buf, preview_desc_stride, preview_desc_count = _pack_swap_preview_descriptor(
         swap_preview_state,
         camera_x,
         sw,
         sh,
     )
-    if preview_desc_count > 0:
-        if special_desc_count <= 0:
-            special_desc_buf = preview_desc_buf
-            special_desc_stride = preview_desc_stride
-            special_desc_count = preview_desc_count
-        else:
-            special_desc_buf.extend(preview_desc_buf)
-            special_desc_count += preview_desc_count
+    assembled_special_count = special_desc_count + final_path_desc_count + monk_orb_desc_count + intro_orb_desc_count + preview_desc_count
+    if assembled_special_count > 0:
+        assembled_special_buf = _ensure_special_desc_capacity(assembled_special_count, 8)
+        assembled_count = 0
+        assembled_count = _copy_desc_rows(assembled_special_buf, assembled_count, special_desc_buf, special_desc_stride, special_desc_count, 8)
+        assembled_count = _copy_desc_rows(assembled_special_buf, assembled_count, final_path_desc_buf, final_path_desc_stride, final_path_desc_count, 8)
+        assembled_count = _copy_desc_rows(assembled_special_buf, assembled_count, monk_orb_desc_buf, monk_orb_desc_stride, monk_orb_desc_count, 8)
+        assembled_count = _copy_desc_rows(assembled_special_buf, assembled_count, intro_orb_desc_buf, intro_orb_desc_stride, intro_orb_desc_count, 8)
+        assembled_count = _copy_desc_rows(assembled_special_buf, assembled_count, preview_desc_buf, preview_desc_stride, preview_desc_count, 8)
+        special_desc_buf = assembled_special_buf
+        special_desc_stride = 8
+        special_desc_count = assembled_count
     overlay_desc_buf, overlay_stride, overlay_count, overlay_frames = _pack_special_render_overlays(
         objects_rows,
         objects_meta,
@@ -6428,13 +6587,15 @@ def _submit_native_band_frame(
         enemy_monk_frame_h,
     )
     if intro_enemy_desc_count > 0:
-        if enemy_desc_count <= 0:
-            enemy_desc_buf = intro_enemy_desc_buf
-            enemy_desc_stride = intro_enemy_desc_stride
-            enemy_desc_count = intro_enemy_desc_count
-        else:
-            enemy_desc_buf.extend(intro_enemy_desc_buf)
-            enemy_desc_count += intro_enemy_desc_count
+        global _enemy_merged_desc_scratch
+        merged_enemy_count = enemy_desc_count + intro_enemy_desc_count
+        _enemy_merged_desc_scratch = _ensure_buf_capacity(_enemy_merged_desc_scratch, merged_enemy_count * 10)
+        copied_enemy_count = 0
+        copied_enemy_count = _copy_desc_rows(_enemy_merged_desc_scratch, copied_enemy_count, enemy_desc_buf, enemy_desc_stride, enemy_desc_count, 10)
+        copied_enemy_count = _copy_desc_rows(_enemy_merged_desc_scratch, copied_enemy_count, intro_enemy_desc_buf, intro_enemy_desc_stride, intro_enemy_desc_count, 10)
+        enemy_desc_buf = _enemy_merged_desc_scratch
+        enemy_desc_stride = 10
+        enemy_desc_count = copied_enemy_count
     descriptor_us = ticks_diff(ticks_us(), desc_t0)
     native_object_count = objects_c_count
     native_enemy_count = enemy_desc_count
@@ -6772,6 +6933,11 @@ def run(max_frames=None):
                 from engine.input import InputSystem
 
                 input_system = InputSystem()
+                global _last_joy_centers
+                try:
+                    _last_joy_centers = input_system.get_joy_centers()
+                except Exception:
+                    _last_joy_centers = None
             except Exception:
                 print("CAMERA_TEST_STEP=%d_FAIL_NO_INPUT" % step_tag)
                 raise RuntimeError("CAMERA_TEST_STEP%d_FAIL_NO_INPUT" % step_tag)
@@ -6932,19 +7098,9 @@ def run(max_frames=None):
             # Prefer caching far background in RAM once at boot for smoother frame time.
             # Fallback to per-frame streaming only when allocation/load fails.
             try:
-                far_band_buf = bytearray(sw * far_band_h * 2)
-                with open(far_raw, "rb") as far_bg:
-                    row = 0
-                    while row < far_band_h:
-                        src_off = ((band_top + row) * sw) * 2
-                        far_bg.seek(src_off)
-                        row_off = row * sw * 2
-                        row_view = memoryview(far_band_buf)[row_off : row_off + (sw * 2)]
-                        n = far_bg.readinto(row_view)
-                        if n != (sw * 2):
-                            print("CAMERA_TEST_STEP=%d_FAIL_READ" % step_tag)
-                            raise RuntimeError("CAMERA_TEST_STEP%d_FAIL_READ" % step_tag)
-                        row += 1
+                far_band_buf = _load_far_band_blob(far_raw, sw, sh, band_top, far_band_h)
+                if far_band_buf is None:
+                    raise RuntimeError("CAMERA_TEST_STEP%d_FAIL_READ" % step_tag)
                 print("CAMERA_FAR_BG_RAM_CACHE_READY")
             except Exception:
                 far_band_buf = None
@@ -6979,8 +7135,9 @@ def run(max_frames=None):
             if use_sprite_player:
                 sheet_path = str(getattr(config, "CAMERA_PLAYER_SPRITESHEET_PATH", "/player_wire.rgb565"))
                 try:
-                    with open(sheet_path, "rb") as sf:
-                        sheet_rgb = sf.read()
+                    sheet_rgb = _load_rgb565_blob(sheet_path, 128 * (sprite_h * 2) * 2)
+                    if sheet_rgb is None:
+                        raise RuntimeError("CAMERA_TEST_STEP4_FAIL_PLAYER_ASSET")
                     sprite_right, sprite_left = _slice_player_spritesheet_frames(sheet_rgb, 128, sprite_w, sprite_h)
                 except Exception:
                     print("CAMERA_TEST_STEP=4_FAIL_PLAYER_ASSET")
@@ -7010,6 +7167,7 @@ def run(max_frames=None):
             stall_frame_us = int(getattr(config, "CAMERA_STALL_FRAME_US", 65000))
             if stall_frame_us < 1000:
                 stall_frame_us = 65000
+            stall_log_enabled = bool(getattr(config, "CAMERA_STALL_LOG_ENABLED", False))
             stall_log_cooldown = int(getattr(config, "CAMERA_STALL_LOG_COOLDOWN", 15))
             if stall_log_cooldown < 1:
                 stall_log_cooldown = 15
@@ -7307,19 +7465,9 @@ def run(max_frames=None):
                     raise RuntimeError("FLOOR_LAYER_FULL_SCENE_ALLOC_FAIL")
                 # Prefer RAM-cached far band to avoid per-frame file streaming.
                 try:
-                    far_band_buf = bytearray(sw * far_band_h * 2)
-                    with open(far_raw, "rb") as far_bg:
-                        row = 0
-                        while row < far_band_h:
-                            src_off = ((band_top + row) * sw) * 2
-                            far_bg.seek(src_off)
-                            row_off = row * sw * 2
-                            row_view = memoryview(far_band_buf)[row_off : row_off + (sw * 2)]
-                            n = far_bg.readinto(row_view)
-                            if n != (sw * 2):
-                                print("CAMERA_TEST_STEP=%d_FAIL_READ" % step_tag)
-                                raise RuntimeError("CAMERA_TEST_STEP%d_FAIL_READ" % step_tag)
-                            row += 1
+                    far_band_buf = _load_far_band_blob(far_raw, sw, sh, band_top, far_band_h)
+                    if far_band_buf is None:
+                        raise RuntimeError("CAMERA_TEST_STEP%d_FAIL_READ" % step_tag)
                     far_len = len(far_band_buf)
                     if far_runtime_file is not None:
                         try:
@@ -8115,6 +8263,10 @@ def run(max_frames=None):
 
                 frame_update_us = ticks_diff(ticks_us(), seg_t0)
                 prof_update_us += frame_update_us
+                tail_total_wait_us = 0
+                tail_residual_wait_us = 0
+                tail_residual_dma_wait_us = 0
+                tail_dma_elapsed_us = 0
                 if native_band_pipeline_enabled and hasattr(_lgfx, "band_pipeline_tail_wait"):
                     try:
                         tail_wait_res = _lgfx.band_pipeline_tail_wait()
@@ -8145,6 +8297,14 @@ def run(max_frames=None):
                         prof_submit_end_us += tail_end_us
 
                 frame_native_band_enabled = native_band_pipeline_enabled
+                us = 0
+                descriptor_us = 0
+                band_compose_us = 0
+                band_special_us = 0
+                band_enemy_us = 0
+                dma_elapsed_us = 0
+                wait_us = 0
+                wait_dma_us = 0
 
                 if frame_native_band_enabled:
                     (
@@ -8808,20 +8968,30 @@ def run(max_frames=None):
 
                 frame_total_us = ticks_diff(ticks_us(), frame_start_us)
                 prof_total_us += frame_total_us
-                if _runtime_verbose_enabled():
+                if stall_log_enabled or _runtime_verbose_enabled():
                     if frame_total_us >= stall_frame_us:
                         if stall_log_countdown <= 0:
-                            print(
-                                "STALL_FRAME total_us=%d submit_us=%d bg_us_acc=%d world_us_acc=%d sprite_us_acc=%d frame=%d camera_x=%d player_x=%d"
+                            _raw_print(
+                                "STALL_FRAME total_us=%d update_us=%d submit_us=%d desc_us=%d compose_us=%d enemy_us=%d special_us=%d wait_us=%d wait_dma_us=%d dma_us=%d tail_total_us=%d tail_res_us=%d tail_dma_us=%d frame=%d camera_x=%d player_x=%d enemies=%d orbs=%d"
                                 % (
                                     frame_total_us,
+                                    frame_update_us,
                                     us,
-                                    prof_bg_us,
-                                    prof_world_us,
-                                    prof_sprite_us,
+                                    descriptor_us,
+                                    band_compose_us,
+                                    band_enemy_us,
+                                    band_special_us,
+                                    wait_us,
+                                    wait_dma_us,
+                                    dma_elapsed_us,
+                                    tail_total_wait_us,
+                                    tail_residual_wait_us,
+                                    tail_dma_elapsed_us,
                                     frame,
                                     camera_x,
                                     player_x,
+                                    enemy_rows_c_count,
+                                    monk_orb_c_count,
                                 )
                             )
                             stall_log_countdown = stall_log_cooldown

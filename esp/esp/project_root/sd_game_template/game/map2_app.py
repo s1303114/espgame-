@@ -2,6 +2,34 @@ import config
 import map2_elevator
 
 try:
+    import asset_cache
+except Exception:
+    asset_cache = None
+
+_raw_print = print
+
+
+def _quiet_logs_enabled():
+    try:
+        return bool(getattr(config, "CAMERA_QUIET_LOGS", False))
+    except Exception:
+        return False
+
+
+def print(*args):
+    if not _quiet_logs_enabled():
+        _raw_print(*args)
+        return
+    text = ""
+    if args:
+        try:
+            text = str(args[0])
+        except Exception:
+            text = ""
+    if "FAIL" in text or "ERROR" in text or "CRASH" in text:
+        _raw_print(*args)
+
+try:
     import lgfx as _lgfx
 except Exception:
     _lgfx = None
@@ -27,12 +55,28 @@ except Exception:
     InputSystem = None
 
 _boot_source_tag = "ROOT"
+_stage_switch_from_previous = False
+_joy_centers_from_previous = None
 
 
 def _load_player_frames(sprite_w, sprite_h):
+    if asset_cache is not None:
+        try:
+            frames = asset_cache.get_player_frames(sprite_w, sprite_h)
+            if frames is not None:
+                return frames
+        except Exception:
+            pass
     path = str(getattr(config, "CAMERA_PLAYER_SPRITESHEET_PATH", "/sd/game/picture/player/player_wire.rgb565"))
-    with open(path, "rb") as fp:
-        sheet = fp.read()
+    sheet = None
+    if asset_cache is not None:
+        try:
+            sheet = asset_cache.get_blob(path, 128 * (int(sprite_h) * 2) * 2)
+        except Exception:
+            sheet = None
+    if sheet is None:
+        with open(path, "rb") as fp:
+            sheet = fp.read()
     sheet_w = 128
     frames_right = []
     frames_left = []
@@ -63,7 +107,8 @@ def run(max_frames=None):
 
     print("APP_RUN_START_STAGE02_ELEVATOR")
     print("CAMERA_TEST_BOOT_SOURCE=%s" % _boot_source_tag)
-    _lgfx.init()
+    if not bool(_stage_switch_from_previous):
+        _lgfx.init()
     try:
         _lgfx.rotation(1)
     except Exception:
@@ -93,14 +138,25 @@ def run(max_frames=None):
     print("MAP2_PLAYER_SPRITE_READY")
 
     player_x, player_y, _camera_x, _vel_y = map2_elevator.enter(player_h)
-    input_system = InputSystem()
+    if _joy_centers_from_previous is not None:
+        try:
+            input_system = InputSystem(_joy_centers_from_previous[0], _joy_centers_from_previous[1])
+        except Exception:
+            input_system = InputSystem()
+    else:
+        input_system = InputSystem()
+    if _joy_centers_from_previous is not None:
+        try:
+            input_system.set_joy_centers(_joy_centers_from_previous[0], _joy_centers_from_previous[1])
+        except Exception:
+            pass
     speed = int(getattr(config, "PLAYER_SPEED_X", 2))
     facing = 1
     anim_counter = 0
     anim_idx = 0
     frame = 0
     drew_once = False
-    last_tick = ticks_ms()
+    last_tick = ticks_ms() - int(getattr(config, "FRAME_MS", 16))
 
     while True:
         now = ticks_ms()
@@ -111,7 +167,11 @@ def run(max_frames=None):
         last_tick = now
         input_system.update(now)
         input_lr = int(getattr(input_system, "joy_x_axis", 0))
-        btn_a_pressed = bool(getattr(input_system, "btn_a_pressed", False))
+        if frame < int(getattr(config, "MAP2_INPUT_SETTLE_FRAMES", 8)):
+            input_lr = 0
+            btn_a_pressed = False
+        else:
+            btn_a_pressed = bool(getattr(input_system, "btn_a_pressed", False))
         if input_lr > 20:
             facing = 1
         elif input_lr < -20:

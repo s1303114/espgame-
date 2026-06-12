@@ -46,7 +46,7 @@ class InputSystem:
         "_smooth_den",
     )
 
-    def __init__(self):
+    def __init__(self, center_x=None, center_y=None):
         self.joy_x_axis = 0
         self.joy_y_axis = 0
 
@@ -94,7 +94,11 @@ class InputSystem:
         if self._smooth_num < 0 or self._smooth_num >= self._smooth_den:
             self._smooth_num = self._smooth_den - 1
 
+        use_centers = center_x is not None and center_y is not None
+
         if machine is None:
+            if use_centers:
+                self.set_joy_centers(center_x, center_y)
             return
 
         try:
@@ -114,7 +118,10 @@ class InputSystem:
             except Exception:
                 self._btn_pins[i] = None
 
-        self._calibrate_joy_center()
+        if use_centers:
+            self.set_joy_centers(center_x, center_y)
+        else:
+            self._calibrate_joy_center()
 
     def _clamp(self, v, lo, hi):
         if v < lo:

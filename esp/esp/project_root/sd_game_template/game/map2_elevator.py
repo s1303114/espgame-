@@ -1,5 +1,28 @@
 import config
 
+_raw_print = print
+
+
+def _quiet_logs_enabled():
+    try:
+        return bool(getattr(config, "CAMERA_QUIET_LOGS", False))
+    except Exception:
+        return False
+
+
+def print(*args):
+    if not _quiet_logs_enabled():
+        _raw_print(*args)
+        return
+    text = ""
+    if args:
+        try:
+            text = str(args[0])
+        except Exception:
+            text = ""
+    if "FAIL" in text or "ERROR" in text or "CRASH" in text:
+        _raw_print(*args)
+
 try:
     import asset_cache
 except Exception:

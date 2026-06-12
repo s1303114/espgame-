@@ -50,7 +50,7 @@ firmware 的 panel bus baseline 固定為：
 物理與世界狀態：
 
 - 玩家重力由 `PLAYER_GRAVITY` / `PLAYER_FALL_SPEED_MAX` 控制
-- object 重力由 `OBJECT_GRAVITY_ENABLED` / `OBJECT_GRAVITY_STEP` 控制
+- object 重力由 `OBJECT_GRAVITY_ENABLED` / `OBJECT_GRAVITY_STEP` 控制，主線優先走 `lgfx.update_objects_native(...)`，Python fallback 已拆到 `object_native.py`
 - tilemap 是主線碰撞來源
 - object、enemy、bullet 都會影響世界互動
 
@@ -58,13 +58,16 @@ firmware 的 panel bus baseline 固定為：
 
 最終每幀流程不是 Python 先合成 full-screen `scene_buf`，而是：
 
-1. Python 更新 input、player、camera、swap、respawn、object gravity
-2. Python 更新 enemy / bullet 狀態
+1. Python 更新 input、player、camera、swap、respawn
+2. Python 透過 `object_native.update_frame(...)` 更新 object gravity / object solids
+    - 優先走 `lgfx.update_objects_native(...)`
+    - 若 native path 不可用，回退 `object_native.update_gravity_python(...)`
+3. Python 更新 enemy / bullet 狀態
    - 優先走 `lgfx.update_enemies_native(...)`
    - 若 native path 失敗，印一次 `ENEMY_UPDATE_NATIVE_FALLBACK ...` 並回退 Python update
-3. Python 打包 object / overlay / enemy render descriptors
-4. Python 呼叫 `lgfx.render_scene_bands_rgb565(...)`
-5. C++ 以 `320 x 48` 的 band 逐條 compose 與 submit
+4. Python 打包 overlay / enemy render descriptors，object render buffer 使用常駐 `objects_c_buf`
+5. Python 呼叫 `lgfx.render_scene_bands_rgb565(...)`
+6. C++ 以 `320 x 48` 的 band 逐條 compose 與 submit
 
 band 內 C++ compose 順序：
 
@@ -163,6 +166,36 @@ native enemy update 做的事情：
 ## 6. Persistent buffers
 
 enemy native update 使用常駐 packed buffer，不再每幀重建。
+
+object native update 也使用常駐 packed buffer，不再由 `app_camera_test.py` 每幀掃 list 重建 solids。
+
+### 6.0 Object state / render / solids
+
+`object_native.py` 負責管理三組 object buffer：
+
+- `objects_c_buf`：render buffer，stride `12`，與 `objects_rows` index-aligned；不可見或 special-render object 保留 slot，但 source rect 寫 0
+- `object_state_c_buf`：native update state buffer，stride `20`，保存 world rect、source rect 與 visible/solid/swappable/gravity/special flags
+- `object_solids_c_buf`：collision solids buffer，stride `8`，由 native object update 在 gravity 後重建
+
+native object update 主線：
+
+- `OBJECT_UPDATE_IMPL=C_API`
+- `lgfx.update_objects_native(...)`
+- Python wrapper：`object_native.update_frame(...)`
+
+目前 C++ 負責：
+
+- 只更新 near-view 且有 gravity flag 的 visible objects
+- tilemap collision / death-margin cull
+- 同步 `objects_c_buf` 對應 row
+- 重建 `object_solids_c_buf` 並回傳 solid count
+
+Python 仍負責：
+
+- object CSV / meta / animation 載入
+- checkpoint restore / respawn orchestration
+- swap apply sequencing
+- special-render object 的 sprite overlay compose
 
 ### 6.1 Enemy rows
 
@@ -399,6 +432,7 @@ enemy update 搬到 C++ 並改成 persistent buffer 後，敵人區實測大致�
 其中最終主線實際使用的是：
 
 - `render_scene_bands_rgb565(...)`
+- `update_objects_native(...)`
 - `update_enemies_native(...)`
 - `update_monk_orbs_native(...)`
 - `pack_monk_orb_descriptors_native(...)`

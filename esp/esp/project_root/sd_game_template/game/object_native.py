@@ -7,6 +7,16 @@ OBJECT_STATE_FLAG_SPECIAL_RENDER = 16
 OBJECT_SOLID_STRIDE = 8
 
 
+def _normal_log(text):
+    try:
+        import config
+        if bool(getattr(config, "CAMERA_QUIET_LOGS", False)):
+            return
+    except Exception:
+        pass
+    print(text)
+
+
 def _buf_get_i16_le(buf, off):
     val = buf[off] | (buf[off + 1] << 8)
     if val & 0x8000:
@@ -273,15 +283,15 @@ def init_buffers(rows, meta_rows, atlas, compose_impl_cfg, lgfx):
         solids_buf, solids_stride, solids_count = pack_solids(solids)
         render_buf, render_stride, render_count = pack_render(rows, meta_rows)
         state_buf, state_stride, state_count = pack_states(rows, meta_rows)
-        print("OBJECT_MODE_ON")
-        print("OBJECT_COUNT=%d" % len(rows))
-        print("OBJECT_C_COUNT=%d" % render_count)
-        print("OBJECT_STATE_C_COUNT=%d" % state_count)
-        print("OBJECT_COMPOSE_IMPL_CFG=%s" % compose_impl_cfg)
-        print("OBJECT_SOLID_COUNT=%d" % len(solids))
-        print("OBJECT_UPDATE_IMPL=%s" % ("C_API" if (lgfx is not None and hasattr(lgfx, "update_objects_native")) else "PYTHON"))
+        _normal_log("OBJECT_MODE_ON")
+        _normal_log("OBJECT_COUNT=%d" % len(rows))
+        _normal_log("OBJECT_C_COUNT=%d" % render_count)
+        _normal_log("OBJECT_STATE_C_COUNT=%d" % state_count)
+        _normal_log("OBJECT_COMPOSE_IMPL_CFG=%s" % compose_impl_cfg)
+        _normal_log("OBJECT_SOLID_COUNT=%d" % len(solids))
+        _normal_log("OBJECT_UPDATE_IMPL=%s" % ("C_API" if (lgfx is not None and hasattr(lgfx, "update_objects_native")) else "PYTHON"))
         return rows, meta_rows, atlas, render_buf, render_stride, render_count, state_buf, state_stride, state_count, solids, solids_buf, solids_stride, solids_count
-    print("OBJECT_MODE_OFF")
+    _normal_log("OBJECT_MODE_OFF")
     return [], [], None, bytearray(), 12, 0, bytearray(), OBJECT_STATE_STRIDE, 0, [], bytearray(), OBJECT_SOLID_STRIDE, 0
 
 

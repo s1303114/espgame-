@@ -47,6 +47,7 @@ df -h /workspace
 
 - 改了 `micropython/user_cmodules/lgfx/lgfx_mp.cpp`
 - 改了 `micropython/user_cmodules` 下的 C/C++ module
+- 改了 `micropython/user_cmodules/lgfx/micropython.cmake` 或新增 native API export / qstr
 - 改了 board config、CMake、MicroPython C/C++ 原始碼
 - 改了需要包進 firmware 的 frozen module 或底層設定
 
@@ -183,6 +184,7 @@ LOCAL_ROOT=/tmp/esp-mp-local ./build_local_tmp.sh
 cp /workspace/esp/esp/micropython/user_cmodules/lgfx/lgfx_mp.cpp /tmp/esp-mp-local/micropython/user_cmodules/lgfx/lgfx_mp.cpp
 cp /workspace/esp/esp/micropython/user_cmodules/lgfx/lgfx_band.cpp /tmp/esp-mp-local/micropython/user_cmodules/lgfx/lgfx_band.cpp
 cp /workspace/esp/esp/micropython/user_cmodules/lgfx/lgfx_shared.hpp /tmp/esp-mp-local/micropython/user_cmodules/lgfx/lgfx_shared.hpp
+cp /workspace/esp/esp/micropython/user_cmodules/lgfx/micropython.cmake /tmp/esp-mp-local/micropython/user_cmodules/lgfx/micropython.cmake
 
 cd /tmp/esp-mp-local/micropython/ports/esp32
 source /opt/esp/idf/export.sh
@@ -198,6 +200,13 @@ make -j6 BOARD=ESP32_GENERIC_S3 BOARD_VARIANT=SPIRAM_OCT_NOBT USER_C_MODULES=/tm
 - `lgfx_shared.hpp`：跨 translation unit export declaration
 
 不要把後續所有 gameplay API 都塞回 `lgfx_mp.cpp`。ESP32S3 build 已遇過 `dangerous relocation: l32r: literal target out of range` link error；將新 API 分到 `lgfx_band.cpp` 或未來新拆的 `lgfx_gameplay.cpp` 比較安全。
+
+新增 `lgfx` 匯出 API 時還要同步兩件事：
+
+- 正式 module table 加一筆 `MP_QSTR_xxx -> xxx_obj`
+- `NO_QSTR` stub table 也要加同名 `MP_QSTR_xxx`，否則 qstr 產生器看不到新名字，build 會在 C++ 編譯時出現 `MP_QSTR_xxx was not declared`
+
+目前 `micropython/user_cmodules/lgfx/micropython.cmake` 對 C++ source 加了 `-mtext-section-literals`，用來避開 lgfx 大 translation unit 在 ESP32S3 link 時的 literal range 問題。若新建 `lgfx_gameplay.cpp`，也要確保它仍吃到同一組 user module compile options。
 
 這種情況先不要猜 qstr 壞掉，先直接在板上檢查：
 
@@ -354,6 +363,7 @@ cd /workspace/esp/esp/project_root
 
 - `sd_game_template/game/app.py`
 - `sd_game_template/game/app_camera_test.py`
+- `sd_game_template/game/object_native.py`（若 object native / helper 有變）
 - `sd_game_template/game/config.py`
 
 若只改 object 資產，最小同步集合是：
