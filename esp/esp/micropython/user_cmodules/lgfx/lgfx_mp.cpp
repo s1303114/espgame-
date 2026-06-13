@@ -1199,6 +1199,92 @@ static mp_obj_t lgfx_pack_monk_orb_descriptors_native(size_t n_args, const mp_ob
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lgfx_pack_monk_orb_descriptors_native_obj, 14, 14, lgfx_pack_monk_orb_descriptors_native);
 
+static mp_obj_t lgfx_pack_overlay_descriptors_native(size_t n_args, const mp_obj_t *args) {
+    if (n_args != 14) {
+        mp_raise_ValueError(MP_ERROR_TEXT("need 14 args"));
+    }
+
+    mp_buffer_info_t out_info;
+    mp_buffer_info_t bullet_info;
+    mp_get_buffer_raise(args[0], &out_info, MP_BUFFER_RW);
+    mp_int_t out_stride = mp_obj_get_int(args[1]);
+    mp_int_t max_out_count = mp_obj_get_int(args[2]);
+    mp_get_buffer_raise(args[3], &bullet_info, MP_BUFFER_READ);
+    mp_int_t bullet_stride = mp_obj_get_int(args[4]);
+    mp_int_t bullet_count = mp_obj_get_int(args[5]);
+    mp_int_t bullet_w = mp_obj_get_int(args[6]);
+    mp_int_t bullet_h = mp_obj_get_int(args[7]);
+    bool right_frame_present = mp_obj_is_true(args[8]);
+    bool left_frame_present = mp_obj_is_true(args[9]);
+    mp_int_t camera_x = mp_obj_get_int(args[10]);
+    mp_int_t view_w = mp_obj_get_int(args[11]);
+    mp_int_t view_h = mp_obj_get_int(args[12]);
+    mp_int_t bullet_margin = mp_obj_get_int(args[13]);
+
+    if (out_stride < 10 || bullet_stride < 16 || max_out_count < 0 || bullet_count < 0) {
+        mp_raise_ValueError(MP_ERROR_TEXT("invalid overlay desc dims"));
+    }
+    if (out_info.len < (size_t)max_out_count * (size_t)out_stride) {
+        mp_raise_ValueError(MP_ERROR_TEXT("overlay desc out too small"));
+    }
+    if (bullet_info.len < (size_t)bullet_count * (size_t)bullet_stride) {
+        mp_raise_ValueError(MP_ERROR_TEXT("bullet buf too small"));
+    }
+    if (bullet_w <= 0 || bullet_h <= 0 || view_w <= 0 || view_h <= 0) {
+        return MP_OBJ_NEW_SMALL_INT(0);
+    }
+    if (bullet_margin < 0) {
+        bullet_margin = 0;
+    }
+
+    int32_t right_frame_index = right_frame_present ? 0 : -1;
+    int32_t left_frame_index = left_frame_present ? (right_frame_present ? 1 : 0) : -1;
+    if (right_frame_index < 0 && left_frame_index < 0) {
+        return MP_OBJ_NEW_SMALL_INT(0);
+    }
+
+    uint8_t *out = (uint8_t *)out_info.buf;
+    const uint8_t *bullets = (const uint8_t *)bullet_info.buf;
+    int32_t count = 0;
+    for (int32_t bi = 0; bi < bullet_count && count < max_out_count; ++bi) {
+        const uint8_t *row = bullets + ((size_t)bi * (size_t)bullet_stride);
+        int32_t active = lgfx_rd_i16(row + 12);
+        if (!active) {
+            continue;
+        }
+        int32_t bx = lgfx_rd_i16(row + 0);
+        int32_t by = lgfx_rd_i16(row + 2);
+        int32_t vx = lgfx_rd_i16(row + 4);
+        int32_t bw = lgfx_rd_i16(row + 8);
+        int32_t bh = lgfx_rd_i16(row + 10);
+        if (!lgfx_aabb_near_view_early(bx, by, bw, bh, camera_x, view_w, view_h, bullet_margin, bullet_margin)) {
+            continue;
+        }
+
+        int32_t frame_index = right_frame_index;
+        if (vx < 0 && left_frame_index >= 0) {
+            frame_index = left_frame_index;
+        } else if (vx >= 0 && right_frame_index < 0) {
+            frame_index = left_frame_index;
+        } else if (vx < 0 && left_frame_index < 0) {
+            frame_index = right_frame_index;
+        }
+        if (frame_index < 0) {
+            continue;
+        }
+
+        uint8_t *dst = out + ((size_t)count * (size_t)out_stride);
+        lgfx_wr_i16(dst + 0, bx);
+        lgfx_wr_i16(dst + 2, by);
+        lgfx_wr_u16(dst + 4, (uint32_t)bullet_w);
+        lgfx_wr_u16(dst + 6, (uint32_t)bullet_h);
+        lgfx_wr_u16(dst + 8, (uint32_t)frame_index);
+        count += 1;
+    }
+    return mp_obj_new_int(count);
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lgfx_pack_overlay_descriptors_native_obj, 14, 14, lgfx_pack_overlay_descriptors_native);
+
 static mp_obj_t lgfx_update_monk_intro_native(size_t n_args, const mp_obj_t *args) {
     if (n_args != 7) {
         mp_raise_ValueError(MP_ERROR_TEXT("need 7 args"));
@@ -2804,6 +2890,8 @@ static const mp_rom_map_elem_t lgfx_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_band_submit_probe_rgb565), MP_ROM_PTR(&lgfx_band_submit_probe_rgb565_obj) },
     { MP_ROM_QSTR(MP_QSTR_band_pipeline_tail_wait), MP_ROM_PTR(&lgfx_band_pipeline_tail_wait_obj) },
     { MP_ROM_QSTR(MP_QSTR_render_scene_bands_rgb565), MP_ROM_PTR(&lgfx_render_scene_bands_rgb565_obj) },
+    { MP_ROM_QSTR(MP_QSTR_submit_native_band_frame), MP_ROM_PTR(&lgfx_submit_native_band_frame_obj) },
+    { MP_ROM_QSTR(MP_QSTR_copy_last_render_profile), MP_ROM_PTR(&lgfx_copy_last_render_profile_obj) },
     { MP_ROM_QSTR(MP_QSTR_render_elevator_scene_bands_rgb565), MP_ROM_PTR(&lgfx_render_elevator_scene_bands_rgb565_obj) },
     { MP_ROM_QSTR(MP_QSTR_update_objects_native), MP_ROM_PTR(&lgfx_update_objects_native_obj) },
     { MP_ROM_QSTR(MP_QSTR_update_enemies_native), MP_ROM_PTR(&lgfx_update_enemies_native_obj) },
@@ -2812,6 +2900,7 @@ static const mp_rom_map_elem_t lgfx_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_update_monk_attack_native), MP_ROM_PTR(&lgfx_update_monk_attack_native_obj) },
     { MP_ROM_QSTR(MP_QSTR_update_swap_preview_native), MP_ROM_PTR(&lgfx_update_swap_preview_native_obj) },
     { MP_ROM_QSTR(MP_QSTR_pack_monk_orb_descriptors_native), MP_ROM_PTR(&lgfx_pack_monk_orb_descriptors_native_obj) },
+    { MP_ROM_QSTR(MP_QSTR_pack_overlay_descriptors_native), MP_ROM_PTR(&lgfx_pack_overlay_descriptors_native_obj) },
     { MP_ROM_QSTR(MP_QSTR_pick_swappable_monk_orb_native), MP_ROM_PTR(&lgfx_pick_swappable_monk_orb_native_obj) },
     { MP_ROM_QSTR(MP_QSTR_compose_tilemap_rgb565), MP_ROM_PTR(&lgfx_compose_tilemap_rgb565_obj) },
     { MP_ROM_QSTR(MP_QSTR_compose_colorkey_rgb565), MP_ROM_PTR(&lgfx_compose_colorkey_rgb565_obj) },
@@ -2856,6 +2945,8 @@ static const mp_rom_map_elem_t lgfx_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_band_submit_probe_rgb565), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_band_pipeline_tail_wait), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_render_scene_bands_rgb565), MP_ROM_INT(0) },
+    { MP_ROM_QSTR(MP_QSTR_submit_native_band_frame), MP_ROM_INT(0) },
+    { MP_ROM_QSTR(MP_QSTR_copy_last_render_profile), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_render_elevator_scene_bands_rgb565), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_update_objects_native), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_update_enemies_native), MP_ROM_INT(0) },
@@ -2864,6 +2955,7 @@ static const mp_rom_map_elem_t lgfx_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_update_monk_attack_native), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_update_swap_preview_native), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_pack_monk_orb_descriptors_native), MP_ROM_INT(0) },
+    { MP_ROM_QSTR(MP_QSTR_pack_overlay_descriptors_native), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_pick_swappable_monk_orb_native), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_compose_tilemap_rgb565), MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_compose_colorkey_rgb565), MP_ROM_INT(0) },

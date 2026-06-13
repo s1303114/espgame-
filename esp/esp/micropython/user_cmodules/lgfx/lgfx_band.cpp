@@ -12,6 +12,64 @@ extern "C" {
 
 #include "lgfx_shared.hpp"
 
+static const size_t kRenderProfileLen = 28;
+static uint32_t g_last_render_profile[kRenderProfileLen] = {0};
+
+static void set_last_render_profile(
+    uint32_t bands,
+    uint32_t compose_us,
+    uint32_t kick_us,
+    uint32_t wait_us,
+    uint32_t sync_us,
+    uint32_t start_us,
+    uint32_t push_us,
+    uint32_t wait_dma_us,
+    uint32_t end_us,
+    uint32_t total_us,
+    uint32_t band_bg_us,
+    uint32_t band_tilemap_us,
+    uint32_t band_object_us,
+    uint32_t band_special_us,
+    uint32_t band_enemy_us,
+    uint32_t band_player_us,
+    const uint32_t *band_compose_each,
+    const uint32_t *band_wait_each,
+    uint32_t dma_elapsed_us
+) {
+    g_last_render_profile[0] = bands;
+    g_last_render_profile[1] = compose_us;
+    g_last_render_profile[2] = kick_us;
+    g_last_render_profile[3] = wait_us;
+    g_last_render_profile[4] = sync_us;
+    g_last_render_profile[5] = start_us;
+    g_last_render_profile[6] = push_us;
+    g_last_render_profile[7] = wait_dma_us;
+    g_last_render_profile[8] = end_us;
+    g_last_render_profile[9] = band_bg_us;
+    g_last_render_profile[10] = band_tilemap_us;
+    g_last_render_profile[11] = band_object_us;
+    g_last_render_profile[12] = band_special_us;
+    g_last_render_profile[13] = band_enemy_us;
+    g_last_render_profile[14] = band_player_us;
+    for (size_t i = 0; i < 6; ++i) {
+        g_last_render_profile[15 + i] = band_compose_each[i];
+        g_last_render_profile[21 + i] = band_wait_each[i];
+    }
+    g_last_render_profile[27] = dma_elapsed_us;
+    (void)total_us;
+}
+
+extern "C" mp_obj_t lgfx_copy_last_render_profile(mp_obj_t out_obj) {
+    mp_buffer_info_t out_info;
+    mp_get_buffer_raise(out_obj, &out_info, MP_BUFFER_WRITE);
+    if (out_info.len < (kRenderProfileLen * sizeof(uint32_t))) {
+        mp_raise_ValueError(MP_ERROR_TEXT("profile buf too small"));
+    }
+    memcpy(out_info.buf, g_last_render_profile, kRenderProfileLen * sizeof(uint32_t));
+    return mp_const_none;
+}
+MP_DEFINE_CONST_FUN_OBJ_1(lgfx_copy_last_render_profile_obj, lgfx_copy_last_render_profile);
+
 #ifndef LGFX_MONK_ATTACK_DEBUG_LOG
 #define LGFX_MONK_ATTACK_DEBUG_LOG 0
 #endif
@@ -1043,6 +1101,120 @@ static void compose_scene_band(
     *band_player_us += (uint32_t)(t7 - t6);
 }
 
+extern "C" {
+static void submit_ctx_compose_overlay_band(
+    uint8_t *dst,
+    int32_t dst_w,
+    int32_t dst_h,
+    int32_t camera_x,
+    int32_t band_top,
+    const uint8_t *overlay_desc,
+    int32_t overlay_count,
+    const uint8_t *frame_right,
+    size_t frame_right_len,
+    const uint8_t *frame_left,
+    size_t frame_left_len,
+    int32_t overlay_key
+);
+}
+
+static void submit_ctx_compose_scene_band(
+    uint8_t *dst,
+    int32_t screen_w,
+    int32_t band_y,
+    int32_t band_h,
+    const uint8_t *far,
+    int32_t camera_x,
+    const uint8_t *tilemap,
+    int32_t map_w,
+    int32_t map_h,
+    const uint8_t *tileset,
+    size_t tileset_len,
+    int32_t tile_size,
+    int32_t tileset_w,
+    int32_t tile_key,
+    const uint8_t *objbuf,
+    int32_t obj_stride,
+    int32_t object_count,
+    const uint8_t *obj_atlas,
+    int32_t obj_atlas_w,
+    int32_t obj_atlas_h,
+    int32_t object_key,
+    const uint8_t *sprite,
+    int32_t sprite_w,
+    int32_t sprite_h,
+    int32_t sprite_x,
+    int32_t sprite_y,
+    int32_t sprite_key,
+    const uint8_t *overlay_desc,
+    int32_t overlay_count,
+    const uint8_t *frame_right,
+    size_t frame_right_len,
+    const uint8_t *frame_left,
+    size_t frame_left_len,
+    const uint8_t *special_desc,
+    int32_t special_stride,
+    int32_t special_count,
+    const uint8_t *respawn_sheet,
+    int32_t respawn_frame_w,
+    int32_t respawn_frame_h,
+    int32_t respawn_frame_count,
+    const uint8_t *anchor_sheet,
+    int32_t anchor_frame_w,
+    int32_t anchor_frame_h,
+    int32_t anchor_frame_count,
+    int32_t overlay_key,
+    const uint8_t *enemy_desc,
+    int32_t enemy_stride,
+    int32_t enemy_count,
+    const uint8_t *enemy_sheet,
+    int32_t enemy_sheet_w,
+    int32_t enemy_sheet_h,
+    const uint8_t *enemy_monk_sheet,
+    int32_t enemy_monk_frame_w,
+    int32_t enemy_monk_frame_h,
+    int32_t enemy_monk_frame_count,
+    int32_t enemy_monk_frame_hold,
+    const uint8_t *enemy_monk_orb_atlas,
+    int32_t enemy_monk_orb_atlas_w,
+    int32_t enemy_monk_orb_atlas_h,
+    int32_t enemy_key,
+    int32_t enemy_frame_hold,
+    bool disable_far,
+    uint32_t *band_bg_us,
+    uint32_t *band_tilemap_us,
+    uint32_t *band_object_us,
+    uint32_t *band_special_us,
+    uint32_t *band_enemy_us,
+    uint32_t *band_player_us
+) {
+    int64_t t0 = esp_timer_get_time();
+    if (disable_far) {
+        memset(dst, 0, (size_t)screen_w * (size_t)band_h * 2u);
+    } else {
+        copy_far_band(dst, screen_w, band_y, band_h, far);
+    }
+    int64_t t1 = esp_timer_get_time();
+    compose_tilemap_band(dst, screen_w, band_h, camera_x, band_y, tilemap, map_w, map_h, tileset, tileset_len, tile_size, tileset_w, tile_key);
+    int64_t t2 = esp_timer_get_time();
+    compose_swap_preview_underlay_band(dst, screen_w, band_h, camera_x, band_y, special_desc, special_stride, special_count, obj_atlas, obj_atlas_w, obj_atlas_h, object_key);
+    compose_objects_band(dst, screen_w, band_h, camera_x, band_y, objbuf, obj_stride, object_count, obj_atlas, obj_atlas_w, obj_atlas_h, object_key);
+    int64_t t3 = esp_timer_get_time();
+    compose_enemy_band(dst, screen_w, band_h, camera_x, band_y, enemy_desc, enemy_stride, enemy_count, enemy_sheet, enemy_sheet_w, enemy_sheet_h, enemy_monk_sheet, enemy_monk_frame_w, enemy_monk_frame_h, enemy_monk_frame_count, enemy_monk_frame_hold, enemy_monk_orb_atlas, enemy_monk_orb_atlas_w, enemy_monk_orb_atlas_h, enemy_key, enemy_frame_hold);
+    int64_t t4 = esp_timer_get_time();
+    compose_special_objects_band(dst, screen_w, band_h, camera_x, band_y, special_desc, special_stride, special_count, respawn_sheet, respawn_frame_w, respawn_frame_h, respawn_frame_count, anchor_sheet, anchor_frame_w, anchor_frame_h, anchor_frame_count, enemy_monk_orb_atlas, enemy_monk_orb_atlas_w, enemy_monk_orb_atlas_h, overlay_key);
+    submit_ctx_compose_overlay_band(dst, screen_w, band_h, camera_x, band_y, overlay_desc, overlay_count, frame_right, frame_right_len, frame_left, frame_left_len, overlay_key);
+    int64_t t5 = esp_timer_get_time();
+    compose_sprite_band(dst, screen_w, band_h, sprite_x, sprite_y - band_y, sprite, sprite_w, sprite_h, sprite_key);
+    int64_t t6 = esp_timer_get_time();
+    *band_bg_us += (uint32_t)(t1 - t0);
+    *band_tilemap_us += (uint32_t)(t2 - t1);
+    *band_object_us += (uint32_t)(t3 - t2);
+    *band_enemy_us += (uint32_t)(t4 - t3);
+    *band_special_us += (uint32_t)(t5 - t4);
+    *band_player_us += (uint32_t)(t6 - t5);
+}
+
 static int64_t submit_band_start(
     uint8_t *buf,
     int32_t screen_w,
@@ -1227,6 +1399,881 @@ static mp_obj_t lgfx_band_submit_probe_rgb565(size_t n_args, const mp_obj_t *arg
     return mp_obj_new_tuple(4, out);
 }
 MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lgfx_band_submit_probe_rgb565_obj, 4, 4, lgfx_band_submit_probe_rgb565);
+
+static inline int32_t submit_ctx_get_i32(mp_obj_t obj) {
+    return (int32_t)mp_obj_get_int(obj);
+}
+
+static inline bool submit_ctx_bool(mp_obj_t obj) {
+    return mp_obj_is_true(obj);
+}
+
+static constexpr int32_t kSubmitMonkOrbCount = 5;
+
+static inline uint16_t submit_ctx_rd_u16(const uint8_t *p) {
+    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+}
+
+static inline int16_t submit_ctx_rd_i16(const uint8_t *p) {
+    return (int16_t)submit_ctx_rd_u16(p);
+}
+
+static inline void submit_ctx_wr_i16(uint8_t *p, int32_t v) {
+    if (v < -32768) v = -32768;
+    if (v > 32767) v = 32767;
+    uint16_t uv = (uint16_t)((int16_t)v);
+    p[0] = (uint8_t)(uv & 0xFFu);
+    p[1] = (uint8_t)((uv >> 8) & 0xFFu);
+}
+
+static inline void submit_ctx_wr_u16(uint8_t *p, uint32_t v) {
+    uint16_t uv = (uint16_t)(v & 0xFFFFu);
+    p[0] = (uint8_t)(uv & 0xFFu);
+    p[1] = (uint8_t)((uv >> 8) & 0xFFu);
+}
+
+static bool submit_ctx_aabb_near_view(
+    int32_t wx,
+    int32_t wy,
+    int32_t w,
+    int32_t h,
+    int32_t camera_x,
+    int32_t view_w,
+    int32_t view_h,
+    int32_t margin_x,
+    int32_t margin_y
+) {
+    if (w <= 0 || h <= 0 || view_w <= 0 || view_h <= 0) {
+        return false;
+    }
+    int32_t left = wx;
+    int32_t top = wy;
+    int32_t right = left + w;
+    int32_t bottom = top + h;
+    int32_t view_left = camera_x - margin_x;
+    int32_t view_top = -margin_y;
+    int32_t view_right = camera_x + view_w + margin_x;
+    int32_t view_bottom = view_h + margin_y;
+    return left < view_right && right > view_left && top < view_bottom && bottom > view_top;
+}
+
+static int32_t submit_ctx_anim_frame_index(int32_t frame_count, int32_t frame_hold, bool loop_flag, int32_t anim_counter) {
+    if (frame_count <= 0) {
+        return -1;
+    }
+    if (frame_hold < 1) {
+        frame_hold = 1;
+    }
+    if (anim_counter < 0) {
+        anim_counter = 0;
+    }
+    int32_t frame_index = anim_counter / frame_hold;
+    if (loop_flag) {
+        frame_index %= frame_count;
+    } else if (frame_index >= frame_count) {
+        frame_index = frame_count - 1;
+    }
+    return frame_index;
+}
+
+static int32_t submit_ctx_pack_special_objects(
+    uint8_t *out,
+    int32_t out_cap,
+    const uint8_t *object_state,
+    int32_t object_state_stride,
+    int32_t object_count,
+    const uint8_t *specs,
+    size_t specs_len,
+    int32_t object_anim_counter,
+    bool anchor_active,
+    int32_t anchor_x,
+    int32_t anchor_y,
+    int32_t anchor_anim_counter,
+    int32_t anchor_frame_count,
+    int32_t camera_x,
+    int32_t view_w,
+    int32_t view_h
+) {
+    if (!out || out_cap <= 0) {
+        return -1;
+    }
+    int32_t count = 0;
+    if (object_state && object_state_stride >= 20 && object_count > 0 && specs && specs_len >= 6u) {
+        int32_t spec_count = (int32_t)(specs_len / 6u);
+        int32_t limit = object_count;
+        if (limit > spec_count) {
+            limit = spec_count;
+        }
+        for (int32_t oi = 0; oi < limit; ++oi) {
+            const uint8_t *spec = specs + ((size_t)oi * 6u);
+            int32_t kind = (int32_t)spec[0];
+            if (kind == 0xFF) {
+                continue;
+            }
+            int32_t frame_count = (int32_t)spec[1];
+            int32_t frame_hold = (int32_t)submit_ctx_rd_u16(spec + 2);
+            bool loop_flag = spec[4] != 0;
+            int32_t frame_index = submit_ctx_anim_frame_index(frame_count, frame_hold, loop_flag, object_anim_counter);
+            if (frame_index < 0) {
+                continue;
+            }
+            const uint8_t *row = object_state + ((size_t)oi * (size_t)object_state_stride);
+            uint16_t flags = submit_ctx_rd_u16(row + 16);
+            if ((flags & 1u) == 0) {
+                continue;
+            }
+            int32_t wx = submit_ctx_rd_i16(row + 0);
+            int32_t wy = submit_ctx_rd_i16(row + 2);
+            int32_t ow = submit_ctx_rd_i16(row + 4);
+            int32_t oh = submit_ctx_rd_i16(row + 6);
+            if (!submit_ctx_aabb_near_view(wx, wy, ow, oh, camera_x, view_w, view_h, 48, 32)) {
+                continue;
+            }
+            if (count >= out_cap) {
+                return -1;
+            }
+            uint8_t *dst = out + ((size_t)count * 8u);
+            submit_ctx_wr_i16(dst + 0, wx);
+            submit_ctx_wr_i16(dst + 2, wy);
+            dst[4] = (uint8_t)(kind & 0xFF);
+            dst[5] = (uint8_t)(frame_index & 0xFF);
+            dst[6] = 0;
+            dst[7] = 0;
+            ++count;
+        }
+    }
+    if (anchor_active && anchor_frame_count > 0) {
+        int32_t frame_index = submit_ctx_anim_frame_index(anchor_frame_count, 4, false, anchor_anim_counter);
+        if (frame_index >= 0) {
+            if (count >= out_cap) {
+                return -1;
+            }
+            uint8_t *dst = out + ((size_t)count * 8u);
+            submit_ctx_wr_i16(dst + 0, anchor_x);
+            submit_ctx_wr_i16(dst + 2, anchor_y);
+            dst[4] = 1u;
+            dst[5] = (uint8_t)(frame_index & 0xFF);
+            dst[6] = 0;
+            dst[7] = 0;
+            ++count;
+        }
+    }
+    return count;
+}
+
+static int32_t submit_ctx_pack_monk_orbs(
+    uint8_t *out,
+    int32_t out_cap,
+    int32_t start_count,
+    const uint8_t *enemy_rows,
+    int32_t enemy_row_stride,
+    int32_t enemy_count,
+    const uint8_t *orbs,
+    int32_t orb_stride,
+    int32_t orb_count,
+    int32_t camera_x,
+    int32_t view_w,
+    int32_t view_h,
+    int32_t monk_frame_w,
+    int32_t monk_frame_h
+) {
+    if (!out || start_count < 0 || start_count > out_cap) {
+        return -1;
+    }
+    if (!enemy_rows || !orbs || enemy_row_stride < 12 || orb_stride < 16 || enemy_count <= 0 || orb_count <= 0) {
+        return start_count;
+    }
+    if (monk_frame_w < 1) monk_frame_w = 32;
+    if (monk_frame_h < 1) monk_frame_h = 48;
+    int32_t count = start_count;
+    int32_t enemy_limit = enemy_count;
+    int32_t orb_enemy_limit = orb_count / kSubmitMonkOrbCount;
+    if (enemy_limit > orb_enemy_limit) {
+        enemy_limit = orb_enemy_limit;
+    }
+    for (int32_t ei = 0; ei < enemy_limit; ++ei) {
+        const uint8_t *row = enemy_rows + ((size_t)ei * (size_t)enemy_row_stride);
+        bool has_player_orbit_orb = false;
+        for (int32_t si = 0; si < kSubmitMonkOrbCount; ++si) {
+            int32_t oi = (ei * kSubmitMonkOrbCount) + si;
+            if (oi >= 0 && oi < orb_count) {
+                const uint8_t *orb = orbs + ((size_t)oi * (size_t)orb_stride);
+                if (orb[0] == kMonkOrbPlayerOrbitMode) {
+                    has_player_orbit_orb = true;
+                    break;
+                }
+            }
+        }
+        bool row_visible = row[8] != 0;
+        if (!row_visible && !has_player_orbit_orb) {
+            continue;
+        }
+        if (row_visible) {
+            int32_t wx = submit_ctx_rd_i16(row + 0);
+            int32_t wy = submit_ctx_rd_i16(row + 2);
+            int32_t ow = submit_ctx_rd_i16(row + 4);
+            int32_t oh = submit_ctx_rd_i16(row + 6);
+            int32_t draw_x = wx;
+            int32_t draw_y = wy;
+            if (monk_frame_w > 0 && ow != monk_frame_w) {
+                draw_x = wx + ((ow - monk_frame_w) / 2);
+            }
+            if (monk_frame_h > 0 && oh != monk_frame_h) {
+                draw_y = wy + (oh - monk_frame_h);
+            }
+            int32_t orb_extent = kMonkOrbRadius + (kMonkOrbW / 2);
+            if (!submit_ctx_aabb_near_view(draw_x - orb_extent, draw_y - orb_extent, monk_frame_w + (orb_extent * 2), monk_frame_h + (orb_extent * 2), camera_x, view_w, view_h, 48, 32)) {
+                continue;
+            }
+        }
+        for (int32_t si = 0; si < kSubmitMonkOrbCount; ++si) {
+            int32_t oi = (ei * kSubmitMonkOrbCount) + si;
+            if (oi < 0 || oi >= orb_count) {
+                continue;
+            }
+            const uint8_t *orb = orbs + ((size_t)oi * (size_t)orb_stride);
+            uint8_t mode = orb[0];
+            if (!row_visible && mode != kMonkOrbPlayerOrbitMode) {
+                continue;
+            }
+            if (mode == 0xFFu || mode == 3u || mode == 8u) {
+                continue;
+            }
+            int32_t orb_x = submit_ctx_rd_i16(orb + 10);
+            int32_t orb_y = submit_ctx_rd_i16(orb + 12);
+            if (!submit_ctx_aabb_near_view(orb_x, orb_y, kMonkOrbW, kMonkOrbH, camera_x, view_w, view_h, 48, 32)) {
+                continue;
+            }
+            if (count >= out_cap) {
+                return -1;
+            }
+            uint8_t *dst = out + ((size_t)count * 8u);
+            submit_ctx_wr_i16(dst + 0, orb_x);
+            submit_ctx_wr_i16(dst + 2, orb_y);
+            dst[4] = 2u;
+            dst[5] = (uint8_t)(si & 0xFF);
+            dst[6] = mode;
+            dst[7] = 0;
+            ++count;
+        }
+    }
+    return count;
+}
+
+static int32_t submit_ctx_pack_swap_preview(
+    uint8_t *out,
+    int32_t out_cap,
+    int32_t start_count,
+    const uint8_t *state,
+    int32_t camera_x,
+    int32_t view_w,
+    int32_t view_h
+) {
+    if (!out || start_count < 0 || start_count > out_cap) {
+        return -1;
+    }
+    if (!state || state[0] == 0 || state[1] == 0) {
+        return start_count;
+    }
+    int32_t wx = submit_ctx_rd_i16(state + 8);
+    int32_t wy = submit_ctx_rd_i16(state + 10);
+    int32_t w = submit_ctx_rd_i16(state + 12);
+    int32_t h = submit_ctx_rd_i16(state + 14);
+    if (!submit_ctx_aabb_near_view(wx, wy, w, h, camera_x, view_w, view_h, 48, 32)) {
+        return start_count;
+    }
+    if (start_count >= out_cap) {
+        return -1;
+    }
+    uint8_t *dst = out + ((size_t)start_count * 8u);
+    submit_ctx_wr_i16(dst + 0, wx);
+    submit_ctx_wr_i16(dst + 2, wy);
+    dst[4] = 4u;
+    dst[5] = (uint8_t)(w & 0xFF);
+    dst[6] = (uint8_t)(h & 0xFF);
+    dst[7] = 0;
+    return start_count + 1;
+}
+
+static int32_t submit_ctx_pack_overlays(
+    uint8_t *out,
+    int32_t out_cap,
+    const uint8_t *bullets,
+    int32_t bullet_stride,
+    int32_t bullet_count,
+    int32_t bullet_w,
+    int32_t bullet_h,
+    bool right_frame_present,
+    bool left_frame_present,
+    int32_t camera_x,
+    int32_t view_w,
+    int32_t view_h,
+    int32_t bullet_margin
+) {
+    if (!out || out_cap < 0 || !bullets || bullet_stride < 16 || bullet_count <= 0 || bullet_w <= 0 || bullet_h <= 0) {
+        return 0;
+    }
+    if (bullet_margin < 0) {
+        bullet_margin = 0;
+    }
+    int32_t right_frame_index = right_frame_present ? 0 : -1;
+    int32_t left_frame_index = left_frame_present ? (right_frame_present ? 1 : 0) : -1;
+    if (right_frame_index < 0 && left_frame_index < 0) {
+        return 0;
+    }
+    int32_t count = 0;
+    for (int32_t bi = 0; bi < bullet_count; ++bi) {
+        const uint8_t *row = bullets + ((size_t)bi * (size_t)bullet_stride);
+        int32_t active = submit_ctx_rd_i16(row + 12);
+        if (!active) {
+            continue;
+        }
+        int32_t bx = submit_ctx_rd_i16(row + 0);
+        int32_t by = submit_ctx_rd_i16(row + 2);
+        int32_t vx = submit_ctx_rd_i16(row + 4);
+        int32_t bw = submit_ctx_rd_i16(row + 8);
+        int32_t bh = submit_ctx_rd_i16(row + 10);
+        if (!submit_ctx_aabb_near_view(bx, by, bw, bh, camera_x, view_w, view_h, bullet_margin, bullet_margin)) {
+            continue;
+        }
+        int32_t frame_index = right_frame_index;
+        if (vx < 0 && left_frame_index >= 0) {
+            frame_index = left_frame_index;
+        } else if (vx >= 0 && right_frame_index < 0) {
+            frame_index = left_frame_index;
+        } else if (vx < 0 && left_frame_index < 0) {
+            frame_index = right_frame_index;
+        }
+        if (frame_index < 0) {
+            continue;
+        }
+        if (count >= out_cap) {
+            return -1;
+        }
+        uint8_t *dst = out + ((size_t)count * 10u);
+        submit_ctx_wr_i16(dst + 0, bx);
+        submit_ctx_wr_i16(dst + 2, by);
+        submit_ctx_wr_u16(dst + 4, (uint32_t)bullet_w);
+        submit_ctx_wr_u16(dst + 6, (uint32_t)bullet_h);
+        submit_ctx_wr_u16(dst + 8, (uint32_t)frame_index);
+        ++count;
+    }
+    return count;
+}
+
+static void submit_ctx_compose_overlay_band(
+    uint8_t *dst,
+    int32_t dst_w,
+    int32_t dst_h,
+    int32_t camera_x,
+    int32_t band_top,
+    const uint8_t *overlay_desc,
+    int32_t overlay_count,
+    const uint8_t *frame_right,
+    size_t frame_right_len,
+    const uint8_t *frame_left,
+    size_t frame_left_len,
+    int32_t overlay_key
+) {
+    if (!dst || !overlay_desc || overlay_count <= 0) {
+        return;
+    }
+    for (int32_t i = 0; i < overlay_count; ++i) {
+        const uint8_t *ob = overlay_desc + ((size_t)i * 10u);
+        int32_t wx = submit_ctx_rd_i16(ob + 0);
+        int32_t wy = submit_ctx_rd_i16(ob + 2);
+        int32_t frame_w = (int32_t)submit_ctx_rd_u16(ob + 4);
+        int32_t frame_h = (int32_t)submit_ctx_rd_u16(ob + 6);
+        int32_t frame_idx = (int32_t)submit_ctx_rd_u16(ob + 8);
+        const uint8_t *frame = nullptr;
+        size_t frame_len = 0;
+        if (frame_idx == 0) {
+            frame = frame_right ? frame_right : frame_left;
+            frame_len = frame_right ? frame_right_len : frame_left_len;
+        } else if (frame_idx == 1) {
+            frame = frame_left;
+            frame_len = frame_left_len;
+        }
+        if (!frame || frame_w <= 0 || frame_h <= 0 || frame_len < (size_t)frame_w * (size_t)frame_h * 2u) {
+            continue;
+        }
+        compose_sprite_band(dst, dst_w, dst_h, wx - camera_x, wy - band_top, frame, frame_w, frame_h, overlay_key);
+    }
+}
+
+static int32_t submit_ctx_pack_enemies(
+    uint8_t *out,
+    int32_t out_cap,
+    const uint8_t *enemy_rows,
+    int32_t enemy_row_stride,
+    int32_t enemy_count,
+    const uint8_t *enemy_states,
+    size_t enemy_states_len,
+    const uint8_t *type_codes,
+    size_t type_codes_len,
+    const uint8_t *attack_state,
+    int32_t attack_stride,
+    int32_t attack_count,
+    int32_t camera_x,
+    int32_t view_w,
+    int32_t view_h,
+    int32_t margin_x,
+    int32_t margin_y,
+    int32_t monk_frame_w,
+    int32_t monk_frame_h
+) {
+    if (!out || out_cap < 0 || !enemy_rows || !enemy_states || enemy_row_stride < 12 || enemy_count <= 0) {
+        return 0;
+    }
+    int32_t state_stride = 8;
+    int32_t state_cap = (int32_t)(enemy_states_len / (size_t)state_stride);
+    int32_t limit = enemy_count;
+    if (state_cap < limit) {
+        limit = state_cap;
+    }
+    int32_t count = 0;
+    int32_t view_left = camera_x - margin_x;
+    int32_t view_top = -margin_y;
+    int32_t view_right = camera_x + view_w + margin_x;
+    int32_t view_bottom = view_h + margin_y;
+    for (int32_t ei = 0; ei < limit; ++ei) {
+        const uint8_t *row = enemy_rows + ((size_t)ei * (size_t)enemy_row_stride);
+        if (!row[8]) {
+            continue;
+        }
+        int32_t wx = submit_ctx_rd_i16(row + 0);
+        int32_t wy = submit_ctx_rd_i16(row + 2);
+        int32_t ow = submit_ctx_rd_i16(row + 4);
+        int32_t oh = submit_ctx_rd_i16(row + 6);
+        if (!(wx < view_right && (wx + ow) > view_left && wy < view_bottom && (wy + oh) > view_top)) {
+            continue;
+        }
+        uint8_t enemy_type_code = ei < (int32_t)type_codes_len ? type_codes[ei] : 0;
+        int32_t draw_x = wx;
+        int32_t draw_y = wy;
+        if (enemy_type_code == 1) {
+            if (monk_frame_w > 0 && ow != monk_frame_w) {
+                draw_x = wx + ((ow - monk_frame_w) / 2);
+            }
+            if (monk_frame_h > 0 && oh != monk_frame_h) {
+                draw_y = wy + (oh - monk_frame_h);
+            }
+        }
+        if (count >= out_cap) {
+            return -1;
+        }
+        const uint8_t *state = enemy_states + ((size_t)ei * (size_t)state_stride);
+        uint8_t *dst = out + ((size_t)count * 10u);
+        submit_ctx_wr_i16(dst + 0, draw_x);
+        submit_ctx_wr_i16(dst + 2, draw_y);
+        submit_ctx_wr_u16(dst + 4, (uint32_t)submit_ctx_rd_i16(state + 2));
+        dst[6] = state[1];
+        dst[7] = state[0] ? 1u : 0u;
+        dst[8] = enemy_type_code;
+        dst[9] = (uint8_t)(ei & 0xFF);
+        if (enemy_type_code == 1 && attack_state && attack_stride >= 32 && ei < attack_count) {
+            const uint8_t *attack = attack_state + ((size_t)ei * (size_t)attack_stride);
+            if (attack[0] == 12u) {
+                submit_ctx_wr_u16(dst + 4, (uint32_t)attack[14]);
+                dst[6] = 12u;
+            }
+        }
+        ++count;
+    }
+    return count;
+}
+
+static void submit_ctx_write_list_int(mp_obj_t list_obj, size_t index, int32_t value) {
+    mp_obj_list_t *list = (mp_obj_list_t *)MP_OBJ_TO_PTR(list_obj);
+    if (!mp_obj_is_type(list_obj, &mp_type_list) || index >= list->len) {
+        mp_raise_ValueError(MP_ERROR_TEXT("result list too small"));
+    }
+    list->items[index] = mp_obj_new_int(value);
+}
+
+static mp_obj_t lgfx_submit_native_band_frame(size_t n_args, const mp_obj_t *args) {
+    if (n_args != 1) {
+        mp_raise_ValueError(MP_ERROR_TEXT("need ctx"));
+    }
+    size_t ctx_len = 0;
+    mp_obj_t *ctx = nullptr;
+    mp_obj_get_array(args[0], &ctx_len, &ctx);
+    if (ctx_len < 108 || ctx == nullptr) {
+        return mp_const_false;
+    }
+    if (g_tail_wait_state.active) {
+        mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("tail wait pending"));
+    }
+    int64_t all_t0 = esp_timer_get_time();
+    int64_t desc_t0 = all_t0;
+
+    mp_buffer_info_t band_a_info, band_b_info, far_info, tilemap_info, tileset_info;
+    mp_buffer_info_t obj_info, obj_atlas_info, object_state_info, spec_info;
+    mp_buffer_info_t special_desc_info, enemy_desc_info, overlay_desc_info;
+    mp_buffer_info_t enemy_rows_info, enemy_states_info, monk_orbs_info, attack_info, type_info, bullet_info;
+    mp_buffer_info_t respawn_sheet_info, anchor_sheet_info, enemy_sheet_info, enemy_monk_sheet_info, enemy_monk_orb_atlas_info;
+    mp_buffer_info_t sprite_info, profile_info, bullet_right_info, bullet_left_info;
+    bullet_right_info.buf = nullptr;
+    bullet_right_info.len = 0;
+    bullet_left_info.buf = nullptr;
+    bullet_left_info.len = 0;
+
+    mp_get_buffer_raise(ctx[0], &band_a_info, MP_BUFFER_RW);
+    mp_get_buffer_raise(ctx[1], &band_b_info, MP_BUFFER_RW);
+    int32_t screen_w = submit_ctx_get_i32(ctx[2]);
+    int32_t screen_h = submit_ctx_get_i32(ctx[3]);
+    int32_t band_h_cfg = submit_ctx_get_i32(ctx[4]);
+    mp_get_buffer_raise(ctx[5], &far_info, MP_BUFFER_READ);
+    int32_t camera_x = submit_ctx_get_i32(ctx[6]);
+    mp_get_buffer_raise(ctx[7], &tilemap_info, MP_BUFFER_READ);
+    int32_t map_w = submit_ctx_get_i32(ctx[8]);
+    int32_t map_h = submit_ctx_get_i32(ctx[9]);
+    mp_get_buffer_raise(ctx[10], &tileset_info, MP_BUFFER_READ);
+    int32_t tile_size = submit_ctx_get_i32(ctx[11]);
+    int32_t tileset_w = submit_ctx_get_i32(ctx[12]);
+    int32_t object_anim_counter = submit_ctx_get_i32(ctx[16]);
+    bool anchor_active = submit_ctx_bool(ctx[17]);
+    int32_t anchor_x = submit_ctx_get_i32(ctx[18]);
+    int32_t anchor_y = submit_ctx_get_i32(ctx[19]);
+    int32_t anchor_anim_counter = submit_ctx_get_i32(ctx[21]);
+    mp_get_buffer_raise(ctx[27], &type_info, MP_BUFFER_READ);
+    mp_get_buffer_raise(ctx[28], &enemy_rows_info, MP_BUFFER_READ);
+    int32_t enemy_rows_stride = submit_ctx_get_i32(ctx[29]);
+    int32_t enemy_rows_count = submit_ctx_get_i32(ctx[30]);
+    mp_get_buffer_raise(ctx[31], &monk_orbs_info, MP_BUFFER_READ);
+    int32_t monk_orb_stride = submit_ctx_get_i32(ctx[32]);
+    int32_t monk_orb_count = submit_ctx_get_i32(ctx[33]);
+    mp_get_buffer_raise(ctx[34], &attack_info, MP_BUFFER_READ);
+    int32_t attack_stride = submit_ctx_get_i32(ctx[35]);
+    int32_t attack_count = submit_ctx_get_i32(ctx[36]);
+    mp_get_buffer_raise(ctx[37], &enemy_monk_sheet_info, MP_BUFFER_READ);
+    int32_t enemy_monk_frame_w = submit_ctx_get_i32(ctx[38]);
+    int32_t enemy_monk_frame_h = submit_ctx_get_i32(ctx[39]);
+    int32_t enemy_monk_frame_count = submit_ctx_get_i32(ctx[40]);
+    int32_t enemy_monk_frame_hold = submit_ctx_get_i32(ctx[41]);
+    mp_get_buffer_raise(ctx[107], &bullet_info, MP_BUFFER_READ);
+    bool bullet_right = ctx[43] != mp_const_none;
+    bool bullet_left = ctx[44] != mp_const_none;
+    if (bullet_right) {
+        mp_get_buffer_raise(ctx[43], &bullet_right_info, MP_BUFFER_READ);
+    }
+    if (bullet_left) {
+        mp_get_buffer_raise(ctx[44], &bullet_left_info, MP_BUFFER_READ);
+    }
+    int32_t bullet_w = submit_ctx_get_i32(ctx[45]);
+    int32_t bullet_h = submit_ctx_get_i32(ctx[46]);
+    int32_t bullet_margin = submit_ctx_get_i32(ctx[47]);
+    int32_t enemy_margin_x = submit_ctx_get_i32(ctx[48]);
+    int32_t enemy_margin_y = submit_ctx_get_i32(ctx[49]);
+    mp_get_buffer_raise(ctx[50], &obj_info, MP_BUFFER_READ);
+    int32_t object_stride = submit_ctx_get_i32(ctx[51]);
+    int32_t object_count = submit_ctx_get_i32(ctx[52]);
+    mp_get_buffer_raise(ctx[53], &obj_atlas_info, MP_BUFFER_READ);
+    int32_t obj_atlas_w = submit_ctx_get_i32(ctx[54]);
+    int32_t obj_atlas_h = submit_ctx_get_i32(ctx[55]);
+    int32_t anim_idx = submit_ctx_get_i32(ctx[58]);
+    int32_t facing = submit_ctx_get_i32(ctx[59]);
+    int32_t sprite_w = submit_ctx_get_i32(ctx[60]);
+    int32_t sprite_h = submit_ctx_get_i32(ctx[61]);
+    int32_t player_screen_x = submit_ctx_get_i32(ctx[62]);
+    int32_t draw_off_x = submit_ctx_get_i32(ctx[63]);
+    int32_t player_y = submit_ctx_get_i32(ctx[64]);
+    int32_t draw_off_y = submit_ctx_get_i32(ctx[65]);
+    int32_t band_top = submit_ctx_get_i32(ctx[66]);
+    mp_get_buffer_raise(ctx[67], &respawn_sheet_info, MP_BUFFER_READ);
+    int32_t respawn_frame_w = submit_ctx_get_i32(ctx[68]);
+    int32_t respawn_frame_h = submit_ctx_get_i32(ctx[69]);
+    int32_t respawn_frame_count = submit_ctx_get_i32(ctx[70]);
+    mp_get_buffer_raise(ctx[71], &anchor_sheet_info, MP_BUFFER_READ);
+    int32_t anchor_frame_w = submit_ctx_get_i32(ctx[72]);
+    int32_t anchor_frame_h = submit_ctx_get_i32(ctx[73]);
+    int32_t anchor_frame_count = submit_ctx_get_i32(ctx[74]);
+    bool enemy_render_enabled = submit_ctx_bool(ctx[75]);
+    mp_get_buffer_raise(ctx[76], &enemy_sheet_info, MP_BUFFER_READ);
+    int32_t enemy_sheet_w = submit_ctx_get_i32(ctx[77]);
+    int32_t enemy_sheet_h = submit_ctx_get_i32(ctx[78]);
+    int32_t enemy_frame_hold = submit_ctx_get_i32(ctx[79]);
+    mp_get_buffer_raise(ctx[80], &enemy_monk_orb_atlas_info, MP_BUFFER_READ);
+    int32_t enemy_monk_orb_atlas_w = submit_ctx_get_i32(ctx[81]);
+    int32_t enemy_monk_orb_atlas_h = submit_ctx_get_i32(ctx[82]);
+    bool disable_tilemap = submit_ctx_bool(ctx[83]);
+    bool disable_objects = submit_ctx_bool(ctx[84]);
+    bool disable_enemies = submit_ctx_bool(ctx[85]);
+    bool disable_overlays = submit_ctx_bool(ctx[86]);
+    bool disable_far = submit_ctx_bool(ctx[87]);
+    int32_t dirty_log_countdown = submit_ctx_get_i32(ctx[88]);
+    bool defer_final_wait = submit_ctx_bool(ctx[89]);
+    mp_get_buffer_raise(ctx[91], &profile_info, MP_BUFFER_WRITE);
+    mp_obj_t result_obj = ctx[92];
+    mp_get_buffer_raise(ctx[93], &object_state_info, MP_BUFFER_READ);
+    int32_t object_state_stride = submit_ctx_get_i32(ctx[94]);
+    int32_t object_state_count = submit_ctx_get_i32(ctx[95]);
+    mp_get_buffer_raise(ctx[96], &spec_info, MP_BUFFER_READ);
+    mp_get_buffer_raise(ctx[97], &special_desc_info, MP_BUFFER_RW);
+    int32_t special_cap = submit_ctx_get_i32(ctx[98]);
+    mp_get_buffer_raise(ctx[99], &enemy_desc_info, MP_BUFFER_RW);
+    int32_t enemy_cap = submit_ctx_get_i32(ctx[100]);
+    mp_get_buffer_raise(ctx[101], &overlay_desc_info, MP_BUFFER_RW);
+    int32_t overlay_cap = submit_ctx_get_i32(ctx[102]);
+    int32_t player_colorkey = submit_ctx_get_i32(ctx[103]);
+    int32_t transparent_key = submit_ctx_get_i32(ctx[104]);
+    int32_t object_colorkey = submit_ctx_get_i32(ctx[105]);
+    mp_get_buffer_raise(ctx[106], &enemy_states_info, MP_BUFFER_READ);
+
+    if (!enemy_render_enabled) {
+        return mp_const_false;
+    }
+    if (screen_w <= 0 || screen_h <= 0 || band_h_cfg <= 0 || band_h_cfg > screen_h) {
+        mp_raise_ValueError(MP_ERROR_TEXT("invalid dims"));
+    }
+    if (special_cap < 0 || enemy_cap < 0 || overlay_cap < 0) {
+        return mp_const_false;
+    }
+    if (special_desc_info.len < (size_t)special_cap * 8u || enemy_desc_info.len < (size_t)enemy_cap * 10u || overlay_desc_info.len < (size_t)overlay_cap * 10u) {
+        return mp_const_false;
+    }
+    size_t max_band_len = (size_t)screen_w * (size_t)band_h_cfg * 2u;
+    size_t full_len = (size_t)screen_w * (size_t)screen_h * 2u;
+    if (band_a_info.len < max_band_len || band_b_info.len < max_band_len || far_info.len < full_len) {
+        mp_raise_ValueError(MP_ERROR_TEXT("band/far buf too small"));
+    }
+    if (tilemap_info.len < (size_t)map_w * (size_t)map_h || obj_info.len < (size_t)object_count * (size_t)object_stride) {
+        mp_raise_ValueError(MP_ERROR_TEXT("scene buf too small"));
+    }
+    if (profile_info.len < kRenderProfileLen * sizeof(uint32_t)) {
+        mp_raise_ValueError(MP_ERROR_TEXT("profile buf too small"));
+    }
+
+    int32_t sprite_x = player_screen_x + draw_off_x;
+    int32_t sprite_y = player_y + draw_off_y;
+    int32_t spr_y = sprite_y - band_top;
+    mp_obj_t sprite_frames = facing < 0 ? ctx[56] : ctx[57];
+    size_t sprite_frame_count = 0;
+    mp_obj_t *sprite_frame_objs = nullptr;
+    mp_obj_get_array(sprite_frames, &sprite_frame_count, &sprite_frame_objs);
+    if (anim_idx < 0 || (size_t)anim_idx >= sprite_frame_count) {
+        return mp_const_false;
+    }
+    mp_get_buffer_raise(sprite_frame_objs[anim_idx], &sprite_info, MP_BUFFER_READ);
+    if (sprite_info.len < (size_t)sprite_w * (size_t)sprite_h * 2u) {
+        mp_raise_ValueError(MP_ERROR_TEXT("sprite buf too small"));
+    }
+
+    int32_t special_count = submit_ctx_pack_special_objects(
+        (uint8_t *)special_desc_info.buf,
+        special_cap,
+        (const uint8_t *)object_state_info.buf,
+        object_state_stride,
+        object_state_count,
+        (const uint8_t *)spec_info.buf,
+        spec_info.len,
+        object_anim_counter,
+        anchor_active,
+        anchor_x,
+        anchor_y,
+        anchor_anim_counter,
+        anchor_frame_count,
+        camera_x,
+        screen_w,
+        screen_h
+    );
+    if (special_count < 0) {
+        return mp_const_false;
+    }
+    special_count = submit_ctx_pack_monk_orbs(
+        (uint8_t *)special_desc_info.buf,
+        special_cap,
+        special_count,
+        (const uint8_t *)enemy_rows_info.buf,
+        enemy_rows_stride,
+        enemy_rows_count,
+        (const uint8_t *)monk_orbs_info.buf,
+        monk_orb_stride,
+        monk_orb_count,
+        camera_x,
+        screen_w,
+        screen_h,
+        enemy_monk_frame_w,
+        enemy_monk_frame_h
+    );
+    if (special_count < 0) {
+        return mp_const_false;
+    }
+    mp_buffer_info_t swap_state_info;
+    mp_get_buffer_raise(ctx[90], &swap_state_info, MP_BUFFER_READ);
+    special_count = submit_ctx_pack_swap_preview(
+        (uint8_t *)special_desc_info.buf,
+        special_cap,
+        special_count,
+        (const uint8_t *)swap_state_info.buf,
+        camera_x,
+        screen_w,
+        screen_h
+    );
+    if (special_count < 0) {
+        return mp_const_false;
+    }
+    int32_t overlay_count = submit_ctx_pack_overlays(
+        (uint8_t *)overlay_desc_info.buf,
+        overlay_cap,
+        (const uint8_t *)bullet_info.buf,
+        16,
+        (int32_t)(bullet_info.len / 16u),
+        bullet_w,
+        bullet_h,
+        bullet_right,
+        bullet_left,
+        camera_x,
+        screen_w,
+        screen_h,
+        bullet_margin
+    );
+    if (overlay_count < 0) {
+        return mp_const_false;
+    }
+    int32_t enemy_count = submit_ctx_pack_enemies(
+        (uint8_t *)enemy_desc_info.buf,
+        enemy_cap,
+        (const uint8_t *)enemy_rows_info.buf,
+        enemy_rows_stride,
+        enemy_rows_count,
+        (const uint8_t *)enemy_states_info.buf,
+        enemy_states_info.len,
+        (const uint8_t *)type_info.buf,
+        type_info.len,
+        (const uint8_t *)attack_info.buf,
+        attack_stride,
+        attack_count,
+        camera_x,
+        screen_w,
+        screen_h,
+        enemy_margin_x,
+        enemy_margin_y,
+        enemy_monk_frame_w,
+        enemy_monk_frame_h
+    );
+    if (enemy_count < 0) {
+        return mp_const_false;
+    }
+
+    int32_t native_tilemap_w = disable_tilemap ? 0 : map_w;
+    int32_t native_tilemap_h = disable_tilemap ? 0 : map_h;
+    int32_t native_object_count = disable_objects ? 0 : object_count;
+    int32_t native_enemy_count = disable_enemies ? 0 : enemy_count;
+    int32_t native_overlay_count = disable_overlays ? 0 : overlay_count;
+    int32_t native_probe_flags = disable_far ? 0x1 : 0;
+    uint32_t descriptor_us = (uint32_t)(esp_timer_get_time() - desc_t0);
+
+    uint8_t *band_a = (uint8_t *)band_a_info.buf;
+    uint8_t *band_b = (uint8_t *)band_b_info.buf;
+    const uint8_t *far = (const uint8_t *)far_info.buf;
+    const uint8_t *tilemap = (const uint8_t *)tilemap_info.buf;
+    const uint8_t *tileset = (const uint8_t *)tileset_info.buf;
+    const uint8_t *objbuf = (const uint8_t *)obj_info.buf;
+    const uint8_t *obj_atlas = (const uint8_t *)obj_atlas_info.buf;
+    const uint8_t *sprite = (const uint8_t *)sprite_info.buf;
+    const uint8_t *overlay_desc = (const uint8_t *)overlay_desc_info.buf;
+    const uint8_t *special_desc = (const uint8_t *)special_desc_info.buf;
+    const uint8_t *respawn_sheet = (const uint8_t *)respawn_sheet_info.buf;
+    const uint8_t *anchor_sheet = (const uint8_t *)anchor_sheet_info.buf;
+    const uint8_t *enemy_desc = (const uint8_t *)enemy_desc_info.buf;
+    const uint8_t *enemy_sheet = (const uint8_t *)enemy_sheet_info.buf;
+    const uint8_t *enemy_monk_sheet = (const uint8_t *)enemy_monk_sheet_info.buf;
+    const uint8_t *enemy_monk_orb_atlas = (const uint8_t *)enemy_monk_orb_atlas_info.buf;
+
+    static const uint32_t kProfileBands = 6;
+    uint32_t compose_us = 0;
+    uint32_t band_bg_us = 0;
+    uint32_t band_tilemap_us = 0;
+    uint32_t band_object_us = 0;
+    uint32_t band_special_us = 0;
+    uint32_t band_enemy_us = 0;
+    uint32_t band_player_us = 0;
+    uint32_t band_compose_each[kProfileBands] = {0};
+    uint32_t band_wait_each[kProfileBands] = {0};
+    uint32_t kick_us = 0;
+    uint32_t wait_us = 0;
+    uint32_t sync_us = 0;
+    uint32_t start_us = 0;
+    uint32_t push_us = 0;
+    uint32_t wait_dma_us = 0;
+    uint32_t end_us = 0;
+    uint32_t dma_elapsed_us = 0;
+    int64_t dma_t0 = 0;
+    uint32_t bands = 0;
+
+    int32_t y = 0;
+    int32_t bh = band_h_cfg;
+    if (y + bh > screen_h) bh = screen_h - y;
+    int64_t ct0 = esp_timer_get_time();
+    submit_ctx_compose_scene_band(band_a, screen_w, y, bh, far, camera_x, tilemap, native_tilemap_w, native_tilemap_h, tileset, tileset_info.len, tile_size, tileset_w, transparent_key, objbuf, object_stride, native_object_count, obj_atlas, obj_atlas_w, obj_atlas_h, object_colorkey, sprite, sprite_w, sprite_h, sprite_x, sprite_y, player_colorkey, overlay_desc, native_overlay_count, (const uint8_t *)bullet_right_info.buf, bullet_right_info.len, (const uint8_t *)bullet_left_info.buf, bullet_left_info.len, special_desc, 8, special_count, respawn_sheet, respawn_frame_w, respawn_frame_h, respawn_frame_count, anchor_sheet, anchor_frame_w, anchor_frame_h, anchor_frame_count, object_colorkey, enemy_desc, 10, native_enemy_count, enemy_sheet, enemy_sheet_w, enemy_sheet_h, enemy_monk_sheet, enemy_monk_frame_w, enemy_monk_frame_h, enemy_monk_frame_count, enemy_monk_frame_hold, enemy_monk_orb_atlas, enemy_monk_orb_atlas_w, enemy_monk_orb_atlas_h, object_colorkey, enemy_frame_hold, native_probe_flags != 0, &band_bg_us, &band_tilemap_us, &band_object_us, &band_special_us, &band_enemy_us, &band_player_us);
+    uint32_t compose_delta = (uint32_t)(esp_timer_get_time() - ct0);
+    compose_us += compose_delta;
+    band_compose_each[0] = compose_delta;
+
+    bool prev_swap = false;
+    dma_t0 = submit_band_start(band_a, screen_w, y, bh, &prev_swap, &kick_us, &sync_us, &start_us, &push_us);
+    bands = 1;
+    y += bh;
+    uint8_t *next_buf = band_b;
+    while (y < screen_h) {
+        bh = band_h_cfg;
+        if (y + bh > screen_h) bh = screen_h - y;
+        ct0 = esp_timer_get_time();
+        submit_ctx_compose_scene_band(next_buf, screen_w, y, bh, far, camera_x, tilemap, native_tilemap_w, native_tilemap_h, tileset, tileset_info.len, tile_size, tileset_w, transparent_key, objbuf, object_stride, native_object_count, obj_atlas, obj_atlas_w, obj_atlas_h, object_colorkey, sprite, sprite_w, sprite_h, sprite_x, sprite_y, player_colorkey, overlay_desc, native_overlay_count, (const uint8_t *)bullet_right_info.buf, bullet_right_info.len, (const uint8_t *)bullet_left_info.buf, bullet_left_info.len, special_desc, 8, special_count, respawn_sheet, respawn_frame_w, respawn_frame_h, respawn_frame_count, anchor_sheet, anchor_frame_w, anchor_frame_h, anchor_frame_count, object_colorkey, enemy_desc, 10, native_enemy_count, enemy_sheet, enemy_sheet_w, enemy_sheet_h, enemy_monk_sheet, enemy_monk_frame_w, enemy_monk_frame_h, enemy_monk_frame_count, enemy_monk_frame_hold, enemy_monk_orb_atlas, enemy_monk_orb_atlas_w, enemy_monk_orb_atlas_h, object_colorkey, enemy_frame_hold, native_probe_flags != 0, &band_bg_us, &band_tilemap_us, &band_object_us, &band_special_us, &band_enemy_us, &band_player_us);
+        compose_delta = (uint32_t)(esp_timer_get_time() - ct0);
+        compose_us += compose_delta;
+        if (bands < kProfileBands) {
+            band_compose_each[bands] = compose_delta;
+        }
+        int64_t wt0 = esp_timer_get_time();
+        int64_t dma_done_t = submit_band_wait(prev_swap, &wait_us, &wait_dma_us, &end_us);
+        dma_elapsed_us += (uint32_t)(dma_done_t - dma_t0);
+        uint32_t wait_delta = (uint32_t)(esp_timer_get_time() - wt0);
+        if ((bands - 1) < kProfileBands) {
+            band_wait_each[bands - 1] = wait_delta;
+        }
+        dma_t0 = submit_band_start(next_buf, screen_w, y, bh, &prev_swap, &kick_us, &sync_us, &start_us, &push_us);
+        ++bands;
+        y += bh;
+        next_buf = (next_buf == band_a) ? band_b : band_a;
+    }
+    if (defer_final_wait) {
+        g_tail_wait_state.active = true;
+        g_tail_wait_state.prev_swap = prev_swap;
+        g_tail_wait_state.wait_t0 = esp_timer_get_time();
+        g_tail_wait_state.dma_t0 = dma_t0;
+    } else {
+        int64_t wt0 = esp_timer_get_time();
+        int64_t dma_done_t = submit_band_wait(prev_swap, &wait_us, &wait_dma_us, &end_us);
+        dma_elapsed_us += (uint32_t)(dma_done_t - dma_t0);
+        uint32_t wait_delta = (uint32_t)(esp_timer_get_time() - wt0);
+        if ((bands - 1) < kProfileBands) {
+            band_wait_each[bands - 1] = wait_delta;
+        }
+    }
+
+    uint32_t total_us = (uint32_t)(esp_timer_get_time() - all_t0);
+    set_last_render_profile(bands, compose_us, kick_us, wait_us, sync_us, start_us, push_us, wait_dma_us, end_us, total_us, band_bg_us, band_tilemap_us, band_object_us, band_special_us, band_enemy_us, band_player_us, band_compose_each, band_wait_each, dma_elapsed_us);
+    memcpy(profile_info.buf, g_last_render_profile, kRenderProfileLen * sizeof(uint32_t));
+
+    if (dirty_log_countdown <= 0) {
+        mp_printf(&mp_plat_print, "BAND_PIPELINE_SUBMIT_OK\n");
+        dirty_log_countdown = 30;
+    }
+    if (dirty_log_countdown > 0) {
+        dirty_log_countdown -= 1;
+    }
+
+    submit_ctx_write_list_int(result_obj, 0, sprite_x);
+    submit_ctx_write_list_int(result_obj, 1, sprite_y);
+    submit_ctx_write_list_int(result_obj, 2, spr_y);
+    submit_ctx_write_list_int(result_obj, 3, (int32_t)total_us);
+    submit_ctx_write_list_int(result_obj, 4, dirty_log_countdown);
+    submit_ctx_write_list_int(result_obj, 5, (int32_t)descriptor_us);
+    return mp_const_true;
+}
+MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lgfx_submit_native_band_frame_obj, 1, 1, lgfx_submit_native_band_frame);
 
 
 static mp_obj_t lgfx_render_scene_bands_rgb565(size_t n_args, const mp_obj_t *args) {
@@ -1496,6 +2543,8 @@ static mp_obj_t lgfx_render_scene_bands_rgb565(size_t n_args, const mp_obj_t *ar
         verbose = mp_obj_is_true(args[27]);
     }
     bool disable_far = (probe_flags & 0x1) != 0;
+    bool profile_detail = verbose || ((probe_flags & 0x2) != 0);
+    bool profile_to_buffer = (probe_flags & 0x4) != 0;
     bool defer_final_wait = false;
     if (n_args == 62) {
         defer_final_wait = mp_obj_is_true(args[61]);
@@ -1665,6 +2714,26 @@ static mp_obj_t lgfx_render_scene_bands_rgb565(size_t n_args, const mp_obj_t *ar
     }
 
     uint32_t total_us = (uint32_t)(esp_timer_get_time() - all_t0);
+    set_last_render_profile(bands, compose_us, kick_us, wait_us, sync_us, start_us, push_us, wait_dma_us, end_us, total_us, band_bg_us, band_tilemap_us, band_object_us, band_special_us, band_enemy_us, band_player_us, band_compose_each, band_wait_each, dma_elapsed_us);
+    if (profile_to_buffer) {
+        return mp_const_none;
+    }
+    if (!profile_detail) {
+        mp_obj_t out[11] = {
+            mp_obj_new_int_from_uint(bands),
+            mp_obj_new_int_from_uint(compose_us),
+            mp_obj_new_int_from_uint(kick_us),
+            mp_obj_new_int_from_uint(wait_us),
+            mp_obj_new_int_from_uint(sync_us),
+            mp_obj_new_int_from_uint(start_us),
+            mp_obj_new_int_from_uint(push_us),
+            mp_obj_new_int_from_uint(wait_dma_us),
+            mp_obj_new_int_from_uint(end_us),
+            mp_obj_new_int_from_uint(total_us),
+            mp_obj_new_int_from_uint(dma_elapsed_us),
+        };
+        return mp_obj_new_tuple(11, out);
+    }
     mp_obj_t out[29] = {
         mp_obj_new_int_from_uint(bands),
         mp_obj_new_int_from_uint(compose_us),

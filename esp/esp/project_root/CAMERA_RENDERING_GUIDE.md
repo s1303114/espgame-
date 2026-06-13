@@ -14,6 +14,7 @@
 - `CAMERA_BAND_PIPELINE_H = 48`
 - `SUBMIT_MODE=NATIVE_BAND_PIPELINE`
 - `BAND_PIPELINE_NATIVE_ON h=48`
+- `lgfx.submit_native_band_frame(ctx)` 為 map1 最終 submit orchestration 主線
 
 firmware 的 panel bus baseline 固定為：
 
@@ -26,7 +27,8 @@ firmware 的 panel bus baseline 固定為：
 - internal flash 只保留 `boot.py` / `main.py`
 - `main.py` 是 SD-only launcher
 - `main.py` 先驗證 `/sd/game/app.py`、`/sd/game/config.py`、`/sd/game/app_camera_test.py` 存在
-- `main.py` 先 `exec /sd/game/config.py`，再 `exec /sd/game/app_camera_test.py`
+- `main.py` 載入 module 時優先使用同名 `.mpy`，避免巨大 source 在板上 `exec` 時 bytecode overflow
+- 若 `.mpy` 不存在，`main.py` 才 fallback 到 source `exec`
 - `/sd/game/app.py` 只保留為 wrapper / 存在性檢查備用
 - 正式唯一 SD 掛載 wiring：`slot=2, width=1, sck=5, mosi=6, miso=7, cs=4, freq=1000000`
 
@@ -65,9 +67,10 @@ firmware 的 panel bus baseline 固定為：
 3. Python 更新 enemy / bullet 狀態
    - 優先走 `lgfx.update_enemies_native(...)`
    - 若 native path 失敗，印一次 `ENEMY_UPDATE_NATIVE_FALLBACK ...` 並回退 Python update
-4. Python 打包 overlay / enemy render descriptors，object render buffer 使用常駐 `objects_c_buf`
-5. Python 呼叫 `lgfx.render_scene_bands_rgb565(...)`
-6. C++ 以 `320 x 48` 的 band 逐條 compose 與 submit
+4. Python refresh reusable `native_submit_ctx`，更新 camera/player/animation/tail-overlap 等會變 slot
+5. Python 呼叫 `lgfx.submit_native_band_frame(ctx)`；若 native wrapper 回傳 `False`，才走 Python fallback
+6. C++ 打包 special / orb / swap preview / overlay / enemy descriptors
+7. C++ 以 `320 x 48` 的 band 逐條 compose 與 submit，並將 profile/result 寫回 caller-provided buffers
 
 band 內 C++ compose 順序：
 
@@ -80,7 +83,15 @@ band 內 C++ compose 順序：
 
 ## 4. Native band pipeline
 
-最終主線提交是 **wire-order native band pipeline + DMA + cache sync**。
+最終主線提交是 **single-call native submit orchestration + wire-order native band pipeline + DMA + cache sync**。
+
+map1 正式 submit API：
+
+```python
+lgfx.submit_native_band_frame(ctx)
+```
+
+`ctx` 是 Python 初始化、每幀少量更新的 reusable list；C++ 端負責 descriptor packing、band compose、DMA submit 與 profile/result 回寫。舊 `lgfx.render_scene_bands_rgb565(...)` 仍保留為 fallback / bring-up API，但不再是 map1 的熱路徑主線。
 
 關鍵提交路徑：
 

@@ -102,7 +102,7 @@ def _reset_game_imports(preserve_map2=False):
     for name in sys.modules:
         if preserve_map2 and name in ("map2_app", "map2_elevator"):
             continue
-        if name in ("app", "app_camera_test", "map2_app", "map2_elevator", "config", "assets", "state"):
+        if name in ("app", "app_camera_test", "map2_app", "map2_elevator", "config", "assets", "state", "stall_trace", "native_submit_glue"):
             purge.append(name)
             continue
         if name == "engine" or name.startswith("engine."):
@@ -139,6 +139,16 @@ class _ModuleProxy:
 
 def _exec_module_from_path(name, path):
     import sys
+
+    mpy_path = path[:-3] + ".mpy" if path.endswith(".py") else path + ".mpy"
+    try:
+        import os
+        os.stat(mpy_path)
+        if name in sys.modules:
+            del sys.modules[name]
+        return __import__(name)
+    except Exception:
+        pass
 
     ns = {
         "__name__": name,

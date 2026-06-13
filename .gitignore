@@ -27,8 +27,10 @@ CMakeFiles/
 .venv/
 venv/
 esp/esp/esp-idf/
+esp/esp/project_root/tmp_*.py
 
 # Generated logs
 *.log
 esp/esp/micropython/ports/esp32/build-*/log/
 esp/esp/.venv-mpremote/
+esp/esp/project_root/sd_game_template/game/*.mpy

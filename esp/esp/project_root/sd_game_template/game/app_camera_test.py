@@ -2,6 +2,16 @@ import config
 import object_native
 
 try:
+    import array as _array
+except Exception:
+    _array = None
+
+try:
+    import stall_trace
+except Exception:
+    stall_trace = None
+
+try:
     import asset_cache
 except Exception:
     asset_cache = None
@@ -45,6 +55,11 @@ except Exception:
     _lgfx = None
 
 try:
+    import native_submit_glue
+except Exception:
+    native_submit_glue = None
+
+try:
     import os
 except Exception:
     os = None
@@ -72,6 +87,8 @@ try:
 except Exception:
     gc = None
 
+_native_profile_buffer_ready = _array is not None and _lgfx is not None and hasattr(_lgfx, "copy_last_render_profile")
+
 try:
     import math
 except Exception:
@@ -96,6 +113,7 @@ _BULLET_DEBUG_LIMIT = 12
 _bullet_debug_count = 0
 _bullet_debug_last_active_ms = -1000000
 _enemy_native_update_disabled = False
+_overlay_desc_native_disabled = False
 _last_joy_centers = None
 _ENEMY_STATE_KEYS = ("facing", "state", "anim_counter", "shoot_cooldown", "shot_fired", "vel_y")
 _ENEMY_ROW_STRIDE = 12
@@ -390,8 +408,11 @@ class _PackedEnemyBullets:
         self._count += 1
 
     def clear(self):
-        self._buf = bytearray()
-        self._count = 0
+        i = 0
+        while i < self._count:
+            base = i * _BULLET_STATE_STRIDE
+            _buf_set_i16_le(self._buf, base + 12, 0)
+            i += 1
 
 
 def _bullet_debug(tag, text):
@@ -402,11 +423,184 @@ def _bullet_debug(tag, text):
     _bullet_debug_count += 1
 
 
+def _bullet_debug_enabled():
+    return _bullet_debug_count < _BULLET_DEBUG_LIMIT
+
+
 def _runtime_verbose_enabled():
     try:
         return bool(getattr(config, "CAMERA_RUNTIME_VERBOSE", False))
     except Exception:
         return False
+
+
+def _native_profile_buffer_supported():
+    return _native_profile_buffer_ready
+
+
+def _new_native_submit_profile():
+    if _native_profile_buffer_supported():
+        return _array.array("I", [0] * 28)
+    return [0] * 28
+
+
+def _new_native_submit_ctx(
+    scene_ctx,
+    tile_ctx,
+    objects_ctx,
+    enemy_rt,
+    bullet_ctx,
+    sprite_ctx,
+    runtime_ctx,
+    respawn_ctx,
+    probe_ctx,
+    swap_preview_state,
+    band_profile,
+    submit_result,
+):
+    ctx = [
+        scene_ctx[0],
+        scene_ctx[1],
+        scene_ctx[2],
+        scene_ctx[3],
+        scene_ctx[4],
+        scene_ctx[5],
+        runtime_ctx[0],
+        tile_ctx[0],
+        tile_ctx[1],
+        tile_ctx[2],
+        tile_ctx[3],
+        tile_ctx[4],
+        tile_ctx[5],
+        objects_ctx[0],
+        objects_ctx[1],
+        objects_ctx[2],
+        runtime_ctx[1],
+        runtime_ctx[2],
+        runtime_ctx[3],
+        runtime_ctx[4],
+        runtime_ctx[5],
+        runtime_ctx[6],
+        enemy_rt["enemy_rows"],
+        enemy_rt["enemy_states"],
+        enemy_rt["monk_orb_states"],
+        enemy_rt["monk_encounters"],
+        enemy_rt["enemy_meta"],
+        enemy_rt["enemy_type_codes"],
+        enemy_rt["enemy_rows_c_buf"],
+        enemy_rt["enemy_rows_c_stride"],
+        enemy_rt["enemy_rows_c_count"],
+        enemy_rt["monk_orb_c_buf"],
+        enemy_rt["monk_orb_c_stride"],
+        enemy_rt["monk_orb_c_count"],
+        enemy_rt["monk_attack_c_buf"],
+        enemy_rt["monk_attack_c_stride"],
+        enemy_rt["monk_attack_c_count"],
+        enemy_rt["enemy_monk_sheet"],
+        enemy_rt["enemy_monk_frame_w"],
+        enemy_rt["enemy_monk_frame_h"],
+        enemy_rt["enemy_monk_frame_count"],
+        enemy_rt["enemy_monk_frame_hold"],
+        enemy_rt["enemy_bullets"],
+        bullet_ctx[0],
+        bullet_ctx[1],
+        enemy_rt["enemy_bullet_w"],
+        enemy_rt["enemy_bullet_h"],
+        enemy_rt["enemy_bullet_cull_margin"],
+        enemy_rt["enemy_render_margin_x"],
+        enemy_rt["enemy_render_margin_y"],
+        objects_ctx[3],
+        objects_ctx[4],
+        objects_ctx[5],
+        objects_ctx[6],
+        objects_ctx[7],
+        objects_ctx[8],
+        sprite_ctx[0],
+        sprite_ctx[1],
+        runtime_ctx[7],
+        runtime_ctx[8],
+        sprite_ctx[2],
+        sprite_ctx[3],
+        runtime_ctx[9],
+        sprite_ctx[4],
+        runtime_ctx[10],
+        sprite_ctx[5],
+        runtime_ctx[11],
+        respawn_ctx[0],
+        respawn_ctx[1],
+        respawn_ctx[2],
+        respawn_ctx[3],
+        respawn_ctx[4],
+        respawn_ctx[5],
+        respawn_ctx[6],
+        respawn_ctx[7],
+        enemy_rt["enemy_render_enabled"],
+        enemy_rt["enemy_sheet"],
+        enemy_rt["enemy_sheet_w"],
+        enemy_rt["enemy_sheet_h"],
+        enemy_rt["enemy_frame_hold"],
+        enemy_rt["enemy_monk_orb_atlas"],
+        enemy_rt["enemy_monk_orb_atlas_w"],
+        enemy_rt["enemy_monk_orb_atlas_h"],
+        probe_ctx[0],
+        probe_ctx[1],
+        probe_ctx[2],
+        probe_ctx[3],
+        probe_ctx[4],
+        runtime_ctx[12],
+        runtime_ctx[13],
+        swap_preview_state,
+        band_profile,
+        submit_result,
+    ]
+    if native_submit_glue is not None:
+        native_submit_glue.extend_ctx(ctx, objects_ctx, enemy_rt)
+    return ctx
+
+
+def _refresh_native_submit_ctx(
+    ctx,
+    camera_x,
+    object_anim_counter,
+    anchor_active,
+    anchor_x,
+    anchor_y,
+    anchor_anim_counter,
+    enemy_rows_c_count,
+    monk_orb_c_buf,
+    monk_orb_c_stride,
+    monk_orb_c_count,
+    monk_attack_c_buf,
+    monk_attack_c_stride,
+    monk_attack_c_count,
+    anim_idx,
+    facing,
+    player_screen_x,
+    player_y,
+    band_top,
+    dirty_log_countdown,
+    native_tail_overlap_enabled,
+):
+    ctx[6] = camera_x
+    ctx[16] = object_anim_counter
+    ctx[17] = anchor_active
+    ctx[18] = anchor_x
+    ctx[19] = anchor_y
+    ctx[21] = anchor_anim_counter
+    ctx[30] = enemy_rows_c_count
+    ctx[31] = monk_orb_c_buf
+    ctx[32] = monk_orb_c_stride
+    ctx[33] = monk_orb_c_count
+    ctx[34] = monk_attack_c_buf
+    ctx[35] = monk_attack_c_stride
+    ctx[36] = monk_attack_c_count
+    ctx[58] = anim_idx
+    ctx[59] = facing
+    ctx[62] = player_screen_x
+    ctx[64] = player_y
+    ctx[66] = band_top
+    ctx[88] = dirty_log_countdown
+    ctx[89] = native_tail_overlap_enabled
 
 
 def _monk_intro_enabled():
@@ -429,7 +623,7 @@ def get_joy_centers():
 
 def _bullet_debug_active(enemy_bullets, camera_x, screen_w, screen_h):
     global _bullet_debug_last_active_ms
-    if not enemy_bullets:
+    if not enemy_bullets or not _bullet_debug_enabled():
         return
     now = ticks_ms()
     if ticks_diff(now, _bullet_debug_last_active_ms) < 500:
@@ -1889,6 +2083,120 @@ def _pack_enemy_render_descriptors(enemy_rows, enemy_states, enemy_meta=None, ca
     return out, stride, count
 
 
+def _pack_enemy_type_codes(meta_rows):
+    if not meta_rows:
+        return bytearray()
+    out = bytearray(len(meta_rows))
+    i = 0
+    while i < len(meta_rows):
+        meta = meta_rows[i]
+        out[i] = 1 if (meta is not None and str(meta.get("type", "bow") or "bow") == "monk") else 0
+        i += 1
+    return out
+
+
+def _sync_enemy_type_codes(type_codes, meta_rows):
+    if type_codes is None or meta_rows is None:
+        return type_codes
+    if len(type_codes) < len(meta_rows):
+        type_codes.extend(bytearray(len(meta_rows) - len(type_codes)))
+    i = 0
+    while i < len(meta_rows):
+        meta = meta_rows[i]
+        type_codes[i] = 1 if (meta is not None and str(meta.get("type", "bow") or "bow") == "monk") else 0
+        i += 1
+    return type_codes
+
+
+def _pack_enemy_render_descriptors_packed(enemy_rows_c_buf, enemy_rows_c_stride, enemy_rows_c_count, enemy_states, enemy_type_codes, camera_x=0, view_w=320, view_h=240, margin_x=48, margin_y=32, monk_frame_w=0, monk_frame_h=0):
+    global _enemy_desc_scratch
+    if enemy_rows_c_buf is None or enemy_rows_c_count <= 0 or not hasattr(enemy_states, "_buf"):
+        return None
+    state_buf = enemy_states._buf
+    if state_buf is None:
+        return None
+    row_stride = int(enemy_rows_c_stride)
+    if row_stride < _ENEMY_ROW_STRIDE:
+        return None
+    stride = 10
+    out = _enemy_desc_scratch
+    count = 0
+    view_left = int(camera_x) - int(margin_x)
+    view_top = -int(margin_y)
+    view_right = int(camera_x) + int(view_w) + int(margin_x)
+    view_bottom = int(view_h) + int(margin_y)
+    limit = int(enemy_rows_c_count)
+    row_cap = len(enemy_rows_c_buf) // row_stride
+    state_cap = len(state_buf) // _ENEMY_STATE_STRIDE
+    if row_cap < limit:
+        limit = row_cap
+    if state_cap < limit:
+        limit = state_cap
+    type_cap = len(enemy_type_codes) if enemy_type_codes is not None else 0
+    ei = 0
+    while ei < limit:
+        rbase = ei * row_stride
+        if enemy_rows_c_buf[rbase + 8]:
+            wx = _buf_get_i16_le(enemy_rows_c_buf, rbase)
+            wy = _buf_get_i16_le(enemy_rows_c_buf, rbase + 2)
+            ow = _buf_get_i16_le(enemy_rows_c_buf, rbase + 4)
+            oh = _buf_get_i16_le(enemy_rows_c_buf, rbase + 6)
+            if wx < view_right and (wx + ow) > view_left and wy < view_bottom and (wy + oh) > view_top:
+                sbase = ei * _ENEMY_STATE_STRIDE
+                draw_x = wx
+                draw_y = wy
+                enemy_type_code = enemy_type_codes[ei] if ei < type_cap else 0
+                if enemy_type_code == 1:
+                    if int(monk_frame_w) > 0 and ow != int(monk_frame_w):
+                        draw_x = wx + ((ow - int(monk_frame_w)) // 2)
+                    if int(monk_frame_h) > 0 and oh != int(monk_frame_h):
+                        draw_y = wy + (oh - int(monk_frame_h))
+                out = _ensure_buf_capacity(out, (count + 1) * stride)
+                base = count * stride
+                _buf_set_i16_le(out, base, draw_x)
+                _buf_set_i16_le(out, base + 2, draw_y)
+                _buf_set_u16_le(out, base + 4, _buf_get_i16_le(state_buf, sbase + 2))
+                out[base + 6] = state_buf[sbase + 1]
+                out[base + 7] = 1 if state_buf[sbase] else 0
+                out[base + 8] = enemy_type_code & 0xFF
+                out[base + 9] = ei & 0xFF
+                count += 1
+        ei += 1
+    _enemy_desc_scratch = out
+    return out, stride, count
+
+
+def _pack_enemy_render_descriptors_fast(enemy_rows, enemy_states, enemy_meta, enemy_type_codes, enemy_rows_c_buf, enemy_rows_c_stride, enemy_rows_c_count, camera_x=0, view_w=320, view_h=240, margin_x=48, margin_y=32, monk_frame_w=0, monk_frame_h=0):
+    packed = _pack_enemy_render_descriptors_packed(
+        enemy_rows_c_buf,
+        enemy_rows_c_stride,
+        enemy_rows_c_count,
+        enemy_states,
+        enemy_type_codes,
+        camera_x,
+        view_w,
+        view_h,
+        margin_x,
+        margin_y,
+        monk_frame_w,
+        monk_frame_h,
+    )
+    if packed is not None:
+        return packed
+    return _pack_enemy_render_descriptors(
+        enemy_rows,
+        enemy_states,
+        enemy_meta,
+        camera_x,
+        view_w,
+        view_h,
+        margin_x,
+        margin_y,
+        monk_frame_w,
+        monk_frame_h,
+    )
+
+
 def _apply_monk_death_render_state(enemy_desc_buf, enemy_desc_stride, enemy_desc_count, monk_attack_c_buf, monk_attack_c_stride, monk_attack_c_count):
     if enemy_desc_count <= 0 or enemy_desc_stride < 10 or monk_attack_c_buf is None or monk_attack_c_stride < _MONK_ATTACK_NATIVE_STRIDE:
         return
@@ -1972,6 +2280,7 @@ def _load_enemy_runtime_assets(shared_monk_orb_atlas=None, shared_monk_orb_atlas
 
     enemy_rows_all, enemy_meta_all = _load_enemies_rows_and_meta(enemy_csv_path)
     enemy_rows, enemy_meta, monk_encounters = _split_live_enemies_and_monk_encounters(enemy_rows_all, enemy_meta_all)
+    enemy_type_codes = _pack_enemy_type_codes(enemy_meta)
     enemy_rows_initial = _clone_enemy_rows(enemy_rows)
     enemy_rows_c_buf, enemy_rows_c_stride, enemy_rows_c_count = _pack_enemy_rows_for_c(enemy_rows, enemy_meta)
     monk_hover_c_buf, monk_hover_c_stride, monk_hover_c_count = _pack_monk_hover_states_for_c(enemy_rows, enemy_meta, int(getattr(config, "CAMERA_TEST_MAP_W", 0)))
@@ -2048,6 +2357,7 @@ def _load_enemy_runtime_assets(shared_monk_orb_atlas=None, shared_monk_orb_atlas
         "enemy_bullet_color": enemy_bullet_color,
         "enemy_rows": enemy_rows,
         "enemy_meta": enemy_meta,
+        "enemy_type_codes": enemy_type_codes,
         "enemy_rows_initial": enemy_rows_initial,
         "monk_encounters": monk_encounters,
         "enemy_rows_c_buf": enemy_rows_c_buf,
@@ -2130,18 +2440,19 @@ def _lift_black_pixels_rgb565(sprite_buf, transparent_key, replacement_color):
 def _spawn_enemy_bullet(enemy_bullets, max_bullets, bullet_x, bullet_y, vel_x, vel_y, bullet_w, bullet_h, shooter_enemy_i=-1):
     if enemy_bullets is None or max_bullets <= 0 or bullet_w <= 0 or bullet_h <= 0:
         return False
-    _bullet_debug(
-        "BULLET_SPAWN",
-        "x=%d y=%d vx=%d vy=%d w=%d h=%d owner=%d" % (
-            int(bullet_x),
-            int(bullet_y),
-            int(vel_x),
-            int(vel_y),
-            int(bullet_w),
-            int(bullet_h),
-            int(shooter_enemy_i),
-        ),
-    )
+    if _bullet_debug_enabled():
+        _bullet_debug(
+            "BULLET_SPAWN",
+            "x=%d y=%d vx=%d vy=%d w=%d h=%d owner=%d" % (
+                int(bullet_x),
+                int(bullet_y),
+                int(vel_x),
+                int(vel_y),
+                int(bullet_w),
+                int(bullet_h),
+                int(shooter_enemy_i),
+            ),
+        )
     i = 0
     while i < len(enemy_bullets):
         row = enemy_bullets[i]
@@ -2565,18 +2876,22 @@ def _update_enemies_and_bullets(
             active = 1
             if (bx + bw) < 0 or bx > map_w_px or by > (map_h_px + death_margin):
                 active = 0
-                _bullet_debug("BULLET_CULL", "oob x=%d y=%d w=%d h=%d" % (bx, by, bw, bh))
+                if _bullet_debug_enabled():
+                    _bullet_debug("BULLET_CULL", "oob x=%d y=%d w=%d h=%d" % (bx, by, bw, bh))
             elif not _aabb_near_view(bx, by, bw, bh, camera_x, screen_w, screen_h, enemy_bullet_cull_margin, enemy_bullet_cull_margin):
                 active = 0
-                _bullet_debug("BULLET_CULL", "view x=%d y=%d cam=%d screen=%d,%d" % (bx, by, int(camera_x), int(screen_w), int(screen_h)))
+                if _bullet_debug_enabled():
+                    _bullet_debug("BULLET_CULL", "view x=%d y=%d cam=%d screen=%d,%d" % (bx, by, int(camera_x), int(screen_w), int(screen_h)))
             elif _aabb_collides_world(bx, by, bw, bh, tilemap_idx, tilemap_w, tilemap_h, tile_size, object_solids):
                 active = 0
-                _bullet_debug("BULLET_CULL", "world x=%d y=%d" % (bx, by))
+                if _bullet_debug_enabled():
+                    _bullet_debug("BULLET_CULL", "world x=%d y=%d" % (bx, by))
             else:
                 hit_enemy_i = _pick_enemy_hit_by_bullet(enemy_rows, enemy_states, bx, by, bw, bh, shooter_enemy_i, enemy_meta)
                 if hit_enemy_i >= 0:
                     active = 0
-                    _bullet_debug("BULLET_HIT", "enemy idx=%d x=%d y=%d" % (int(hit_enemy_i), bx, by))
+                    if _bullet_debug_enabled():
+                        _bullet_debug("BULLET_HIT", "enemy idx=%d x=%d y=%d" % (int(hit_enemy_i), bx, by))
                     enemy_row = enemy_rows[hit_enemy_i]
                     enemy_row[5] = 0
                     hit_state = enemy_states[hit_enemy_i] if hit_enemy_i < len(enemy_states) else None
@@ -2588,7 +2903,8 @@ def _update_enemies_and_bullets(
                         hit_state["vel_y"] = 0
             if active and player_x < (bx + bw) and (player_x + player_w) > bx and player_y < (by + bh) and (player_y + player_h) > by:
                 active = 0
-                _bullet_debug("BULLET_HIT", "player x=%d y=%d" % (bx, by))
+                if _bullet_debug_enabled():
+                    _bullet_debug("BULLET_HIT", "player x=%d y=%d" % (bx, by))
                 player_y = map_h_px + death_margin + 1
                 vel_y = 0
             if active:
@@ -3848,7 +4164,7 @@ def _update_monk_intro_states(monk_intro_states, monk_encounters, camera_x, view
     return intro_changed
 
 
-def _instantiate_live_monk_from_encounter(encounter, enemy_rows, enemy_meta, enemy_states, enemy_rows_c_buf, enemy_rows_c_stride, monk_hover_c_buf, monk_hover_c_stride, monk_hover_c_count, monk_orb_states, monk_orb_c_buf=None, monk_orb_c_stride=0):
+def _instantiate_live_monk_from_encounter(encounter, enemy_rows, enemy_meta, enemy_type_codes, enemy_states, enemy_rows_c_buf, enemy_rows_c_stride, monk_hover_c_buf, monk_hover_c_stride, monk_hover_c_count, monk_orb_states, monk_orb_c_buf=None, monk_orb_c_stride=0):
     if encounter is None:
         return -1
     template_row = encounter.get("template_row") or None
@@ -3866,6 +4182,7 @@ def _instantiate_live_monk_from_encounter(encounter, enemy_rows, enemy_meta, ene
         live_row = enemy_rows[live_enemy_i]
         if live_enemy_i < len(enemy_meta):
             enemy_meta[live_enemy_i] = dict(template_meta)
+    _sync_enemy_type_codes(enemy_type_codes, enemy_meta)
     live_row[0] = int(encounter.get("body_x", live_row[0]) or live_row[0])
     live_row[1] = int(encounter.get("body_y", live_row[1]) or live_row[1])
     live_row[2] = int(template_row[2])
@@ -4100,7 +4417,7 @@ def _update_monk_defeated_state(enemy_rt):
     return True
 
 
-def _update_monk_encounters(monk_encounters, enemy_rows, enemy_meta, enemy_states, enemy_rows_c_buf, enemy_rows_c_stride, monk_hover_c_buf, monk_hover_c_stride, monk_hover_c_count, monk_orb_states, camera_x, view_w, monk_orb_c_buf=None, monk_orb_c_stride=0):
+def _update_monk_encounters(monk_encounters, enemy_rows, enemy_meta, enemy_type_codes, enemy_states, enemy_rows_c_buf, enemy_rows_c_stride, monk_hover_c_buf, monk_hover_c_stride, monk_hover_c_count, monk_orb_states, camera_x, view_w, monk_orb_c_buf=None, monk_orb_c_stride=0):
     if not monk_encounters:
         return
     ei = 0
@@ -4148,6 +4465,7 @@ def _update_monk_encounters(monk_encounters, enemy_rows, enemy_meta, enemy_state
                     encounter,
                     enemy_rows,
                     enemy_meta,
+                    enemy_type_codes,
                     enemy_states,
                     enemy_rows_c_buf,
                     enemy_rows_c_stride,
@@ -4575,6 +4893,8 @@ def _pack_special_object_descriptors(
     view_w=320,
     view_h=240,
 ):
+    if stall_trace is not None and stall_trace.enabled():
+        stall_trace.mark_desc_helper_enter(0, ticks_us())
     global _special_object_desc_scratch
     out = _special_object_desc_scratch
     stride = 8
@@ -4677,6 +4997,10 @@ def _pack_monk_orb_descriptors(
 
 def _monk_orb_descriptors_native_ready():
     return bool(_lgfx is not None and hasattr(_lgfx, "pack_monk_orb_descriptors_native"))
+
+
+def _overlay_descriptors_native_ready():
+    return bool(_lgfx is not None and (not _overlay_desc_native_disabled) and hasattr(_lgfx, "pack_overlay_descriptors_native"))
 
 
 def _monk_orb_states_have_scripted_mode(monk_orb_states):
@@ -5183,6 +5507,8 @@ def _swap_preview_update_native(
 
 
 def _pack_swap_preview_descriptor(preview_state, camera_x=0, view_w=320, view_h=240):
+    if stall_trace is not None and stall_trace.enabled():
+        stall_trace.mark_desc_helper_enter(4, ticks_us())
     stride = 8
     if preview_state is None or len(preview_state) < _SWAP_PREVIEW_STATE_STRIDE or int(preview_state[1]) == 0:
         return _empty_desc8, stride, 0
@@ -5413,7 +5739,9 @@ def _pack_special_render_overlays(
     view_h=240,
     bullet_margin=32,
 ):
-    global _overlay_desc_scratch, _overlay_frames_cache, _overlay_frames_cache_right, _overlay_frames_cache_left
+    if stall_trace is not None and stall_trace.enabled():
+        stall_trace.mark_desc_helper_enter(6, ticks_us())
+    global _overlay_desc_scratch, _overlay_frames_cache, _overlay_frames_cache_right, _overlay_frames_cache_left, _overlay_desc_native_disabled
     overlay_desc = _overlay_desc_scratch
     overlay_stride = 10
     overlay_count = 0
@@ -5435,6 +5763,36 @@ def _pack_special_render_overlays(
                 _overlay_frames_cache = ()
             _overlay_frames_cache_right = bullet_frame_right
             _overlay_frames_cache_left = bullet_frame_left
+        bullet_buf = getattr(enemy_bullets, "_buf", None)
+        if bullet_buf is not None and _overlay_descriptors_native_ready():
+            max_count = int(len(enemy_bullets))
+            need = max_count * overlay_stride
+            if len(overlay_desc) < need:
+                overlay_desc = bytearray(need)
+            try:
+                overlay_count = int(_lgfx.pack_overlay_descriptors_native(
+                    overlay_desc,
+                    overlay_stride,
+                    max_count,
+                    bullet_buf,
+                    _BULLET_STATE_STRIDE,
+                    max_count,
+                    bullet_w,
+                    bullet_h,
+                    bullet_frame_right is not None,
+                    bullet_frame_left is not None,
+                    camera_x,
+                    view_w,
+                    view_h,
+                    bullet_margin,
+                ))
+                if overlay_count < 0:
+                    overlay_count = 0
+                _overlay_desc_scratch = overlay_desc
+                return overlay_desc, overlay_stride, overlay_count, _overlay_frames_cache
+            except Exception as exc:
+                _overlay_desc_native_disabled = True
+                print("OVERLAY_DESC_NATIVE_FAIL %r" % (exc,))
         bi = 0
         while bi < len(enemy_bullets):
             row = enemy_bullets[bi]
@@ -5463,7 +5821,7 @@ def _pack_special_render_overlays(
                 _buf_set_u16_le(overlay_desc, base + 6, bullet_h)
                 _buf_set_u16_le(overlay_desc, base + 8, frame_index)
                 overlay_count += 1
-                if overlay_count <= 3:
+                if overlay_count <= 3 and _bullet_debug_enabled():
                     _bullet_debug(
                         "BULLET_OVERLAY",
                         "wx=%d wy=%d sx=%d sy=%d vx=%d frame=%d cam=%d view=%d,%d" % (
@@ -5741,93 +6099,54 @@ def _zero_profile_counters():
     return (0,) * 36
 
 
-def _unpack_band_profile_result(band_res):
-    band_count = int(band_res[0])
-    band_compose_us = int(band_res[1])
-    kick_us = int(band_res[2])
-    wait_us = int(band_res[3])
-    sync_us = 0
-    start_us = 0
-    push_us = 0
-    wait_dma_us = 0
-    end_us = 0
-    band_bg_us = 0
-    band_tilemap_us = 0
-    band_object_us = 0
-    band_special_us = 0
-    band_enemy_us = 0
-    band_player_us = 0
-    band0_compose_us = 0
-    band1_compose_us = 0
-    band2_compose_us = 0
-    band3_compose_us = 0
-    band4_compose_us = 0
-    band5_compose_us = 0
-    band0_wait_us = 0
-    band1_wait_us = 0
-    band2_wait_us = 0
-    band3_wait_us = 0
-    band4_wait_us = 0
-    band5_wait_us = 0
-    dma_elapsed_us = 0
-    if len(band_res) >= 10:
-        sync_us = int(band_res[4])
-        start_us = int(band_res[5])
-        push_us = int(band_res[6])
-        wait_dma_us = int(band_res[7])
-        end_us = int(band_res[8])
-    if len(band_res) >= 16:
-        band_bg_us = int(band_res[10])
-        band_tilemap_us = int(band_res[11])
-        band_object_us = int(band_res[12])
-        band_special_us = int(band_res[13])
-        band_enemy_us = int(band_res[14])
-        band_player_us = int(band_res[15])
-    if len(band_res) >= 28:
-        band0_compose_us = int(band_res[16])
-        band1_compose_us = int(band_res[17])
-        band2_compose_us = int(band_res[18])
-        band3_compose_us = int(band_res[19])
-        band4_compose_us = int(band_res[20])
-        band5_compose_us = int(band_res[21])
-        band0_wait_us = int(band_res[22])
-        band1_wait_us = int(band_res[23])
-        band2_wait_us = int(band_res[24])
-        band3_wait_us = int(band_res[25])
-        band4_wait_us = int(band_res[26])
-        band5_wait_us = int(band_res[27])
-    if len(band_res) >= 29:
-        dma_elapsed_us = int(band_res[28])
-    return (
-        band_count,
-        band_compose_us,
-        kick_us,
-        wait_us,
-        sync_us,
-        start_us,
-        push_us,
-        wait_dma_us,
-        end_us,
-        band_bg_us,
-        band_tilemap_us,
-        band_object_us,
-        band_special_us,
-        band_enemy_us,
-        band_player_us,
-        band0_compose_us,
-        band1_compose_us,
-        band2_compose_us,
-        band3_compose_us,
-        band4_compose_us,
-        band5_compose_us,
-        band0_wait_us,
-        band1_wait_us,
-        band2_wait_us,
-        band3_wait_us,
-        band4_wait_us,
-        band5_wait_us,
-        dma_elapsed_us,
-    )
+def _unpack_band_profile_result(band_res, out):
+    n = len(band_res)
+    out[0] = int(band_res[0])
+    out[1] = int(band_res[1])
+    out[2] = int(band_res[2])
+    out[3] = int(band_res[3])
+    if n >= 10:
+        out[4] = int(band_res[4])
+        out[5] = int(band_res[5])
+        out[6] = int(band_res[6])
+        out[7] = int(band_res[7])
+        out[8] = int(band_res[8])
+    else:
+        out[4] = 0
+        out[5] = 0
+        out[6] = 0
+        out[7] = 0
+        out[8] = 0
+    i = 9
+    while i < 27:
+        out[i] = 0
+        i += 1
+    if n >= 16:
+        out[9] = int(band_res[10])
+        out[10] = int(band_res[11])
+        out[11] = int(band_res[12])
+        out[12] = int(band_res[13])
+        out[13] = int(band_res[14])
+        out[14] = int(band_res[15])
+    if n >= 28:
+        out[15] = int(band_res[16])
+        out[16] = int(band_res[17])
+        out[17] = int(band_res[18])
+        out[18] = int(band_res[19])
+        out[19] = int(band_res[20])
+        out[20] = int(band_res[21])
+        out[21] = int(band_res[22])
+        out[22] = int(band_res[23])
+        out[23] = int(band_res[24])
+        out[24] = int(band_res[25])
+        out[25] = int(band_res[26])
+        out[26] = int(band_res[27])
+    if n >= 29:
+        out[27] = int(band_res[28])
+    elif n >= 11:
+        out[27] = int(band_res[10])
+    else:
+        out[27] = 0
 
 
 def _print_profile_summary(
@@ -6111,8 +6430,19 @@ def _avg_update_breakdown(profile_every, prof_update_us, prof_update_break_us):
 
 def _profile_update_part(acc, idx, start_us):
     now_us = ticks_us()
-    acc[idx] += ticks_diff(now_us, start_us)
+    part_us = ticks_diff(now_us, start_us)
+    acc[idx] += part_us
+    if stall_trace is not None and stall_trace.enabled():
+        stall_trace.mark_update_part(idx, now_us, part_us)
     return now_us
+
+
+def _trace_desc_part(idx, start_us):
+    if stall_trace is not None and stall_trace.enabled():
+        now_us = ticks_us()
+        stall_trace.mark_desc_part(idx, now_us, ticks_diff(now_us, start_us))
+        return now_us
+    return start_us
 
 
 def _emit_update_breakdown(profile_every, prof_update_us, prof_update_break_us):
@@ -6350,98 +6680,119 @@ def _emit_step4_profile(
     return dirty_us_acc, fallback_us_acc, submit_acc, _zero_profile_counters()
 
 
-def _submit_native_band_frame(
-    scene_buf,
-    scene_buf_back,
-    sw,
-    sh,
-    native_band_h,
-    far_band_buf,
-    camera_x,
-    tilemap_idx,
-    tilemap_w,
-    tilemap_h,
-    tileset_raw,
-    tile_size,
-    tileset_w,
-    objects_rows,
-    objects_meta,
-    object_animations,
-    object_anim_counter,
-    anchor_active,
-    anchor_x,
-    anchor_y,
-    anchor_anim_spec,
-    anchor_anim_counter,
-    enemy_rows,
-    enemy_states,
-    monk_orb_states,
-    monk_encounters,
-    enemy_meta,
-    enemy_rows_c_buf,
-    enemy_rows_c_stride,
-    enemy_rows_c_count,
-    monk_orb_c_buf,
-    monk_orb_c_stride,
-    monk_orb_c_count,
-    monk_attack_c_buf,
-    monk_attack_c_stride,
-    monk_attack_c_count,
-    enemy_monk_sheet,
-    enemy_monk_frame_w,
-    enemy_monk_frame_h,
-    enemy_monk_frame_count,
-    enemy_monk_frame_hold,
-    enemy_bullets,
-    enemy_bullet_native_sprite_right,
-    enemy_bullet_native_sprite_left,
-    enemy_bullet_w,
-    enemy_bullet_h,
-    enemy_bullet_cull_margin,
-    enemy_render_margin_x,
-    enemy_render_margin_y,
-    objects_c_buf,
-    objects_c_stride,
-    objects_c_count,
-    objects_atlas,
-    objects_atlas_w,
-    objects_atlas_h,
-    sprite_left,
-    sprite_right,
-    anim_idx,
-    facing,
-    sprite_w,
-    sprite_h,
-    player_screen_x,
-    draw_off_x,
-    player_y,
-    draw_off_y,
-    band_top,
-    respawn_sheet_native,
-    respawn_frame_w,
-    respawn_frame_h,
-    respawn_frame_count,
-    anchor_sheet_native,
-    anchor_frame_w_native,
-    anchor_frame_h_native,
-    anchor_frame_count_native,
-    enemy_render_enabled,
-    enemy_sheet,
-    enemy_sheet_w,
-    enemy_sheet_h,
-    enemy_frame_hold,
-    enemy_monk_orb_atlas,
-    enemy_monk_orb_atlas_w,
-    enemy_monk_orb_atlas_h,
-    native_probe_disable_tilemap,
-    native_probe_disable_objects,
-    native_probe_disable_enemies,
-    native_probe_disable_overlays,
-    native_probe_disable_far,
-    dirty_log_countdown,
-    defer_final_wait,
-    swap_preview_state=None,
-):
+def _submit_native_band_frame(ctx):
+    if stall_trace is not None and stall_trace.enabled():
+        stall_trace.mark_submit_helper_enter(ticks_us())
+    if _lgfx is not None and hasattr(_lgfx, "submit_native_band_frame"):
+        try:
+            if _lgfx.submit_native_band_frame(ctx):
+                if stall_trace is not None and stall_trace.enabled():
+                    stall_trace.mark_submit_unpacked(ticks_us())
+                    stall_trace.mark_submit_pre_return(ticks_us())
+                return
+        except Exception as exc:
+            print("SUBMIT_NATIVE_WRAPPER_FAIL %r" % (exc,))
+    _submit_native_band_frame_fallback(ctx)
+
+
+def _submit_native_band_frame_fallback(ctx):
+    if stall_trace is not None and stall_trace.enabled():
+        stall_trace.mark_submit_helper_enter(ticks_us())
+    (
+        scene_buf,
+        scene_buf_back,
+        sw,
+        sh,
+        native_band_h,
+        far_band_buf,
+        camera_x,
+        tilemap_idx,
+        tilemap_w,
+        tilemap_h,
+        tileset_raw,
+        tile_size,
+        tileset_w,
+        objects_rows,
+        objects_meta,
+        object_animations,
+        object_anim_counter,
+        anchor_active,
+        anchor_x,
+        anchor_y,
+        anchor_anim_spec,
+        anchor_anim_counter,
+        enemy_rows,
+        enemy_states,
+        monk_orb_states,
+        monk_encounters,
+        enemy_meta,
+        enemy_type_codes,
+        enemy_rows_c_buf,
+        enemy_rows_c_stride,
+        enemy_rows_c_count,
+        monk_orb_c_buf,
+        monk_orb_c_stride,
+        monk_orb_c_count,
+        monk_attack_c_buf,
+        monk_attack_c_stride,
+        monk_attack_c_count,
+        enemy_monk_sheet,
+        enemy_monk_frame_w,
+        enemy_monk_frame_h,
+        enemy_monk_frame_count,
+        enemy_monk_frame_hold,
+        enemy_bullets,
+        enemy_bullet_native_sprite_right,
+        enemy_bullet_native_sprite_left,
+        enemy_bullet_w,
+        enemy_bullet_h,
+        enemy_bullet_cull_margin,
+        enemy_render_margin_x,
+        enemy_render_margin_y,
+        objects_c_buf,
+        objects_c_stride,
+        objects_c_count,
+        objects_atlas,
+        objects_atlas_w,
+        objects_atlas_h,
+        sprite_left,
+        sprite_right,
+        anim_idx,
+        facing,
+        sprite_w,
+        sprite_h,
+        player_screen_x,
+        draw_off_x,
+        player_y,
+        draw_off_y,
+        band_top,
+        respawn_sheet_native,
+        respawn_frame_w,
+        respawn_frame_h,
+        respawn_frame_count,
+        anchor_sheet_native,
+        anchor_frame_w_native,
+        anchor_frame_h_native,
+        anchor_frame_count_native,
+        enemy_render_enabled,
+        enemy_sheet,
+        enemy_sheet_w,
+        enemy_sheet_h,
+        enemy_frame_hold,
+        enemy_monk_orb_atlas,
+        enemy_monk_orb_atlas_w,
+        enemy_monk_orb_atlas_h,
+        native_probe_disable_tilemap,
+        native_probe_disable_objects,
+        native_probe_disable_enemies,
+        native_probe_disable_overlays,
+        native_probe_disable_far,
+        dirty_log_countdown,
+        defer_final_wait,
+        swap_preview_state,
+        band_profile,
+        submit_result,
+    ) = ctx[:93]
     submit_t0 = ticks_us()
     desc_t0 = submit_t0
     sprite_x = player_screen_x + draw_off_x
@@ -6457,6 +6808,8 @@ def _submit_native_band_frame(
     object_colorkey = -1
     if bool(getattr(config, "CAMERA_OBJECT_COLORKEY_ENABLE", True)):
         object_colorkey = _swap16(int(getattr(config, "CAMERA_OBJECT_COLORKEY_RGB565", 0xF81F)) & 0xFFFF)
+    if stall_trace is not None and stall_trace.enabled():
+        stall_trace.mark_desc_call_start(0, ticks_us())
     special_desc_buf, special_desc_stride, special_desc_count = _pack_special_object_descriptors(
         objects_rows,
         objects_meta,
@@ -6471,6 +6824,7 @@ def _submit_native_band_frame(
         sw,
         sh,
     )
+    desc_part_t0 = _trace_desc_part(0, desc_t0)
     monk_orb_desc_native = _pack_monk_orb_descriptors_native(
         enemy_rows_c_buf,
         enemy_rows_c_stride,
@@ -6499,12 +6853,14 @@ def _submit_native_band_frame(
         )
     else:
         monk_orb_desc_buf, monk_orb_desc_stride, monk_orb_desc_count = monk_orb_desc_native
+    desc_part_t0 = _trace_desc_part(1, desc_part_t0)
     intro_orb_desc_buf, intro_orb_desc_stride, intro_orb_desc_count = _pack_monk_encounter_intro_orb_descriptors(
         monk_encounters,
         camera_x,
         sw,
         sh,
     )
+    desc_part_t0 = _trace_desc_part(2, desc_part_t0)
     final_path_desc_buf, final_path_desc_stride, final_path_desc_count = _pack_monk_final_path_descriptors(
         monk_attack_c_buf,
         monk_attack_c_stride,
@@ -6513,12 +6869,16 @@ def _submit_native_band_frame(
         sw,
         sh,
     )
+    desc_part_t0 = _trace_desc_part(3, desc_part_t0)
+    if stall_trace is not None and stall_trace.enabled():
+        stall_trace.mark_desc_call_start(4, ticks_us())
     preview_desc_buf, preview_desc_stride, preview_desc_count = _pack_swap_preview_descriptor(
         swap_preview_state,
         camera_x,
         sw,
         sh,
     )
+    desc_part_t0 = _trace_desc_part(4, desc_part_t0)
     assembled_special_count = special_desc_count + final_path_desc_count + monk_orb_desc_count + intro_orb_desc_count + preview_desc_count
     if assembled_special_count > 0:
         assembled_special_buf = _ensure_special_desc_capacity(assembled_special_count, 8)
@@ -6531,6 +6891,9 @@ def _submit_native_band_frame(
         special_desc_buf = assembled_special_buf
         special_desc_stride = 8
         special_desc_count = assembled_count
+    desc_part_t0 = _trace_desc_part(5, desc_part_t0)
+    if stall_trace is not None and stall_trace.enabled():
+        stall_trace.mark_desc_call_start(6, ticks_us())
     overlay_desc_buf, overlay_stride, overlay_count, overlay_frames = _pack_special_render_overlays(
         objects_rows,
         objects_meta,
@@ -6558,10 +6921,15 @@ def _submit_native_band_frame(
         sh,
         enemy_bullet_cull_margin,
     )
-    enemy_desc_buf, enemy_desc_stride, enemy_desc_count = _pack_enemy_render_descriptors(
+    desc_part_t0 = _trace_desc_part(6, desc_part_t0)
+    enemy_desc_buf, enemy_desc_stride, enemy_desc_count = _pack_enemy_render_descriptors_fast(
         enemy_rows,
         enemy_states,
         enemy_meta,
+        enemy_type_codes,
+        enemy_rows_c_buf,
+        enemy_rows_c_stride,
+        enemy_rows_c_count,
         camera_x,
         sw,
         sh,
@@ -6578,6 +6946,7 @@ def _submit_native_band_frame(
         monk_attack_c_stride,
         monk_attack_c_count,
     )
+    desc_part_t0 = _trace_desc_part(7, desc_part_t0)
     intro_enemy_desc_buf, intro_enemy_desc_stride, intro_enemy_desc_count = _pack_monk_encounter_intro_body_descriptors(
         monk_encounters,
         camera_x,
@@ -6596,6 +6965,7 @@ def _submit_native_band_frame(
         enemy_desc_buf = _enemy_merged_desc_scratch
         enemy_desc_stride = 10
         enemy_desc_count = copied_enemy_count
+    desc_part_t0 = _trace_desc_part(8, desc_part_t0)
     descriptor_us = ticks_diff(ticks_us(), desc_t0)
     native_object_count = objects_c_count
     native_enemy_count = enemy_desc_count
@@ -6614,6 +6984,11 @@ def _submit_native_band_frame(
     native_probe_flags = 0
     if native_probe_disable_far:
         native_probe_flags |= 0x1
+    if bool(getattr(config, "CAMERA_NATIVE_PROFILE_DETAIL", False)) or bool(getattr(config, "CAMERA_RENDER_PROFILE_DETAIL", False)) or _runtime_verbose_enabled():
+        native_probe_flags |= 0x2
+    profile_to_buffer = _native_profile_buffer_supported()
+    if profile_to_buffer:
+        native_probe_flags |= 0x4
     try:
         if enemy_render_enabled:
             band_res = _lgfx.render_scene_bands_rgb565(
@@ -6733,77 +7108,31 @@ def _submit_native_band_frame(
         print("BAND_PIPELINE_NATIVE_FAIL")
         raise
     us = ticks_diff(ticks_us(), submit_t0)
-    (
-        band_count,
-        band_compose_us,
-        kick_us,
-        wait_us,
-        sync_us,
-        start_us,
-        push_us,
-        wait_dma_us,
-        end_us,
-        band_bg_us,
-        band_tilemap_us,
-        band_object_us,
-        band_special_us,
-        band_enemy_us,
-        band_player_us,
-        band0_compose_us,
-        band1_compose_us,
-        band2_compose_us,
-        band3_compose_us,
-        band4_compose_us,
-        band5_compose_us,
-        band0_wait_us,
-        band1_wait_us,
-        band2_wait_us,
-        band3_wait_us,
-        band4_wait_us,
-        band5_wait_us,
-        dma_elapsed_us,
-    ) = _unpack_band_profile_result(band_res)
+    if stall_trace is not None and stall_trace.enabled():
+        stall_trace.mark_submit_native_done(ticks_us())
+    if profile_to_buffer:
+        _lgfx.copy_last_render_profile(band_profile)
+    else:
+        _unpack_band_profile_result(band_res, band_profile)
+    if stall_trace is not None and stall_trace.enabled():
+        stall_trace.mark_submit_unpacked(ticks_us())
     if dirty_log_countdown <= 0:
+        if stall_trace is not None and stall_trace.enabled():
+            stall_trace.mark_submit_log_before(ticks_us())
         print("BAND_PIPELINE_SUBMIT_OK")
+        if stall_trace is not None and stall_trace.enabled():
+            stall_trace.mark_submit_log_done(ticks_us())
         dirty_log_countdown = 30
     if dirty_log_countdown > 0:
         dirty_log_countdown -= 1
-    return (
-        sprite_x,
-        sprite_y,
-        spr_y,
-        us,
-        band_count,
-        band_compose_us,
-        kick_us,
-        wait_us,
-        sync_us,
-        start_us,
-        push_us,
-        wait_dma_us,
-        end_us,
-        band_bg_us,
-        band_tilemap_us,
-        band_object_us,
-        band_special_us,
-        band_enemy_us,
-        band_player_us,
-        band0_compose_us,
-        band1_compose_us,
-        band2_compose_us,
-        band3_compose_us,
-        band4_compose_us,
-        band5_compose_us,
-        band0_wait_us,
-        band1_wait_us,
-        band2_wait_us,
-        band3_wait_us,
-        band4_wait_us,
-        band5_wait_us,
-        dma_elapsed_us,
-        dirty_log_countdown,
-        descriptor_us,
-    )
+    if stall_trace is not None and stall_trace.enabled():
+        stall_trace.mark_submit_pre_return(ticks_us())
+    submit_result[0] = sprite_x
+    submit_result[1] = sprite_y
+    submit_result[2] = spr_y
+    submit_result[3] = us
+    submit_result[4] = dirty_log_countdown
+    submit_result[5] = descriptor_us
 
 
 def _print_camera_test_start(mode):
@@ -7172,6 +7501,9 @@ def run(max_frames=None):
             if stall_log_cooldown < 1:
                 stall_log_cooldown = 15
             stall_log_countdown = 0
+            stall_trace_enabled = stall_trace is not None and bool(getattr(config, "CAMERA_STALL_TRACE_ENABLED", False))
+            if stall_trace_enabled:
+                stall_trace.configure(True, int(getattr(config, "CAMERA_STALL_TRACE_SIZE", 32)))
             (
                 prof_update_us,
                 prof_bg_us,
@@ -7223,6 +7555,9 @@ def run(max_frames=None):
             dirty_last_rects_count = 0
             dirty_last_bands_count = 0
             dirty_last_camera_static = 1
+            native_submit_profile = _new_native_submit_profile()
+            native_submit_result = [0] * 6
+            native_submit_ctx = None
             tail_overlap_update_acc = 0
             tail_overlap_residual_wait_acc = 0
             tail_overlap_total_wait_acc = 0
@@ -7324,6 +7659,7 @@ def run(max_frames=None):
             enemy_bullet_color = enemy_rt["enemy_bullet_color"]
             enemy_rows = enemy_rt["enemy_rows"]
             enemy_meta = enemy_rt["enemy_meta"]
+            enemy_type_codes = enemy_rt["enemy_type_codes"]
             enemy_rows_initial = enemy_rt["enemy_rows_initial"]
             monk_encounters = enemy_rt["monk_encounters"]
             enemy_rows_c_buf = enemy_rt["enemy_rows_c_buf"]
@@ -7646,6 +7982,20 @@ def run(max_frames=None):
                 and hasattr(_lgfx, "band_pipeline_tail_wait")
                 and bool(getattr(config, "CAMERA_BAND_TAIL_OVERLAP_UPDATE", False))
             )
+            native_submit_ctx = _new_native_submit_ctx(
+                (scene_buf, scene_buf_back, sw, sh, native_band_h, far_band_buf),
+                (tilemap_idx, tilemap_w, tilemap_h, tileset_raw, tile_size, tileset_w),
+                (objects_rows, objects_meta, object_animations, objects_c_buf, objects_c_stride, objects_c_count, objects_atlas, objects_atlas_w, objects_atlas_h, object_state_c_buf, object_state_c_stride, object_state_c_count),
+                enemy_rt,
+                (enemy_bullet_native_sprite_right, enemy_bullet_native_sprite_left),
+                (sprite_left, sprite_right, sprite_w, sprite_h, draw_off_x, draw_off_y),
+                (camera_x, object_anim_counter, anchor_active, anchor_x, anchor_y, anchor_anim_spec, anchor_anim_counter, anim_idx, facing, player_screen_x, player_y, band_top, dirty_log_countdown, native_tail_overlap_enabled),
+                (respawn_sheet_native, respawn_frame_w, respawn_frame_h, respawn_frame_count, anchor_sheet_native, anchor_frame_w_native, anchor_frame_h_native, anchor_frame_count_native),
+                (native_probe_disable_tilemap, native_probe_disable_objects, native_probe_disable_enemies, native_probe_disable_overlays, native_probe_disable_far),
+                swap_preview_state,
+                native_submit_profile,
+                native_submit_result,
+            )
 
             while True:
                 now = ticks_ms()
@@ -7658,6 +8008,8 @@ def run(max_frames=None):
                     continue
                 last_tick = now
                 frame_start_us = ticks_us()
+                if stall_trace_enabled:
+                    stall_trace.start(frame, frame_start_us)
                 object_anim_counter += 1
                 if anchor_active:
                     anchor_anim_counter += 1
@@ -8122,6 +8474,7 @@ def run(max_frames=None):
                             monk_encounters,
                             enemy_rows,
                             enemy_meta,
+                            enemy_type_codes,
                             enemy_states,
                             enemy_rows_c_buf,
                             enemy_rows_c_stride,
@@ -8263,6 +8616,8 @@ def run(max_frames=None):
 
                 frame_update_us = ticks_diff(ticks_us(), seg_t0)
                 prof_update_us += frame_update_us
+                if stall_trace_enabled:
+                    stall_trace.mark_update(ticks_us(), frame_update_us)
                 tail_total_wait_us = 0
                 tail_residual_wait_us = 0
                 tail_residual_dma_wait_us = 0
@@ -8295,6 +8650,8 @@ def run(max_frames=None):
                         prof_submit_wait_us += tail_residual_wait_us
                         prof_submit_dma_wait_us += tail_residual_dma_wait_us
                         prof_submit_end_us += tail_end_us
+                if stall_trace_enabled:
+                    stall_trace.mark_tail(ticks_us(), tail_total_wait_us, tail_residual_wait_us, tail_dma_elapsed_us)
 
                 frame_native_band_enabled = native_band_pipeline_enabled
                 us = 0
@@ -8307,11 +8664,43 @@ def run(max_frames=None):
                 wait_dma_us = 0
 
                 if frame_native_band_enabled:
+                    if stall_trace_enabled:
+                        stall_trace.mark_submit_start(ticks_us())
+                    _refresh_native_submit_ctx(
+                        native_submit_ctx,
+                        camera_x,
+                        object_anim_counter,
+                        anchor_active,
+                        anchor_x,
+                        anchor_y,
+                        anchor_anim_counter,
+                        enemy_rows_c_count,
+                        monk_orb_c_buf,
+                        monk_orb_c_stride,
+                        monk_orb_c_count,
+                        monk_attack_c_buf,
+                        monk_attack_c_stride,
+                        monk_attack_c_count,
+                        anim_idx,
+                        facing,
+                        player_screen_x,
+                        player_y,
+                        band_top,
+                        dirty_log_countdown,
+                        native_tail_overlap_enabled,
+                    )
+                    if stall_trace_enabled:
+                        stall_trace.mark_submit_call_start(ticks_us())
+                    _submit_native_band_frame(native_submit_ctx)
                     (
                         sprite_x,
                         sprite_y,
                         spr_y,
                         us,
+                        dirty_log_countdown,
+                        descriptor_us,
+                    ) = native_submit_result
+                    (
                         band_count,
                         band_compose_us,
                         kick_us,
@@ -8340,100 +8729,7 @@ def run(max_frames=None):
                         band4_wait_us,
                         band5_wait_us,
                         dma_elapsed_us,
-                        dirty_log_countdown,
-                        descriptor_us,
-                    ) = _submit_native_band_frame(
-                        scene_buf,
-                        scene_buf_back,
-                        sw,
-                        sh,
-                        native_band_h,
-                        far_band_buf,
-                        camera_x,
-                        tilemap_idx,
-                        tilemap_w,
-                        tilemap_h,
-                        tileset_raw,
-                        tile_size,
-                        tileset_w,
-                        objects_rows,
-                        objects_meta,
-                        object_animations,
-                        object_anim_counter,
-                        anchor_active,
-                        anchor_x,
-                        anchor_y,
-                        anchor_anim_spec,
-                        anchor_anim_counter,
-                        enemy_rows,
-                        enemy_states,
-                        monk_orb_states,
-                        monk_encounters,
-                        enemy_meta,
-                        enemy_rows_c_buf,
-                        enemy_rows_c_stride,
-                        enemy_rows_c_count,
-                        monk_orb_c_buf,
-                        monk_orb_c_stride,
-                        monk_orb_c_count,
-                        monk_attack_c_buf,
-                        monk_attack_c_stride,
-                        monk_attack_c_count,
-                        enemy_monk_sheet,
-                        enemy_monk_frame_w,
-                        enemy_monk_frame_h,
-                        enemy_monk_frame_count,
-                        enemy_monk_frame_hold,
-                        enemy_bullets,
-                        enemy_bullet_native_sprite_right,
-                        enemy_bullet_native_sprite_left,
-                        enemy_bullet_w,
-                        enemy_bullet_h,
-                        enemy_bullet_cull_margin,
-                        enemy_render_margin_x,
-                        enemy_render_margin_y,
-                        objects_c_buf,
-                        objects_c_stride,
-                        objects_c_count,
-                        objects_atlas,
-                        objects_atlas_w,
-                        objects_atlas_h,
-                        sprite_left,
-                        sprite_right,
-                        anim_idx,
-                        facing,
-                        sprite_w,
-                        sprite_h,
-                        player_screen_x,
-                        draw_off_x,
-                        player_y,
-                        draw_off_y,
-                        band_top,
-                        respawn_sheet_native,
-                        respawn_frame_w,
-                        respawn_frame_h,
-                        respawn_frame_count,
-                        anchor_sheet_native,
-                        anchor_frame_w_native,
-                        anchor_frame_h_native,
-                        anchor_frame_count_native,
-                        enemy_render_enabled,
-                        enemy_sheet,
-                        enemy_sheet_w,
-                        enemy_sheet_h,
-                        enemy_frame_hold,
-                        enemy_monk_orb_atlas,
-                        enemy_monk_orb_atlas_w,
-                        enemy_monk_orb_atlas_h,
-                        native_probe_disable_tilemap,
-                        native_probe_disable_objects,
-                        native_probe_disable_enemies,
-                        native_probe_disable_overlays,
-                        native_probe_disable_far,
-                        dirty_log_countdown,
-                        native_tail_overlap_enabled,
-                        swap_preview_state,
-                    )
+                    ) = native_submit_profile
                     swap_us = 0
                     submit_acc += us
                     prof_submit_us += us
@@ -8466,6 +8762,8 @@ def run(max_frames=None):
                     prof_submit_swap_us += swap_us
                     prof_desc_us += descriptor_us
                     prof_dma_elapsed_us += dma_elapsed_us
+                    if stall_trace_enabled:
+                        stall_trace.mark_submit_end(ticks_us(), us, descriptor_us, band_compose_us, wait_dma_us, dma_elapsed_us)
                     native_tail_inflight = native_tail_overlap_enabled
                     dirty_last_rects_count = band_count
                     dirty_last_bands_count = band_count
@@ -8929,6 +9227,7 @@ def run(max_frames=None):
                     print("CAMERA_TEST_STEP=4_FAIL_DIRECT_SMALL_RECT_DISABLED")
                     raise RuntimeError("CAMERA_TEST_STEP4_FAIL_DIRECT_SMALL_RECT_DISABLED")
 
+                frame_hud_us = 0
                 if coord_hud_enabled and ((frame == 0) or ((frame % coord_update_every) == 0)):
                     seg_t0 = ticks_us()
                     # Use latest perf snapshot when available; initial frame uses 0.
@@ -8964,13 +9263,20 @@ def run(max_frames=None):
                             coord_hud_color,
                         )
                         _lgfx.blit_rect565_wait(right_x, 0, top_hud_w, top_hud_h, top_hud_buf)
-                    prof_hud_us += ticks_diff(ticks_us(), seg_t0)
+                    frame_hud_us = ticks_diff(ticks_us(), seg_t0)
+                    prof_hud_us += frame_hud_us
+                if stall_trace_enabled:
+                    stall_trace.mark_hud(ticks_us(), frame_hud_us)
 
                 frame_total_us = ticks_diff(ticks_us(), frame_start_us)
                 prof_total_us += frame_total_us
+                if stall_trace_enabled:
+                    stall_trace.finish(ticks_us(), frame_total_us, camera_x, player_x, enemy_rows_c_count, monk_orb_c_count)
                 if stall_log_enabled or _runtime_verbose_enabled():
                     if frame_total_us >= stall_frame_us:
                         if stall_log_countdown <= 0:
+                            if stall_trace_enabled:
+                                stall_trace.dump(frame, frame_total_us)
                             _raw_print(
                                 "STALL_FRAME total_us=%d update_us=%d submit_us=%d desc_us=%d compose_us=%d enemy_us=%d special_us=%d wait_us=%d wait_dma_us=%d dma_us=%d tail_total_us=%d tail_res_us=%d tail_dma_us=%d frame=%d camera_x=%d player_x=%d enemies=%d orbs=%d"
                                 % (
@@ -9069,6 +9375,8 @@ def run(max_frames=None):
                         dirty_last_bands_count,
                     )
                     perf_window_start = now
+                if stall_trace_enabled:
+                    stall_trace.mark_debug(ticks_us())
 
                 if _runtime_verbose_enabled() and (frame % profile_every) == 0:
                     avg_tail_overlap_update_us = 0
@@ -9183,6 +9491,8 @@ def run(max_frames=None):
                         prof_pace_us,
                         prof_dma_elapsed_us,
                     ) = profile_counters
+                if stall_trace_enabled:
+                    stall_trace.mark_profile(ticks_us())
 
                 if max_frames is not None and frame >= int(max_frames):
                     break
