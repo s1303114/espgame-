@@ -3,6 +3,10 @@ add_library(usermod_lgfx INTERFACE)
 target_sources(usermod_lgfx INTERFACE
     ${CMAKE_CURRENT_LIST_DIR}/lgfx_mp.cpp
     ${CMAKE_CURRENT_LIST_DIR}/lgfx_band.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/lgfx_world.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/lgfx_objects.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/lgfx_player.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/lgfx_swap.cpp
 )
 
 target_include_directories(usermod_lgfx INTERFACE

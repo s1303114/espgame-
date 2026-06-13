@@ -1,5 +1,7 @@
 import config
 import object_native
+import player_native
+import swap_native
 
 try:
     import array as _array
@@ -3060,10 +3062,17 @@ def _perform_world_swap(
     enemy_rows_c_buf=None,
     enemy_rows_c_stride=0,
     enemy_rows_c_count=0,
+    object_state_c_buf=None,
+    object_state_c_stride=0,
+    object_state_c_count=0,
+    object_solids_c_buf=None,
+    object_solids_c_stride=0,
+    object_solids_c_capacity=0,
+    swap_native_result=None,
     locked_target=None,
 ):
     if not swap_triggered or (not objects_rows and not enemy_rows and not enemy_bullets):
-        return player_x, player_y, vel_y, object_native.rebuild_solids(objects_rows)
+        return player_x, player_y, vel_y, object_native.rebuild_solids(objects_rows), False
 
     if monk_intro_states:
         ei = 0
@@ -3072,7 +3081,7 @@ def _perform_world_swap(
             if intro_state is not None and int(intro_state.get("state", _MONK_INTRO_STATE_IDLE) or _MONK_INTRO_STATE_IDLE) == _MONK_INTRO_STATE_DROPPING:
                 if _runtime_verbose_enabled():
                     print("SWAP_BLOCKED_MONK_INTRO")
-                return player_x, player_y, vel_y, object_native.rebuild_solids(objects_rows)
+                return player_x, player_y, vel_y, object_native.rebuild_solids(objects_rows), False
             ei += 1
 
     target_kind = None
@@ -3248,7 +3257,44 @@ def _perform_world_swap(
         row = objects_rows[ti]
         meta = objects_meta[ti] if ti < len(objects_meta) else None
         if meta and meta.get("checkpoint"):
-            return player_x, player_y, vel_y, object_solids
+            return player_x, player_y, vel_y, object_solids, False
+        native_ok = swap_native.perform_transaction(
+            _lgfx,
+            swap_native_result,
+            _SWAP_TARGET_OBJECT,
+            ti,
+            player_x,
+            player_y,
+            player_w,
+            player_h,
+            max_player_x,
+            map_h_px,
+            object_state_c_buf,
+            object_state_c_stride,
+            object_state_c_count,
+            objects_c_buf,
+            objects_c_stride,
+            object_solids_c_buf,
+            object_solids_c_stride,
+            object_solids_c_capacity,
+            enemy_rows_c_buf,
+            enemy_rows_c_stride,
+            enemy_rows_c_count,
+            enemy_states,
+            enemy_bullets,
+            objects_rows,
+            enemy_rows,
+        )
+        if native_ok:
+            player_x = int(swap_native_result[3])
+            player_y = int(swap_native_result[4])
+            vel_y = int(swap_native_result[5])
+            object_solids = object_native.rebuild_solids(objects_rows)
+            if swap_pick_far:
+                print("SWAP_FAR_OK_V2 idx=%d px=%d py=%d" % (ti, player_x, player_y))
+            else:
+                print("SWAP_NEAR_OK_V2 idx=%d px=%d py=%d" % (ti, player_x, player_y))
+            return player_x, player_y, vel_y, object_solids, True
         old_px = player_x
         old_py = player_y
         old_ox = int(row[0])
@@ -3273,6 +3319,42 @@ def _perform_world_swap(
         else:
             print("SWAP_NEAR_OK_V2 idx=%d px=%d py=%d" % (ti, player_x, player_y))
     elif target_kind == "enemy" and ti >= 0:
+        native_ok = swap_native.perform_transaction(
+            _lgfx,
+            swap_native_result,
+            _SWAP_TARGET_ENEMY,
+            ti,
+            player_x,
+            player_y,
+            player_w,
+            player_h,
+            max_player_x,
+            map_h_px,
+            object_state_c_buf,
+            object_state_c_stride,
+            object_state_c_count,
+            objects_c_buf,
+            objects_c_stride,
+            object_solids_c_buf,
+            object_solids_c_stride,
+            object_solids_c_capacity,
+            enemy_rows_c_buf,
+            enemy_rows_c_stride,
+            enemy_rows_c_count,
+            enemy_states,
+            enemy_bullets,
+            objects_rows,
+            enemy_rows,
+        )
+        if native_ok:
+            player_x = int(swap_native_result[3])
+            player_y = int(swap_native_result[4])
+            vel_y = int(swap_native_result[5])
+            if swap_pick_far:
+                print("SWAP_FAR_OK_ENEMY idx=%d px=%d py=%d" % (ti, player_x, player_y))
+            else:
+                print("SWAP_NEAR_OK_ENEMY idx=%d px=%d py=%d" % (ti, player_x, player_y))
+            return player_x, player_y, vel_y, object_solids, True
         row = enemy_rows[ti]
         state = enemy_states[ti] if ti < len(enemy_states) else None
         old_px = player_x
@@ -3305,6 +3387,42 @@ def _perform_world_swap(
         else:
             print("SWAP_NEAR_OK_ENEMY idx=%d px=%d py=%d" % (ti, player_x, player_y))
     elif target_kind == "bullet" and ti >= 0:
+        native_ok = swap_native.perform_transaction(
+            _lgfx,
+            swap_native_result,
+            _SWAP_TARGET_BULLET,
+            ti,
+            player_x,
+            player_y,
+            player_w,
+            player_h,
+            max_player_x,
+            map_h_px,
+            object_state_c_buf,
+            object_state_c_stride,
+            object_state_c_count,
+            objects_c_buf,
+            objects_c_stride,
+            object_solids_c_buf,
+            object_solids_c_stride,
+            object_solids_c_capacity,
+            enemy_rows_c_buf,
+            enemy_rows_c_stride,
+            enemy_rows_c_count,
+            enemy_states,
+            enemy_bullets,
+            objects_rows,
+            enemy_rows,
+        )
+        if native_ok:
+            player_x = int(swap_native_result[3])
+            player_y = int(swap_native_result[4])
+            vel_y = int(swap_native_result[5])
+            if swap_pick_far:
+                print("SWAP_FAR_OK_BULLET idx=%d px=%d py=%d" % (ti, player_x, player_y))
+            else:
+                print("SWAP_NEAR_OK_BULLET idx=%d px=%d py=%d" % (ti, player_x, player_y))
+            return player_x, player_y, vel_y, object_solids, True
         row = enemy_bullets[ti]
         old_px = player_x
         old_py = player_y
@@ -3358,7 +3476,7 @@ def _perform_world_swap(
             print("SWAP_FAIL_NO_TARGET_V2")
     else:
         print("SWAP_FAIL_NO_TARGET_V2")
-    return player_x, player_y, vel_y, object_solids
+    return player_x, player_y, vel_y, object_solids, False
 
 
 def _is_special_render_object(meta):
@@ -7485,6 +7603,8 @@ def run(max_frames=None):
             map_exit_latched = False
             swap_preview_state = bytearray(_SWAP_PREVIEW_STATE_STRIDE)
             swap_input_state = bytearray(_SWAP_INPUT_STATE_STRIDE)
+            player_native_result = player_native.new_result_buffer()
+            swap_native_result = swap_native.new_result_buffer()
             prev_sprite_x = None
             prev_sprite_y = None
             last_tick = ticks_ms()
@@ -8316,7 +8436,7 @@ def run(max_frames=None):
                             swap_triggered = False
                             swap_locked_target = None
 
-                    player_x, player_y, vel_y, object_solids = _perform_world_swap(
+                    player_x, player_y, vel_y, object_solids, swap_native_ok = _perform_world_swap(
                         swap_triggered,
                         swap_pick_far,
                         objects_rows,
@@ -8348,58 +8468,47 @@ def run(max_frames=None):
                         enemy_rows_c_buf,
                         enemy_rows_c_stride,
                         enemy_rows_c_count,
+                        object_state_c_buf,
+                        object_state_c_stride,
+                        object_state_c_count,
+                        object_solids_c_buf,
+                        object_solids_c_stride,
+                        (len(object_solids_c_buf) // object_solids_c_stride) if (object_solids_c_buf is not None and object_solids_c_stride) else 0,
+                        swap_native_result,
                         swap_locked_target,
                     )
-                    if swap_triggered:
+                    if swap_triggered and swap_native_ok:
+                        object_solids_c_count = int(swap_native_result[6]) if int(swap_native_result[6]) >= 0 else object_solids_c_count
+                    elif swap_triggered:
                         _sync_enemy_rows_c_from_rows(enemy_rows_c_buf, enemy_rows_c_stride, enemy_rows, enemy_meta)
                         object_solids_c_count = object_native.sync_solids_from_list(object_solids_c_buf, object_solids_c_stride, object_solids)
                         object_native.sync_states_from_rows(object_state_c_buf, object_state_c_stride, objects_rows, objects_meta)
                     update_part_t0 = _profile_update_part(prof_update_break_us, 4, update_part_t0)
 
-                    if tilemap_enabled or object_solids:
-                        unembed_guard = tile_size * 4
-                        if unembed_guard < 16:
-                            unembed_guard = 16
-                        while unembed_guard > 0 and _aabb_collides_world(player_x, player_y, player_w, player_h, tilemap_idx, tilemap_w, tilemap_h, tile_size, object_solids):
-                            player_y -= 1
-                            if player_y < 0:
-                                player_y = 0
-                                break
-                            unembed_guard -= 1
-
-                        grounded = _aabb_collides_world(player_x, player_y + 1, player_w, player_h, tilemap_idx, tilemap_w, tilemap_h, tile_size, object_solids)
-                        if not grounded:
-                            vel_y += gravity
-                            if vel_y > fall_speed_max:
-                                vel_y = fall_speed_max
-                        elif vel_y > 0:
-                            vel_y = 0
-
-                        player_x, player_y, _hit_x, hit_y = _move_axis_world(
-                            tilemap_idx,
-                            tilemap_w,
-                            tilemap_h,
-                            tile_size,
-                            object_solids,
-                            player_x,
-                            player_y,
-                            player_w,
-                            player_h,
-                            move_x,
-                            vel_y,
-                        )
-                        if hit_y:
-                            vel_y = 0
-                        if player_x < 0:
-                            player_x = 0
-                        if player_x > max_player_x:
-                            player_x = max_player_x
-                        if player_y < 0:
-                            player_y = 0
-                            vel_y = 0
-                    else:
-                        player_x += move_x
-                        player_x = _clamp(player_x, 0, max_player_x)
+                    player_native.update_frame(
+                        _lgfx,
+                        player_native_result,
+                        tilemap_idx,
+                        tilemap_w,
+                        tilemap_h,
+                        tile_size,
+                        object_solids,
+                        object_solids_c_buf,
+                        object_solids_c_stride,
+                        object_solids_c_count,
+                        player_x,
+                        player_y,
+                        player_w,
+                        player_h,
+                        move_x,
+                        vel_y,
+                        gravity,
+                        fall_speed_max,
+                        max_player_x,
+                    )
+                    player_x = int(player_native_result[0])
+                    player_y = int(player_native_result[1])
+                    vel_y = int(player_native_result[2])
                     update_part_t0 = _profile_update_part(prof_update_break_us, 5, update_part_t0)
 
                     oi = 0

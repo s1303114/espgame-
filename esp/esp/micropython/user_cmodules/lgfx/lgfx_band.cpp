@@ -1408,6 +1408,32 @@ static inline bool submit_ctx_bool(mp_obj_t obj) {
     return mp_obj_is_true(obj);
 }
 
+static bool submit_ctx_has_active_monk_intro(mp_obj_t encounters_obj) {
+    if (encounters_obj == mp_const_none || !mp_obj_is_true(encounters_obj)) {
+        return false;
+    }
+    size_t encounter_count = 0;
+    mp_obj_t *encounters = nullptr;
+    mp_obj_get_array(encounters_obj, &encounter_count, &encounters);
+    for (size_t i = 0; i < encounter_count; ++i) {
+        mp_obj_t encounter = encounters[i];
+        if (encounter == mp_const_none || !mp_obj_is_exact_type(encounter, &mp_type_dict)) {
+            continue;
+        }
+        mp_map_t *map = mp_obj_dict_get_map(encounter);
+        mp_map_elem_t *elem = mp_map_lookup(map, MP_OBJ_NEW_QSTR(MP_QSTR_state), MP_MAP_LOOKUP);
+        if (!elem || elem->value == MP_OBJ_NULL || !mp_obj_is_str(elem->value)) {
+            continue;
+        }
+        size_t state_len = 0;
+        const char *state = mp_obj_str_get_data(elem->value, &state_len);
+        if (state_len == 10 && memcmp(state, "intro_drop", 10) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static constexpr int32_t kSubmitMonkOrbCount = 5;
 
 static inline uint16_t submit_ctx_rd_u16(const uint8_t *p) {
@@ -1899,6 +1925,9 @@ static mp_obj_t lgfx_submit_native_band_frame(size_t n_args, const mp_obj_t *arg
     mp_obj_t *ctx = nullptr;
     mp_obj_get_array(args[0], &ctx_len, &ctx);
     if (ctx_len < 108 || ctx == nullptr) {
+        return mp_const_false;
+    }
+    if (submit_ctx_has_active_monk_intro(ctx[25])) {
         return mp_const_false;
     }
     if (g_tail_wait_state.active) {
