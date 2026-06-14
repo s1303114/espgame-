@@ -264,6 +264,65 @@ static void compose_atlas_region_band(
     }
 }
 
+static void compose_map2_arrow_region_band(
+    uint8_t *dst,
+    int32_t dst_w,
+    int32_t dst_h,
+    int32_t band_top,
+    int16_t wx,
+    int16_t wy,
+    const uint8_t *atlas,
+    int32_t atlas_w,
+    int32_t atlas_h,
+    int32_t src_x,
+    int32_t src_y,
+    int32_t src_w,
+    int32_t src_h,
+    int32_t transparent_key
+) {
+    if (!atlas || atlas_w <= 0 || atlas_h <= 0 || src_w <= 0 || src_h <= 0) {
+        return;
+    }
+    if (src_x < 0 || src_y < 0 || src_x + src_w > atlas_w || src_y + src_h > atlas_h) {
+        return;
+    }
+
+    int32_t dx = (int32_t)wx;
+    int32_t dy = (int32_t)wy - band_top;
+    int32_t src_x0 = 0;
+    int32_t src_y0 = 0;
+    int32_t vis_w = src_w;
+    int32_t vis_h = src_h;
+    if (dx < 0) { src_x0 = -dx; vis_w -= src_x0; dx = 0; }
+    if (dy < 0) { src_y0 = -dy; vis_h -= src_y0; dy = 0; }
+    if (dx + vis_w > dst_w) vis_w = dst_w - dx;
+    if (dy + vis_h > dst_h) vis_h = dst_h - dy;
+    if (vis_w <= 0 || vis_h <= 0) {
+        return;
+    }
+
+    size_t atlas_row_bytes = (size_t)atlas_w * 2u;
+    size_t src_row_base = ((size_t)(src_y + src_y0) * (size_t)atlas_w + (size_t)(src_x + src_x0)) * 2u;
+    for (int32_t y = 0; y < vis_h; ++y) {
+        const uint8_t *src_row = atlas + src_row_base + ((size_t)y * atlas_row_bytes);
+        uint8_t *dst_row = dst + ((((size_t)(dy + y) * (size_t)dst_w) + (size_t)dx) * 2u);
+        for (int32_t x = 0; x < vis_w; ++x) {
+            size_t b = (size_t)x * 2u;
+            uint16_t px = (uint16_t)src_row[b] | ((uint16_t)src_row[b + 1] << 8);
+            if (transparent_key >= 0 && px == (uint16_t)transparent_key) {
+                continue;
+            }
+            if (px == 0x0000u) {
+                dst_row[b] = 0xFFu;
+                dst_row[b + 1] = 0xFFu;
+            } else {
+                dst_row[b] = src_row[b];
+                dst_row[b + 1] = src_row[b + 1];
+            }
+        }
+    }
+}
+
 static void compose_objects_band(
     uint8_t *dst,
     int32_t dst_w,
@@ -701,6 +760,62 @@ static void compose_elevator_scene_band(
     int32_t floor_middle_w,
     int32_t floor_left_y,
     int32_t floor_right_y,
+    const uint8_t *floor_bow_sheet,
+    int32_t floor_bow_sheet_w,
+    int32_t floor_bow_sheet_h,
+    int32_t floor_bow_w,
+    int32_t floor_bow_h,
+    int32_t floor_bow_left_src_x,
+    int32_t floor_bow_right_src_x,
+    int32_t floor_bow_src_y,
+    int32_t floor_left_bow_x,
+    int32_t floor_left_bow_y,
+    int32_t floor_left_bow_enabled,
+    int32_t floor_right_bow_x,
+    int32_t floor_right_bow_y,
+    int32_t floor_right_bow_enabled,
+    int32_t floor_bow_right_src_y,
+    int32_t floor_arrow_w,
+    int32_t floor_arrow_h,
+    int32_t floor_arrow_src_x,
+    int32_t floor_arrow_src_y_right,
+    int32_t floor_arrow_src_y_left,
+    int32_t floor_arrow0_x,
+    int32_t floor_arrow0_y,
+    int32_t floor_arrow0_vx,
+    int32_t floor_arrow0_enabled,
+    int32_t floor_arrow1_x,
+    int32_t floor_arrow1_y,
+    int32_t floor_arrow1_vx,
+    int32_t floor_arrow1_enabled,
+    int32_t floor_arrow2_x,
+    int32_t floor_arrow2_y,
+    int32_t floor_arrow2_vx,
+    int32_t floor_arrow2_enabled,
+    int32_t floor_arrow3_x,
+    int32_t floor_arrow3_y,
+    int32_t floor_arrow3_vx,
+    int32_t floor_arrow3_enabled,
+    int32_t preview_enabled,
+    int32_t preview_x,
+    int32_t preview_y,
+    int32_t preview_w,
+    int32_t preview_h,
+    int32_t preview_kind,
+    int32_t collect_enabled,
+    int32_t collect_x,
+    int32_t collect_y,
+    int32_t collect_w,
+    int32_t collect_h,
+    int32_t collect_src_x,
+    int32_t collect_src_y,
+    int32_t star_enabled,
+    int32_t star_x,
+    int32_t star_y,
+    int32_t star_w,
+    int32_t star_h,
+    int32_t star_src_x,
+    int32_t star_src_y,
     const uint8_t *sprite,
     int32_t sprite_w,
     int32_t sprite_h,
@@ -732,6 +847,41 @@ static void compose_elevator_scene_band(
         compose_sprite_band(dst, dst_w, dst_h, floor_x, floor_y - band_y, floor, floor_w, floor_h, -1);
     }
     compose_atlas_region_band(dst, dst_w, dst_h, 0, band_y, (int16_t)lever_x, (int16_t)lever_y, object_atlas, object_atlas_w, object_atlas_h, lever_src_x, lever_src_y, lever_w, lever_h, transparent_key);
+    if (preview_enabled && object_atlas && object_atlas_w > 0 && object_atlas_h > 0 && preview_w > 0 && preview_h > 0 && preview_kind != 0) {
+        int32_t draw_x = preview_x + (preview_w / 2) - (kSwapPreviewW / 2);
+        int32_t draw_y = preview_y + (preview_h / 2) - (kSwapPreviewH / 2);
+        if ((kSwapPreviewSrcX + kSwapPreviewW) <= object_atlas_w && (kSwapPreviewSrcY + kSwapPreviewH) <= object_atlas_h) {
+            compose_atlas_region_band(dst, dst_w, dst_h, 0, band_y, (int16_t)draw_x, (int16_t)draw_y, object_atlas, object_atlas_w, object_atlas_h, kSwapPreviewSrcX, kSwapPreviewSrcY, kSwapPreviewW, kSwapPreviewH, transparent_key);
+        }
+    }
+    if (floor_bow_sheet && floor_bow_w > 0 && floor_bow_h > 0 && floor_bow_sheet_w > 0 && floor_bow_sheet_h > 0) {
+        if (floor_left_bow_enabled) {
+            compose_atlas_region_band(dst, dst_w, dst_h, 0, band_y, (int16_t)floor_left_bow_x, (int16_t)floor_left_bow_y, floor_bow_sheet, floor_bow_sheet_w, floor_bow_sheet_h, floor_bow_left_src_x, floor_bow_src_y, floor_bow_w, floor_bow_h, transparent_key);
+        }
+        if (floor_right_bow_enabled) {
+            compose_atlas_region_band(dst, dst_w, dst_h, 0, band_y, (int16_t)floor_right_bow_x, (int16_t)floor_right_bow_y, floor_bow_sheet, floor_bow_sheet_w, floor_bow_sheet_h, floor_bow_right_src_x, floor_bow_right_src_y, floor_bow_w, floor_bow_h, transparent_key);
+        }
+        if (floor_arrow_w > 0 && floor_arrow_h > 0) {
+            if (floor_arrow0_enabled) {
+                compose_map2_arrow_region_band(dst, dst_w, dst_h, band_y, (int16_t)floor_arrow0_x, (int16_t)floor_arrow0_y, object_atlas, object_atlas_w, object_atlas_h, floor_arrow_src_x, floor_arrow0_vx < 0 ? floor_arrow_src_y_left : floor_arrow_src_y_right, floor_arrow_w, floor_arrow_h, transparent_key);
+            }
+            if (floor_arrow1_enabled) {
+                compose_map2_arrow_region_band(dst, dst_w, dst_h, band_y, (int16_t)floor_arrow1_x, (int16_t)floor_arrow1_y, object_atlas, object_atlas_w, object_atlas_h, floor_arrow_src_x, floor_arrow1_vx < 0 ? floor_arrow_src_y_left : floor_arrow_src_y_right, floor_arrow_w, floor_arrow_h, transparent_key);
+            }
+            if (floor_arrow2_enabled) {
+                compose_map2_arrow_region_band(dst, dst_w, dst_h, band_y, (int16_t)floor_arrow2_x, (int16_t)floor_arrow2_y, object_atlas, object_atlas_w, object_atlas_h, floor_arrow_src_x, floor_arrow2_vx < 0 ? floor_arrow_src_y_left : floor_arrow_src_y_right, floor_arrow_w, floor_arrow_h, transparent_key);
+            }
+            if (floor_arrow3_enabled) {
+                compose_map2_arrow_region_band(dst, dst_w, dst_h, band_y, (int16_t)floor_arrow3_x, (int16_t)floor_arrow3_y, object_atlas, object_atlas_w, object_atlas_h, floor_arrow_src_x, floor_arrow3_vx < 0 ? floor_arrow_src_y_left : floor_arrow_src_y_right, floor_arrow_w, floor_arrow_h, transparent_key);
+            }
+        }
+    }
+    if (collect_enabled && object_atlas && collect_w > 0 && collect_h > 0 && object_atlas_w > 0 && object_atlas_h > 0) {
+        compose_atlas_region_band(dst, dst_w, dst_h, 0, band_y, (int16_t)collect_x, (int16_t)collect_y, object_atlas, object_atlas_w, object_atlas_h, collect_src_x, collect_src_y, collect_w, collect_h, transparent_key);
+    }
+    if (star_enabled && object_atlas && star_w > 0 && star_h > 0 && object_atlas_w > 0 && object_atlas_h > 0) {
+        compose_atlas_region_band(dst, dst_w, dst_h, 0, band_y, (int16_t)star_x, (int16_t)star_y, object_atlas, object_atlas_w, object_atlas_h, star_src_x, star_src_y, star_w, star_h, transparent_key);
+    }
     int64_t t2 = esp_timer_get_time();
     compose_sprite_band(dst, dst_w, dst_h, sprite_x, sprite_y - band_y, sprite, sprite_w, sprite_h, sprite_key);
     int64_t t3 = esp_timer_get_time();
@@ -2799,14 +2949,14 @@ static mp_obj_t lgfx_render_scene_bands_rgb565(size_t n_args, const mp_obj_t *ar
 MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lgfx_render_scene_bands_rgb565_obj, 28, 62, lgfx_render_scene_bands_rgb565);
 
 static mp_obj_t lgfx_render_elevator_scene_bands_rgb565(size_t n_args, const mp_obj_t *args) {
-    if (n_args != 26 && n_args != 35 && n_args != 41) {
-        mp_raise_ValueError(MP_ERROR_TEXT("need 26, 35 or 41 args"));
+    if (n_args != 26 && n_args != 35 && n_args != 41 && n_args != 55 && n_args != 77 && n_args != 83 && n_args != 84 && n_args != 91 && n_args != 98) {
+        mp_raise_ValueError(MP_ERROR_TEXT("need 26, 35, 41, 55, 77, 83, 84, 91 or 98 args"));
     }
     if (g_tail_wait_state.active) {
         mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("tail wait pending"));
     }
 
-    mp_buffer_info_t band_a_info, band_b_info, far_info, wall_info, door_info, floor_info, object_atlas_info, sprite_info;
+    mp_buffer_info_t band_a_info, band_b_info, far_info, wall_info, door_info, floor_info, object_atlas_info, floor_bow_sheet_info, sprite_info;
     mp_get_buffer_raise(args[0], &band_a_info, MP_BUFFER_RW);
     mp_get_buffer_raise(args[1], &band_b_info, MP_BUFFER_RW);
     int32_t screen_w = (int32_t)mp_obj_get_int(args[2]);
@@ -2822,8 +2972,14 @@ static mp_obj_t lgfx_render_elevator_scene_bands_rgb565(size_t n_args, const mp_
     mp_get_buffer_raise(args[12], &floor_info, MP_BUFFER_READ);
     int32_t floor_w = (int32_t)mp_obj_get_int(args[13]);
     int32_t floor_h = (int32_t)mp_obj_get_int(args[14]);
-    bool has_lever = n_args == 35 || n_args == 41;
-    bool has_floor_segments = n_args == 41;
+    bool has_lever = n_args == 35 || n_args == 41 || n_args == 55 || n_args == 77 || n_args == 83 || n_args == 84 || n_args == 91 || n_args == 98;
+    bool has_floor_segments = n_args == 41 || n_args == 55 || n_args == 77 || n_args == 83 || n_args == 84 || n_args == 91 || n_args == 98;
+    bool has_floor_bows = n_args == 55 || n_args == 77 || n_args == 83 || n_args == 84 || n_args == 91 || n_args == 98;
+    bool has_floor_bow_arrows = n_args == 77 || n_args == 83 || n_args == 84 || n_args == 91 || n_args == 98;
+    bool has_swap_preview = n_args == 83 || n_args == 84 || n_args == 91 || n_args == 98;
+    bool has_collectible = n_args == 91 || n_args == 98;
+    bool has_star = n_args == 98;
+    bool defer_final_wait = (n_args == 84 && mp_obj_is_true(args[83])) || (n_args == 91 && mp_obj_is_true(args[90])) || (n_args == 98 && mp_obj_is_true(args[97]));
     int32_t object_atlas_w = 0;
     int32_t object_atlas_h = 0;
     int32_t lever_x = 0;
@@ -2838,6 +2994,61 @@ static mp_obj_t lgfx_render_elevator_scene_bands_rgb565(size_t n_args, const mp_
     int32_t floor_middle_w = 0;
     int32_t floor_left_y = 208;
     int32_t floor_right_y = 208;
+    int32_t floor_bow_sheet_w = 0;
+    int32_t floor_bow_sheet_h = 0;
+    int32_t floor_bow_w = 0;
+    int32_t floor_bow_h = 0;
+    int32_t floor_bow_left_src_x = 0;
+    int32_t floor_bow_right_src_x = 0;
+    int32_t floor_bow_src_y = 0;
+    int32_t floor_left_bow_x = 0;
+    int32_t floor_left_bow_y = 0;
+    int32_t floor_left_bow_enabled = 0;
+    int32_t floor_right_bow_x = 0;
+    int32_t floor_right_bow_y = 0;
+    int32_t floor_right_bow_enabled = 0;
+    int32_t floor_bow_right_src_y = 0;
+    int32_t floor_arrow_w = 0;
+    int32_t floor_arrow_h = 0;
+    int32_t floor_arrow_src_x = 0;
+    int32_t floor_arrow_src_y_right = 0;
+    int32_t floor_arrow_src_y_left = 0;
+    int32_t floor_arrow0_x = 0;
+    int32_t floor_arrow0_y = 0;
+    int32_t floor_arrow0_vx = 0;
+    int32_t floor_arrow0_enabled = 0;
+    int32_t floor_arrow1_x = 0;
+    int32_t floor_arrow1_y = 0;
+    int32_t floor_arrow1_vx = 0;
+    int32_t floor_arrow1_enabled = 0;
+    int32_t floor_arrow2_x = 0;
+    int32_t floor_arrow2_y = 0;
+    int32_t floor_arrow2_vx = 0;
+    int32_t floor_arrow2_enabled = 0;
+    int32_t floor_arrow3_x = 0;
+    int32_t floor_arrow3_y = 0;
+    int32_t floor_arrow3_vx = 0;
+    int32_t floor_arrow3_enabled = 0;
+    int32_t preview_enabled = 0;
+    int32_t preview_x = 0;
+    int32_t preview_y = 0;
+    int32_t preview_w = 0;
+    int32_t preview_h = 0;
+    int32_t preview_kind = 0;
+    int32_t collect_enabled = 0;
+    int32_t collect_x = 0;
+    int32_t collect_y = 0;
+    int32_t collect_w = 0;
+    int32_t collect_h = 0;
+    int32_t collect_src_x = 0;
+    int32_t collect_src_y = 0;
+    int32_t star_enabled = 0;
+    int32_t star_x = 0;
+    int32_t star_y = 0;
+    int32_t star_w = 0;
+    int32_t star_h = 0;
+    int32_t star_src_x = 0;
+    int32_t star_src_y = 0;
     int32_t sprite_arg = 15;
     if (has_lever) {
         mp_get_buffer_raise(args[15], &object_atlas_info, MP_BUFFER_READ);
@@ -2865,6 +3076,73 @@ static mp_obj_t lgfx_render_elevator_scene_bands_rgb565(size_t n_args, const mp_
             sprite_arg = 24;
         }
     }
+    if (has_floor_bows) {
+        mp_get_buffer_raise(args[40], &floor_bow_sheet_info, MP_BUFFER_READ);
+        floor_bow_sheet_w = (int32_t)mp_obj_get_int(args[41]);
+        floor_bow_sheet_h = (int32_t)mp_obj_get_int(args[42]);
+        floor_bow_w = (int32_t)mp_obj_get_int(args[43]);
+        floor_bow_h = (int32_t)mp_obj_get_int(args[44]);
+        floor_bow_left_src_x = (int32_t)mp_obj_get_int(args[45]);
+        floor_bow_right_src_x = (int32_t)mp_obj_get_int(args[46]);
+        floor_bow_src_y = (int32_t)mp_obj_get_int(args[47]);
+        floor_left_bow_x = (int32_t)mp_obj_get_int(args[48]);
+        floor_left_bow_y = (int32_t)mp_obj_get_int(args[49]);
+        floor_left_bow_enabled = mp_obj_is_true(args[50]) ? 1 : 0;
+        floor_right_bow_x = (int32_t)mp_obj_get_int(args[51]);
+        floor_right_bow_y = (int32_t)mp_obj_get_int(args[52]);
+        floor_right_bow_enabled = mp_obj_is_true(args[53]) ? 1 : 0;
+        floor_bow_right_src_y = floor_bow_src_y;
+    }
+    if (has_floor_bow_arrows) {
+        floor_bow_right_src_y = (int32_t)mp_obj_get_int(args[54]);
+        floor_arrow_w = (int32_t)mp_obj_get_int(args[55]);
+        floor_arrow_h = (int32_t)mp_obj_get_int(args[56]);
+        floor_arrow_src_x = (int32_t)mp_obj_get_int(args[57]);
+        floor_arrow_src_y_right = (int32_t)mp_obj_get_int(args[58]);
+        floor_arrow_src_y_left = (int32_t)mp_obj_get_int(args[59]);
+        floor_arrow0_x = (int32_t)mp_obj_get_int(args[60]);
+        floor_arrow0_y = (int32_t)mp_obj_get_int(args[61]);
+        floor_arrow0_vx = (int32_t)mp_obj_get_int(args[62]);
+        floor_arrow0_enabled = mp_obj_is_true(args[63]) ? 1 : 0;
+        floor_arrow1_x = (int32_t)mp_obj_get_int(args[64]);
+        floor_arrow1_y = (int32_t)mp_obj_get_int(args[65]);
+        floor_arrow1_vx = (int32_t)mp_obj_get_int(args[66]);
+        floor_arrow1_enabled = mp_obj_is_true(args[67]) ? 1 : 0;
+        floor_arrow2_x = (int32_t)mp_obj_get_int(args[68]);
+        floor_arrow2_y = (int32_t)mp_obj_get_int(args[69]);
+        floor_arrow2_vx = (int32_t)mp_obj_get_int(args[70]);
+        floor_arrow2_enabled = mp_obj_is_true(args[71]) ? 1 : 0;
+        floor_arrow3_x = (int32_t)mp_obj_get_int(args[72]);
+        floor_arrow3_y = (int32_t)mp_obj_get_int(args[73]);
+        floor_arrow3_vx = (int32_t)mp_obj_get_int(args[74]);
+        floor_arrow3_enabled = mp_obj_is_true(args[75]) ? 1 : 0;
+    }
+    if (has_swap_preview) {
+        preview_enabled = mp_obj_is_true(args[76]) ? 1 : 0;
+        preview_x = (int32_t)mp_obj_get_int(args[77]);
+        preview_y = (int32_t)mp_obj_get_int(args[78]);
+        preview_w = (int32_t)mp_obj_get_int(args[79]);
+        preview_h = (int32_t)mp_obj_get_int(args[80]);
+        preview_kind = (int32_t)mp_obj_get_int(args[81]);
+    }
+    if (has_collectible) {
+        collect_enabled = mp_obj_is_true(args[82]) ? 1 : 0;
+        collect_x = (int32_t)mp_obj_get_int(args[83]);
+        collect_y = (int32_t)mp_obj_get_int(args[84]);
+        collect_w = (int32_t)mp_obj_get_int(args[85]);
+        collect_h = (int32_t)mp_obj_get_int(args[86]);
+        collect_src_x = (int32_t)mp_obj_get_int(args[87]);
+        collect_src_y = (int32_t)mp_obj_get_int(args[88]);
+    }
+    if (has_star) {
+        star_enabled = mp_obj_is_true(args[89]) ? 1 : 0;
+        star_x = (int32_t)mp_obj_get_int(args[90]);
+        star_y = (int32_t)mp_obj_get_int(args[91]);
+        star_w = (int32_t)mp_obj_get_int(args[92]);
+        star_h = (int32_t)mp_obj_get_int(args[93]);
+        star_src_x = (int32_t)mp_obj_get_int(args[94]);
+        star_src_y = (int32_t)mp_obj_get_int(args[95]);
+    }
     mp_get_buffer_raise(args[sprite_arg], &sprite_info, MP_BUFFER_READ);
     int32_t sprite_w = (int32_t)mp_obj_get_int(args[sprite_arg + 1]);
     int32_t sprite_h = (int32_t)mp_obj_get_int(args[sprite_arg + 2]);
@@ -2875,7 +3153,7 @@ static mp_obj_t lgfx_render_elevator_scene_bands_rgb565(size_t n_args, const mp_
     int32_t door_y = (int32_t)mp_obj_get_int(args[sprite_arg + 7]);
     int32_t door_enabled = mp_obj_is_true(args[sprite_arg + 8]) ? 1 : 0;
     int32_t transparent_key = (int32_t)mp_obj_get_int(args[sprite_arg + 9]);
-    bool verbose = mp_obj_is_true(args[sprite_arg + 10]);
+    bool verbose = mp_obj_is_true(args[has_star ? 96 : (has_collectible ? 89 : (has_swap_preview ? 82 : (has_floor_bow_arrows ? 76 : (has_floor_bows ? 54 : (sprite_arg + 10)))))]);
 
     if (screen_w <= 0 || screen_h <= 0 || band_h_cfg <= 0 || band_h_cfg > screen_h) {
         mp_raise_ValueError(MP_ERROR_TEXT("invalid dims"));
@@ -2902,6 +3180,11 @@ static mp_obj_t lgfx_render_elevator_scene_bands_rgb565(size_t n_args, const mp_
             mp_raise_ValueError(MP_ERROR_TEXT("object atlas buf too small"));
         }
     }
+    if (has_floor_bows) {
+        if (floor_bow_sheet_w <= 0 || floor_bow_sheet_h <= 0 || floor_bow_sheet_info.len < (size_t)floor_bow_sheet_w * (size_t)floor_bow_sheet_h * 2u) {
+            mp_raise_ValueError(MP_ERROR_TEXT("floor bow sheet buf too small"));
+        }
+    }
     if (sprite_info.len < (size_t)sprite_w * (size_t)sprite_h * 2u) {
         mp_raise_ValueError(MP_ERROR_TEXT("sprite buf too small"));
     }
@@ -2913,6 +3196,7 @@ static mp_obj_t lgfx_render_elevator_scene_bands_rgb565(size_t n_args, const mp_
     const uint8_t *door = (const uint8_t *)door_info.buf;
     const uint8_t *floor = (const uint8_t *)floor_info.buf;
     const uint8_t *object_atlas = has_lever ? (const uint8_t *)object_atlas_info.buf : nullptr;
+    const uint8_t *floor_bow_sheet = has_floor_bows ? (const uint8_t *)floor_bow_sheet_info.buf : nullptr;
     const uint8_t *sprite = (const uint8_t *)sprite_info.buf;
 
     static const uint32_t kProfileBands = 6;
@@ -2941,7 +3225,7 @@ static mp_obj_t lgfx_render_elevator_scene_bands_rgb565(size_t n_args, const mp_
     int32_t bh = band_h_cfg;
     if (y + bh > screen_h) bh = screen_h - y;
     int64_t ct0 = esp_timer_get_time();
-    compose_elevator_scene_band(band_a, screen_w, bh, y, far, wall, wall_w, wall_h, door, door_w, door_h, floor, floor_w, floor_h, object_atlas, object_atlas_w, object_atlas_h, lever_x, lever_y, lever_w, lever_h, lever_src_x, lever_src_y, floor_x, floor_y, floor_left_w, floor_middle_w, floor_left_y, floor_right_y, sprite, sprite_w, sprite_h, sprite_x, sprite_y, sprite_key, wall_scroll_y, door_y, door_enabled, transparent_key, &band_bg_us, &band_tilemap_us, &band_player_us);
+    compose_elevator_scene_band(band_a, screen_w, bh, y, far, wall, wall_w, wall_h, door, door_w, door_h, floor, floor_w, floor_h, object_atlas, object_atlas_w, object_atlas_h, lever_x, lever_y, lever_w, lever_h, lever_src_x, lever_src_y, floor_x, floor_y, floor_left_w, floor_middle_w, floor_left_y, floor_right_y, floor_bow_sheet, floor_bow_sheet_w, floor_bow_sheet_h, floor_bow_w, floor_bow_h, floor_bow_left_src_x, floor_bow_right_src_x, floor_bow_src_y, floor_left_bow_x, floor_left_bow_y, floor_left_bow_enabled, floor_right_bow_x, floor_right_bow_y, floor_right_bow_enabled, floor_bow_right_src_y, floor_arrow_w, floor_arrow_h, floor_arrow_src_x, floor_arrow_src_y_right, floor_arrow_src_y_left, floor_arrow0_x, floor_arrow0_y, floor_arrow0_vx, floor_arrow0_enabled, floor_arrow1_x, floor_arrow1_y, floor_arrow1_vx, floor_arrow1_enabled, floor_arrow2_x, floor_arrow2_y, floor_arrow2_vx, floor_arrow2_enabled, floor_arrow3_x, floor_arrow3_y, floor_arrow3_vx, floor_arrow3_enabled, preview_enabled, preview_x, preview_y, preview_w, preview_h, preview_kind, collect_enabled, collect_x, collect_y, collect_w, collect_h, collect_src_x, collect_src_y, star_enabled, star_x, star_y, star_w, star_h, star_src_x, star_src_y, sprite, sprite_w, sprite_h, sprite_x, sprite_y, sprite_key, wall_scroll_y, door_y, door_enabled, transparent_key, &band_bg_us, &band_tilemap_us, &band_player_us);
     uint32_t compose_delta = (uint32_t)(esp_timer_get_time() - ct0);
     compose_us += compose_delta;
     band_compose_each[0] = compose_delta;
@@ -2959,7 +3243,7 @@ static mp_obj_t lgfx_render_elevator_scene_bands_rgb565(size_t n_args, const mp_
         bh = band_h_cfg;
         if (y + bh > screen_h) bh = screen_h - y;
         ct0 = esp_timer_get_time();
-        compose_elevator_scene_band(next_buf, screen_w, bh, y, far, wall, wall_w, wall_h, door, door_w, door_h, floor, floor_w, floor_h, object_atlas, object_atlas_w, object_atlas_h, lever_x, lever_y, lever_w, lever_h, lever_src_x, lever_src_y, floor_x, floor_y, floor_left_w, floor_middle_w, floor_left_y, floor_right_y, sprite, sprite_w, sprite_h, sprite_x, sprite_y, sprite_key, wall_scroll_y, door_y, door_enabled, transparent_key, &band_bg_us, &band_tilemap_us, &band_player_us);
+        compose_elevator_scene_band(next_buf, screen_w, bh, y, far, wall, wall_w, wall_h, door, door_w, door_h, floor, floor_w, floor_h, object_atlas, object_atlas_w, object_atlas_h, lever_x, lever_y, lever_w, lever_h, lever_src_x, lever_src_y, floor_x, floor_y, floor_left_w, floor_middle_w, floor_left_y, floor_right_y, floor_bow_sheet, floor_bow_sheet_w, floor_bow_sheet_h, floor_bow_w, floor_bow_h, floor_bow_left_src_x, floor_bow_right_src_x, floor_bow_src_y, floor_left_bow_x, floor_left_bow_y, floor_left_bow_enabled, floor_right_bow_x, floor_right_bow_y, floor_right_bow_enabled, floor_bow_right_src_y, floor_arrow_w, floor_arrow_h, floor_arrow_src_x, floor_arrow_src_y_right, floor_arrow_src_y_left, floor_arrow0_x, floor_arrow0_y, floor_arrow0_vx, floor_arrow0_enabled, floor_arrow1_x, floor_arrow1_y, floor_arrow1_vx, floor_arrow1_enabled, floor_arrow2_x, floor_arrow2_y, floor_arrow2_vx, floor_arrow2_enabled, floor_arrow3_x, floor_arrow3_y, floor_arrow3_vx, floor_arrow3_enabled, preview_enabled, preview_x, preview_y, preview_w, preview_h, preview_kind, collect_enabled, collect_x, collect_y, collect_w, collect_h, collect_src_x, collect_src_y, star_enabled, star_x, star_y, star_w, star_h, star_src_x, star_src_y, sprite, sprite_w, sprite_h, sprite_x, sprite_y, sprite_key, wall_scroll_y, door_y, door_enabled, transparent_key, &band_bg_us, &band_tilemap_us, &band_player_us);
         compose_delta = (uint32_t)(esp_timer_get_time() - ct0);
         compose_us += compose_delta;
         if (bands < kProfileBands) {
@@ -2980,12 +3264,19 @@ static mp_obj_t lgfx_render_elevator_scene_bands_rgb565(size_t n_args, const mp_
         y += bh;
         next_buf = (next_buf == band_a) ? band_b : band_a;
     }
-    int64_t wt0 = esp_timer_get_time();
-    int64_t dma_done_t = submit_band_wait(prev_swap, &wait_us, &wait_dma_us, &end_us);
-    dma_elapsed_us += (uint32_t)(dma_done_t - dma_t0);
-    uint32_t wait_delta = (uint32_t)(esp_timer_get_time() - wt0);
-    if ((bands - 1) < kProfileBands) {
-        band_wait_each[bands - 1] = wait_delta;
+    if (defer_final_wait) {
+        g_tail_wait_state.active = true;
+        g_tail_wait_state.prev_swap = prev_swap;
+        g_tail_wait_state.wait_t0 = esp_timer_get_time();
+        g_tail_wait_state.dma_t0 = dma_t0;
+    } else {
+        int64_t wt0 = esp_timer_get_time();
+        int64_t dma_done_t = submit_band_wait(prev_swap, &wait_us, &wait_dma_us, &end_us);
+        dma_elapsed_us += (uint32_t)(dma_done_t - dma_t0);
+        uint32_t wait_delta = (uint32_t)(esp_timer_get_time() - wt0);
+        if ((bands - 1) < kProfileBands) {
+            band_wait_each[bands - 1] = wait_delta;
+        }
     }
 
     uint32_t total_us = (uint32_t)(esp_timer_get_time() - all_t0);
@@ -3022,7 +3313,7 @@ static mp_obj_t lgfx_render_elevator_scene_bands_rgb565(size_t n_args, const mp_
     };
     return mp_obj_new_tuple(29, out);
 }
-MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lgfx_render_elevator_scene_bands_rgb565_obj, 26, 41, lgfx_render_elevator_scene_bands_rgb565);
+MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lgfx_render_elevator_scene_bands_rgb565_obj, 26, 98, lgfx_render_elevator_scene_bands_rgb565);
 
 static int16_t lgfx_band_rd_i16(const uint8_t *p) {
     uint16_t v = (uint16_t)p[0] | ((uint16_t)p[1] << 8);
@@ -4106,16 +4397,6 @@ static mp_obj_t lgfx_update_monk_attack_native(size_t n_args, const mp_obj_t *ar
         int32_t dive_target_x = (int32_t)player_x + ((int32_t)player_w / 2) - (kMonkOrbW / 2);
 
         if (!row[8] || !row[11]) {
-            int32_t final_slot = (int32_t)(int8_t)atk[2];
-            if (phase == (uint8_t)kMonkOrbFinalPhaseDeath && final_slot >= 0 && final_slot < per_enemy_orbs) {
-                uint8_t *orb = orbs + ((size_t)((ei * per_enemy_orbs) + final_slot) * (size_t)orb_stride);
-                if (orb[0] == (uint8_t)kMonkOrbPlayerOrbitMode) {
-                    lgfx_final_update_player_orbit_orb(orb, final_slot, (int32_t)player_x, (int32_t)player_y, (int32_t)player_w, (int32_t)player_h);
-                    atk[1] = current_cd;
-                    changed += 1;
-                    continue;
-                }
-            }
             if (phase >= 4u && phase <= 6u) {
                 for (int32_t si = 0; si < per_enemy_orbs; ++si) {
                     uint8_t *orb = orbs + ((size_t)((ei * per_enemy_orbs) + si) * (size_t)orb_stride);
@@ -4197,7 +4478,7 @@ static mp_obj_t lgfx_update_monk_attack_native(size_t n_args, const mp_obj_t *ar
                     uint8_t *orb = orbs + ((size_t)((ei * per_enemy_orbs) + si) * (size_t)orb_stride);
                     uint8_t mode = orb[0];
                     if (si == final_slot) {
-                        final_ready = mode == (uint8_t)kMonkOrbPlayerOrbitMode || mode == (uint8_t)kMonkOrbFinalMode || mode == 4u;
+                        final_ready = mode == 8u || mode == (uint8_t)kMonkOrbPlayerOrbitMode || mode == (uint8_t)kMonkOrbFinalMode || mode == 4u;
                     } else if (mode != 8u) {
                         final_ready = false;
                     }
@@ -4344,23 +4625,19 @@ static mp_obj_t lgfx_update_monk_attack_native(size_t n_args, const mp_obj_t *ar
                     next_vy = 0;
                     next_rush_start_ms = 0u;
                     row[9] = 0u;
-                    int32_t player_orbit_angle = lgfx_final_angle_for_pos(
-                        (int32_t)player_x,
-                        (int32_t)player_y,
-                        (int32_t)player_w,
-                        (int32_t)player_h,
-                        ox,
-                        oy
-                    );
-                    next_angle_step = player_orbit_angle;
-                    int32_t player_center_x = (int32_t)player_x + ((int32_t)player_w / 2);
-                    int32_t player_center_y = (int32_t)player_y + ((int32_t)player_h / 2);
-                    lgfx_final_pos_from_center_for_radius(player_center_x, player_center_y, player_orbit_angle, kMonkOrbPlayerOrbitRadius, &ox, &oy);
-                    lgfx_attack_set_player_orbit_orb(final_orb, final_slot, ox, oy, player_orbit_angle);
+                    final_orb[0] = 8u;
+                    final_orb[1] = (uint8_t)(final_slot & 0xFF);
+                    final_orb[2] = 0u;
+                    final_orb[3] = 0u;
                     LGFX_MONK_ATTACK_LOGF("MONK_ATTACK_NATIVE_FINAL_DEATH enemy=%d slot=%d x=%d y=%d\n", (int)ei, (int)final_slot, (int)ox, (int)oy);
                 }
             } else if (phase == (uint8_t)kMonkOrbFinalPhaseDeath) {
-                lgfx_final_update_player_orbit_orb(final_orb, final_slot, (int32_t)player_x, (int32_t)player_y, (int32_t)player_w, (int32_t)player_h);
+                if (final_orb[0] != 8u) {
+                    final_orb[0] = 8u;
+                    final_orb[1] = (uint8_t)(final_slot & 0xFF);
+                    final_orb[2] = 0u;
+                    final_orb[3] = 0u;
+                }
                 next_total_step += 1;
                 next_local_step += 1;
                 if (next_local_step >= kMonkOrbFinalDeathFrames) {

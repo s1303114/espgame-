@@ -275,9 +275,9 @@ attack controller 另有一組 native buffer：
 - `20..21`: type 1 third dive drop target Y，目前固定 `160`
 - `22..23`: type 1 third dive top target Y，目前固定 `0`
 
-final one-orb phase 也使用同一組 attack row，但只在精確 `1 orbit + 4 lost` 時啟動，且不實作 monk defeated / encounter clear：
+final one-orb phase 也使用同一組 attack row，但只在精確 `1 orbit + 4 lost` 時啟動：
 
-- `phase 7`: final player orbit / prepare
+- `phase 7`: final orbit / prepare
 - `phase 8`: final lock，鎖定當下玩家中心位置
 - `phase 9`: final rush，orb 朝鎖定點衝撞
 - `phase 10`: final detached return，rush 結束後直線回到下一輪 angle 的 final orbit 半徑位置
@@ -392,8 +392,8 @@ monk 區域 respawn reintro 不會重建整組 enemy runtime。`_reset_monk_for_
 - path 由 native 依 orb 當下位置與角度產生，使用螢幕邊界反彈；Python render packer 會畫完整 `3` 秒預測路徑，最多拆成 `40` 個短線段 special descriptor（kind `3`）；path 可以穿過 Monk，不再避開 Monk 外擴矩形
 - path attack 不追玩家、不以玩家位置為中心；玩家只要離開黑線就能躲
 - attack 中若玩家 swap 最後一顆 orb，Python 只交換玩家/orb 位置，保留 mode `4` 並寫入 one-frame pending flag；native 下一幀進入 eject phase，orb 沿原本 velocity 同方向飛到鏡頭邊界，然後進 final detached return，回到下一輪 `angle_step` 的 radius 44 位置後重新產生 warning path
-- 若 final phase 中 orb 變成非 final/scripted mode，或 orb 數不再是 `1 orbit/final + 4 lost`，native attack 會取消 final phase 並回 idle
-- 目前沒有實作擊敗 Monk、最後 orb 消失、勝利獎勵或 encounter clear
+- 若 final phase 中 orb 變成非 final/scripted/lost death mode，或 orb 數不再是 `1 orbit/final + 4 lost`，native attack 會取消 final phase 並回 idle
+- final orb 擊中 Monk 後會進入 death phase，最後一顆 orb 直接轉成 `8 lost` 並消失；death animation 結束後 Monk body 隱藏並由 Python 標記 persistent defeated，不再產生 mode `10 player_orbit` 繞玩家公轉
 
 ### 5.7 第二色 damage
 

@@ -156,6 +156,14 @@ def run(max_frames=None):
     anim_idx = 0
     frame = 0
     drew_once = False
+    lever_a_latched = False
+    tail_inflight = False
+    tail_overlap_enabled = bool(getattr(config, "CAMERA_BAND_TAIL_OVERLAP_UPDATE", False)) and hasattr(_lgfx, "band_pipeline_tail_wait")
+    if tail_overlap_enabled:
+        try:
+            _lgfx.band_pipeline_tail_wait()
+        except Exception:
+            tail_overlap_enabled = False
     last_tick = ticks_ms() - int(getattr(config, "FRAME_MS", 16))
 
     while True:
@@ -167,16 +175,29 @@ def run(max_frames=None):
         last_tick = now
         input_system.update(now)
         input_lr = int(getattr(input_system, "joy_x_axis", 0))
+        btn_a_down = bool(getattr(input_system, "btn_a_down", False))
+        btn_b_down = bool(getattr(input_system, "btn_b_down", False))
+        btn_y_down = bool(getattr(input_system, "btn_y_down", False))
         if frame < int(getattr(config, "MAP2_INPUT_SETTLE_FRAMES", 8)):
             input_lr = 0
             btn_a_pressed = False
+            btn_b_down = False
+            btn_y_down = False
+            if not btn_a_down:
+                lever_a_latched = False
         else:
             btn_a_pressed = bool(getattr(input_system, "btn_a_pressed", False))
+            if btn_a_down:
+                if not lever_a_latched:
+                    btn_a_pressed = True
+                    lever_a_latched = True
+            else:
+                lever_a_latched = False
         if input_lr > 20:
             facing = 1
         elif input_lr < -20:
             facing = -1
-        player_x, player_y, anim_counter, anim_idx, _tail = map2_elevator.step(
+        player_x, player_y, anim_counter, anim_idx, tail_inflight = map2_elevator.step(
             _lgfx,
             scene_buf,
             scene_buf_back,
@@ -199,11 +220,26 @@ def run(max_frames=None):
             sprite_h,
             draw_off_x,
             draw_off_y,
-            False,
+            tail_inflight,
+            btn_b_down,
+            btn_y_down,
+            tail_overlap_enabled,
         )
+        if int(runtime.get("map2_respawn_reset_latch", 0)):
+            runtime["map2_respawn_reset_latch"] = 0
+            lever_a_latched = False
+            anim_counter = 0
+            anim_idx = 0
+            facing = 1
+            frame = 0
         if not drew_once:
             print("MAP2_STAGE_DRAW_OK door_y=%d wall_scroll_y=%d lever_on=%d player_x=%d player_y=%d" % (int(runtime.get("door_y", 0) or 0), int(runtime.get("wall_scroll_y", 0) or 0), 1 if bool(runtime.get("lever_on", False)) else 0, int(player_x), int(player_y)))
             drew_once = True
         frame += 1
         if max_frames is not None and frame >= int(max_frames):
             break
+    if tail_inflight and hasattr(_lgfx, "band_pipeline_tail_wait"):
+        try:
+            _lgfx.band_pipeline_tail_wait()
+        except Exception:
+            pass

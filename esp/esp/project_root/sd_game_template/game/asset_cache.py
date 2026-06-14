@@ -193,7 +193,9 @@ def preload_map2(config, screen_w=None, screen_h=None):
     floor_h = int(getattr(config, "MAP2_FLOOR_H", 32))
     object_atlas_w = int(getattr(config, "MAP2_OBJECT_ATLAS_W", getattr(config, "OBJECTS_ATLAS_W", 0)))
     object_atlas_h = int(getattr(config, "MAP2_OBJECT_ATLAS_H", getattr(config, "OBJECTS_ATLAS_H", 0)))
-    key = (sw, sh, wall_w, wall_h, door_w, door_h, floor_w, floor_h, object_atlas_w, object_atlas_h)
+    bow_sheet_w = int(getattr(config, "MAP2_FLOOR_BOW_SHEET_W", getattr(config, "ENEMY_SHEET_W", 0)))
+    bow_sheet_h = int(getattr(config, "MAP2_FLOOR_BOW_SHEET_H", getattr(config, "ENEMY_SHEET_H", 0)))
+    key = (sw, sh, wall_w, wall_h, door_w, door_h, floor_w, floor_h, object_atlas_w, object_atlas_h, bow_sheet_w, bow_sheet_h)
     if _map2_blobs is not None and _map2_key == key:
         return True
     far = _load_blob(getattr(config, "MAP2_FAR_RGB565_PATH", ""), sw * sh * 2)
@@ -204,7 +206,8 @@ def preload_map2(config, screen_w=None, screen_h=None):
         getattr(config, "MAP2_OBJECT_ATLAS_RGB565_PATH", getattr(config, "OBJECTS_ATLAS_RGB565_PATH", "")),
         object_atlas_w * object_atlas_h * 2,
     )
-    if far is None or wall is None or door is None or floor is None or object_atlas is None:
+    bow_sheet = _load_blob(getattr(config, "MAP2_FLOOR_BOW_SHEET_RGB565_PATH", getattr(config, "ENEMY_SHEET_RGB565_PATH", "")), bow_sheet_w * bow_sheet_h * 2)
+    if far is None or wall is None or door is None or floor is None or object_atlas is None or bow_sheet is None:
         _map2_blobs = None
         _map2_key = None
         print("MAP2_PRELOAD_FAIL")
@@ -223,6 +226,9 @@ def preload_map2(config, screen_w=None, screen_h=None):
         "object_atlas": object_atlas,
         "object_atlas_w": object_atlas_w,
         "object_atlas_h": object_atlas_h,
+        "floor_bow_sheet": bow_sheet,
+        "floor_bow_sheet_w": bow_sheet_w,
+        "floor_bow_sheet_h": bow_sheet_h,
     }
     _map2_key = key
     if _verbose(config):
@@ -248,6 +254,9 @@ def get_map2_runtime(config, screen_w, screen_h):
         "object_atlas": data["object_atlas"],
         "object_atlas_w": data["object_atlas_w"],
         "object_atlas_h": data["object_atlas_h"],
+        "floor_bow_sheet": data["floor_bow_sheet"],
+        "floor_bow_sheet_w": data["floor_bow_sheet_w"],
+        "floor_bow_sheet_h": data["floor_bow_sheet_h"],
         "wall_scroll_y": 0,
         "door_y": int(getattr(config, "MAP2_DOOR_START_Y", 128)),
         "door_enabled": True,
@@ -255,6 +264,40 @@ def get_map2_runtime(config, screen_w, screen_h):
         "lever_running": False,
         "floor_left_y": int(getattr(config, "MAP2_FLOOR_Y", 208)),
         "floor_right_y": int(getattr(config, "MAP2_FLOOR_Y", 208)),
+        "floor_left_bow": 0,
+        "floor_right_bow": 0,
+        "floor_left_bow_bound": 1,
+        "floor_right_bow_bound": 1,
+        "floor_left_bow_x": 0,
+        "floor_left_bow_y": 0,
+        "floor_right_bow_x": 0,
+        "floor_right_bow_y": 0,
+        "floor_left_bow_state": 0,
+        "floor_right_bow_state": 0,
+        "floor_left_bow_anim": 0,
+        "floor_right_bow_anim": 0,
+        "floor_left_bow_cooldown": int(getattr(config, "MAP2_FLOOR_BOW_SHOOT_INTERVAL", getattr(config, "ENEMY_SHOOT_INTERVAL", 15))),
+        "floor_right_bow_cooldown": int(getattr(config, "MAP2_FLOOR_BOW_SHOOT_INTERVAL", getattr(config, "ENEMY_SHOOT_INTERVAL", 15))),
+        "floor_left_bow_fired": 0,
+        "floor_right_bow_fired": 0,
+        "floor_left_bow_gap": int(getattr(config, "MAP2_FLOOR_BOW_MIN_GAP", 1)),
+        "floor_right_bow_gap": int(getattr(config, "MAP2_FLOOR_BOW_MIN_GAP", 1)),
+        "floor_bow_rng": int(getattr(config, "MAP2_FLOOR_BOW_RNG_SEED", 0x2468)),
+        "floor_bow_arrows": [],
+        "swap_hold_active": 0,
+        "swap_hold_far": 0,
+        "swap_hold_button": 0,
+        "swap_b_down_prev": 0,
+        "swap_y_down_prev": 0,
+        "swap_preview_active": 0,
+        "swap_preview_valid": 0,
+        "swap_preview_kind": 0,
+        "swap_preview_index": -1,
+        "swap_preview_x": 0,
+        "swap_preview_y": 0,
+        "swap_preview_w": 0,
+        "swap_preview_h": 0,
+        "swap_preview_d2": -1,
         "player_platform_slot": 1,
         "player_airborne": False,
         "player_vel_y": 0,

@@ -2,6 +2,7 @@ add_library(usermod_lgfx INTERFACE)
 
 target_sources(usermod_lgfx INTERFACE
     ${CMAKE_CURRENT_LIST_DIR}/lgfx_mp.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/lgfx_map2.cpp
     ${CMAKE_CURRENT_LIST_DIR}/lgfx_band.cpp
     ${CMAKE_CURRENT_LIST_DIR}/lgfx_world.cpp
     ${CMAKE_CURRENT_LIST_DIR}/lgfx_objects.cpp
